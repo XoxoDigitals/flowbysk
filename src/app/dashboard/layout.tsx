@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import SiteBrand from '@/components/SiteBrand';
 import { useTheme } from '@/components/ThemeProvider';
+import { useSiteSettings } from '@/components/SiteSettingsProvider';
 
 interface UserData {
   id: string;
@@ -53,6 +54,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const pathname = usePathname();
   const router = useRouter();
   const { theme, toggleTheme } = useTheme();
+  const { ticketSystemEnabled } = useSiteSettings();
   const [userData, setUserData] = useState<UserData | null>(null);
   const [loading, setLoading] = useState(true);
   const [notices, setNotices] = useState<NoticeItem[]>([]);
@@ -99,7 +101,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     { name: 'Create', href: '/dashboard/create', icon: Sparkles },
     { name: 'Library', href: '/dashboard/library', icon: ImageIcon },
     { name: 'Billing & plan', href: '/dashboard/billing', icon: CreditCard },
-    { name: 'Support', href: '/dashboard/support', icon: LifeBuoy },
+    ...(ticketSystemEnabled
+      ? [{ name: 'Support', href: '/dashboard/support', icon: LifeBuoy }]
+      : []),
     { name: 'Settings', href: '/dashboard/settings', icon: Settings },
   ];
 

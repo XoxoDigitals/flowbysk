@@ -118,6 +118,44 @@ export async function prepareProviderWorkerSession(
  * Reuse an existing Flow media id when it is already Ready in the target project.
  * Only re-upload when the media is missing, not ready, or from another session.
  */
+/**
+ * Poll the Python worker until a freshly (re)uploaded Flow media id reports READY.
+ * Best-effort: returns true when ready, false on timeout, but callers should still
+ * proceed on false (no worse than before). This closes the i2i race where ogiZ0b
+ * was called while the reference media was still ingesting, which Flow rejects with
+ * PUBLIC_ERROR_UNUSUAL_ACTIVITY (batchexecute e=4).
+ */
+export async function waitFlowMediaReady(
+  mediaId: string,
+  opts?: { attempts?: number; intervalMs?: number }
+): Promise<boolean> {
+  if (!/^[a-f0-9-]{36}$/i.test(mediaId)) return true; // not a Flow UUID — nothing to wait on
+  const attempts = opts?.attempts ?? 12; // ~4.8s max at 400ms
+  const intervalMs = opts?.intervalMs ?? 400;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(
+        `${PYTHON_WORKER_URL}/api/assets/${encodeURIComponent(mediaId)}/ready`,
+        { method: 'GET' }
+      );
+      if (res.ok) {
+        const d: any = await res.json().catch(() => ({}));
+        const ready =
+          d?.ready === true ||
+          d?.status === 'READY' ||
+          d?.asset?.ready === true ||
+          String(d?.asset?.status || '').toUpperCase() === 'READY';
+        if (ready) return true;
+      }
+    } catch {
+      /* retry */
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  console.warn(`[refreshFlowMediaId] media ${mediaId.slice(0, 8)} not READY after wait; proceeding`);
+  return false;
+}
+
 export async function refreshFlowMediaId(opts: {
   mediaId?: string | null;
   cookies?: string;
@@ -155,6 +193,7 @@ export async function refreshFlowMediaId(opts: {
         const newId = data?.asset?.id || data?.id;
         if (newId && typeof newId === 'string') {
           console.info(`[refreshFlowMediaId] staged ${mediaId} → ${newId.slice(0, 8)}`);
+          await waitFlowMediaReady(newId);
           return newId;
         }
       } else {
@@ -247,6 +286,7 @@ export async function refreshFlowMediaId(opts: {
     const newId = data?.asset?.id || data?.id;
     if (newId && typeof newId === 'string') {
       console.info(`[refreshFlowMediaId] ${mediaId.slice(0, 8)} → ${newId.slice(0, 8)}`);
+      await waitFlowMediaReady(newId);
       return newId;
     }
   } catch (e: any) {

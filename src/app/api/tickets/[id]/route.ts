@@ -1,6 +1,15 @@
 import { NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { getSiteSettings } from '@/lib/site-settings';
+
+const isStaff = (role?: string) => role === 'ADMIN' || role === 'SUPER_ADMIN';
+
+async function ticketsDisabledFor(role?: string) {
+  if (isStaff(role)) return false;
+  const settings = await getSiteSettings();
+  return !settings.ticketSystemEnabled;
+}
 
 export async function GET(
   req: Request,
@@ -8,6 +17,9 @@ export async function GET(
 ) {
   try {
     const session = await requireAuth(req);
+    if (await ticketsDisabledFor(session.role)) {
+      return NextResponse.json({ error: 'Support tickets are disabled' }, { status: 403 });
+    }
     const { id } = await params;
     const ticket = await prisma.supportTicket.findFirst({
       where: {
@@ -35,6 +47,9 @@ export async function POST(
 ) {
   try {
     const session = await requireAuth(req);
+    if (await ticketsDisabledFor(session.role)) {
+      return NextResponse.json({ error: 'Support tickets are disabled' }, { status: 403 });
+    }
     const { id } = await params;
     const body = await req.json();
     const message = String(body.message || '').trim();

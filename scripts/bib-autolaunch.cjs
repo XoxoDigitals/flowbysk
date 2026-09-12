@@ -4,7 +4,30 @@
  */
 const { PrismaClient, BrowserStatus } = require('@prisma/client');
 
+// Load repo-root .env for keys not already in the environment (dev/standalone runs;
+// PM2 injects env in prod so those values win).
+(function loadEnv() {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const file = path.join(__dirname, '..', '.env');
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const i = t.indexOf('=');
+      if (i < 1) continue;
+      const k = t.slice(0, i).trim();
+      let v = t.slice(i + 1).trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+      if (!(k in process.env)) process.env[k] = v;
+    }
+  } catch {
+    /* .env optional */
+  }
+})();
+
 const BIB = (process.env.BIB_WORKER_URL || 'http://127.0.0.1:8010').replace(/\/$/, '');
+const INTERNAL_SECRET = process.env.INTERNAL_API_SECRET || process.env.JWT_SECRET || '';
 const prisma = new PrismaClient();
 
 async function waitBib(timeoutMs = 60000) {
@@ -86,7 +109,10 @@ async function main() {
 
   const res = await fetch(`${BIB}/bootstrap`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(INTERNAL_SECRET ? { 'x-internal-secret': INTERNAL_SECRET } : {}),
+    },
     body: JSON.stringify(payload),
   });
   const data = await res.json();

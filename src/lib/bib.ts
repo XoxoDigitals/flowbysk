@@ -18,10 +18,16 @@ export function getBibPublicUrl() {
 
 export async function bibFetch(path: string, init?: RequestInit) {
   const url = `${getBibWorkerUrl()}${path.startsWith('/') ? path : `/${path}`}`;
+  // flow-bib gates its mutating/control routes on x-internal-secret. Send it so
+  // launch/disconnect/generate/etc. authenticate. In dev with no secret set,
+  // flow-bib falls back to localhost-only auth, so omitting it is still fine.
+  const internalSecret =
+    process.env.INTERNAL_API_SECRET || process.env.JWT_SECRET || '';
   const res = await fetch(url, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
+      ...(internalSecret ? { 'x-internal-secret': internalSecret } : {}),
       ...(init?.headers || {}),
     },
   });

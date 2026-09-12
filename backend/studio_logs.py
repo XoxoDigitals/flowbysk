@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from backend.env_util import get_env
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_FILE = DATA_DIR / "logs.json"
@@ -32,27 +34,24 @@ NEXT_INGEST_URL = os.environ.get(
 )
 
 
-def _load_dotenv_secret() -> str:
-    """Prefer INTERNAL_API_SECRET from env, else project .env, else shared default."""
-    from_env = (os.environ.get("INTERNAL_API_SECRET") or os.environ.get("JWT_SECRET") or "").strip()
-    if from_env:
-        return from_env
-    env_path = Path(__file__).resolve().parent.parent / ".env"
-    try:
-        if env_path.exists():
-            for line in env_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, val = line.partition("=")
-                if key.strip() in ("INTERNAL_API_SECRET", "JWT_SECRET"):
-                    return val.strip().strip('"').strip("'")
-    except Exception:
-        pass
-    return "google-flow-saas-super-secret-jwt-key-2026-production-ready"
+def _load_dotenv_secret() -> Optional[str]:
+    """Prefer INTERNAL_API_SECRET from env/.env, else JWT_SECRET. None if neither is set."""
+    return get_env("INTERNAL_API_SECRET", "JWT_SECRET")
 
 
 INTERNAL_SECRET = _load_dotenv_secret()
+_missing_secret_warned = False
+
+
+def _warn_missing_secret_once() -> None:
+    global _missing_secret_warned
+    if _missing_secret_warned:
+        return
+    _missing_secret_warned = True
+    logging.getLogger("studio_logs").warning(
+        "INTERNAL_API_SECRET / JWT_SECRET not configured — remote studio-log "
+        "shipping to Next is disabled (in-memory logs still work)."
+    )
 
 
 def set_request_identity(
@@ -113,6 +112,9 @@ def _persist() -> None:
 
 def _mirror_to_prisma(entry: Dict[str, Any]) -> None:
     """Best-effort POST to Next ingest so Admin Studio Logs can read Prisma rows."""
+    if not INTERNAL_SECRET:
+        _warn_missing_secret_once()
+        return
 
     def _post() -> None:
         try:

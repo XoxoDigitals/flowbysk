@@ -1,9 +1,29 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { cookies } from 'next/headers';
 import { prisma } from './prisma';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'google-flow-saas-fallback-secret-2026';
+function resolveJwtSecret(): string {
+  const fromEnv = process.env.JWT_SECRET;
+  if (fromEnv) return fromEnv;
+
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'JWT_SECRET environment variable is not set. Refusing to start in production without a configured secret.'
+    );
+  }
+
+  // Dev-only convenience: generate an ephemeral secret so local dev still works,
+  // but sessions will not persist across restarts and this is never used in production.
+  console.warn(
+    '[auth] JWT_SECRET is not set — using a random ephemeral secret for this process. ' +
+      'Existing sessions will be invalidated on every restart. Set JWT_SECRET in .env to persist sessions.'
+  );
+  return crypto.randomBytes(32).toString('hex');
+}
+
+const JWT_SECRET = resolveJwtSecret();
 
 export interface AuthSession {
   userId: string;

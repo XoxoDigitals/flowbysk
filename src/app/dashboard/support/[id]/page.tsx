@@ -2,8 +2,9 @@
 
 import { FormEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { ArrowLeft } from 'lucide-react';
+import { useSiteSettings } from '@/components/SiteSettingsProvider';
 
 type Message = {
   id: string;
@@ -21,6 +22,8 @@ type Ticket = {
 
 export default function DashboardTicketDetailPage() {
   const params = useParams();
+  const router = useRouter();
+  const { ticketSystemEnabled } = useSiteSettings();
   const id = String(params?.id || '');
   const [ticket, setTicket] = useState<Ticket | null>(null);
   const [reply, setReply] = useState('');
@@ -34,6 +37,10 @@ export default function DashboardTicketDetailPage() {
       setTicket(data.ticket);
     }
   };
+
+  useEffect(() => {
+    if (ticketSystemEnabled === false) router.replace('/dashboard');
+  }, [ticketSystemEnabled, router]);
 
   useEffect(() => {
     if (id) load();

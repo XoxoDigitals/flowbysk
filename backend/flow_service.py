@@ -29,6 +29,8 @@ import uuid
 import requests
 import websocket
 
+from backend.env_util import get_env, is_production
+
 from backend.flow_batchexecute import (
     BATCHEXECUTE_BASES,
     BATCHEXECUTE_PATH,
@@ -70,6 +72,94 @@ BATCHEXECUTE_META_FILE = DATA_DIR / "batchexecute_meta.json"
 UPLOADS_DIR = DATA_DIR / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 STAGED_META_FILE = UPLOADS_DIR / "staged_index.json"
+
+# ------------------------------------------------------------------------------
+# Cookie encryption at rest (settings.json persists the Google session cookie
+# jar; encrypt it on disk using Fernet, keyed off DATA_ENCRYPTION_KEY).
+# ------------------------------------------------------------------------------
+_ENC_PREFIX = "enc:v1:"
+_fernet_cache: Any = None
+_fernet_load_attempted = False
+_dev_plaintext_fallback_warned = False
+
+
+def _derive_fernet_key(raw_key: str) -> bytes:
+    """DATA_ENCRYPTION_KEY is base64url of 32 raw bytes; Fernet wants those 32
+    bytes re-encoded as a 44-char urlsafe-base64 string. Accept a value that's
+    already a valid 44-char Fernet key too (round-trips unchanged)."""
+    key_bytes = raw_key.encode("utf-8")
+    padded = key_bytes + b"=" * (-len(key_bytes) % 4)
+    decoded = base64.urlsafe_b64decode(padded)
+    if len(decoded) == 32:
+        return base64.urlsafe_b64encode(decoded)
+    # Not 32 raw bytes when decoded (e.g. already a Fernet key) — use as-is.
+    return padded
+
+
+def _get_fernet():
+    """Return a cached Fernet instance for DATA_ENCRYPTION_KEY, or None if unusable."""
+    global _fernet_cache, _fernet_load_attempted, _dev_plaintext_fallback_warned
+    if _fernet_load_attempted:
+        return _fernet_cache
+    _fernet_load_attempted = True
+    raw_key = get_env("DATA_ENCRYPTION_KEY")
+    if not raw_key:
+        if is_production():
+            raise RuntimeError(
+                "DATA_ENCRYPTION_KEY is not set. Required in production to encrypt "
+                "Google session cookies at rest."
+            )
+        if not _dev_plaintext_fallback_warned:
+            _dev_plaintext_fallback_warned = True
+            logger.warning(
+                "DATA_ENCRYPTION_KEY not set — cookies will be stored in PLAINTEXT "
+                "in data/settings.json. This fallback is for local dev only; set "
+                "DATA_ENCRYPTION_KEY before deploying."
+            )
+        return None
+    try:
+        from cryptography.fernet import Fernet
+
+        _fernet_cache = Fernet(_derive_fernet_key(raw_key))
+    except Exception as e:
+        logger.error("Failed to initialize cookie encryption (Fernet): %s", e)
+        _fernet_cache = None
+    return _fernet_cache
+
+
+def _encrypt_secret(value: str) -> str:
+    """Encrypt a string for on-disk storage. Returns plaintext unchanged if no
+    usable encryption key is configured (dev-only fallback, see _get_fernet)."""
+    if not value:
+        return value
+    f = _get_fernet()
+    if f is None:
+        return value
+    try:
+        return _ENC_PREFIX + f.encrypt(value.encode("utf-8")).decode("ascii")
+    except Exception as e:
+        logger.error("Failed to encrypt secret for storage: %s", e)
+        return value
+
+
+def _decrypt_secret(value: str) -> str:
+    """Decrypt a value previously written by _encrypt_secret. Legacy plaintext
+    (no marker prefix) is returned unchanged so existing cookies aren't lost."""
+    if not value or not isinstance(value, str) or not value.startswith(_ENC_PREFIX):
+        return value
+    f = _get_fernet()
+    if f is None:
+        logger.error(
+            "Encrypted setting found on disk but no encryption key is configured; "
+            "cannot decrypt. Set DATA_ENCRYPTION_KEY."
+        )
+        return ""
+    try:
+        return f.decrypt(value[len(_ENC_PREFIX):].encode("ascii")).decode("utf-8")
+    except Exception as e:
+        logger.error("Failed to decrypt stored secret: %s", e)
+        return ""
+
 
 SESSION_URL = "https://labs.google/fx/api/auth/session"
 RECAPTCHA_SITE_KEY = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
@@ -1274,12 +1364,15 @@ class FlowService:
 
     def _load_initial_auth(self):
         """Try to load cookies and projects from settings.json."""
+        needs_cookie_migration = False
         if SETTINGS_FILE.exists():
             try:
                 self._settings_mtime = SETTINGS_FILE.stat().st_mtime
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self.cookies = data.get("cookies", "")
+                    raw_cookies = data.get("cookies", "") or ""
+                    needs_cookie_migration = bool(raw_cookies) and not raw_cookies.startswith(_ENC_PREFIX)
+                    self.cookies = _decrypt_secret(raw_cookies)
                     self.simulation_mode = data.get("simulation_mode", False)
                     if data.get("user_email"):
                         self.user_info = {"email": data.get("user_email")}
@@ -1305,6 +1398,14 @@ class FlowService:
                     self.projects = clean_projects
             except Exception as e:
                 logger.warning(f"Error reading settings.json: {e}")
+
+        # Transparent migration: legacy plaintext cookies on disk get re-saved
+        # (encrypted) immediately so they never sit unencrypted longer than one load.
+        if needs_cookie_migration and self.cookies:
+            try:
+                self._save_settings()
+            except Exception as e:
+                logger.warning("Could not migrate plaintext cookies to encrypted storage: %s", e)
 
         # Auto-ensure active project is selected from loaded projects
         try:
@@ -1335,7 +1436,9 @@ class FlowService:
     def _save_settings(self):
         try:
             data = {
-                "cookies": self.cookies,
+                # Encrypted at rest (Fernet, keyed off DATA_ENCRYPTION_KEY); self.cookies
+                # itself stays plaintext in memory. See _encrypt_secret/_decrypt_secret.
+                "cookies": _encrypt_secret(self.cookies),
                 "simulation_mode": self.simulation_mode,
                 "user_email": self.user_info.get("email", ""),
                 "token_expires": self.token_expires,

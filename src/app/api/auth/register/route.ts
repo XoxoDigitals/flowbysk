@@ -4,9 +4,20 @@ import { hashPassword, signToken } from '@/lib/auth';
 import { grantZeroPricePlanCredits } from '@/lib/credits';
 import { getSiteSettings } from '@/lib/site-settings';
 import { UserRole, UserStatus } from '@prisma/client';
+import { rateLimit, clientIpFromHeaders } from '@/lib/rateLimit';
+import { isValidEmail } from '@/lib/validate';
 
 export async function POST(req: Request) {
   try {
+    const ip = clientIpFromHeaders(req.headers);
+    const limit = rateLimit(`register:${ip}`, { limit: 5, windowMs: 60_000 });
+    if (!limit.allowed) {
+      return NextResponse.json(
+        { error: 'Too many registration attempts. Please try again shortly.' },
+        { status: 429, headers: { 'Retry-After': String(Math.ceil(limit.retryAfterMs / 1000)) } }
+      );
+    }
+
     const settings = await getSiteSettings();
     if (!settings.allowSignups) {
       return NextResponse.json(
@@ -15,18 +26,26 @@ export async function POST(req: Request) {
       );
     }
 
-    const body = await req.json();
-    const { email, password, name } = body;
+    const body = await req.json().catch(() => null);
+    const email = typeof body?.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const password = typeof body?.password === 'string' ? body.password : '';
+    const name = typeof body?.name === 'string' ? body.name.trim() : '';
 
-    if (!email || !password) {
+    if (!isValidEmail(email) || !password) {
       return NextResponse.json(
         { error: 'Email and password are required' },
         { status: 400 }
       );
     }
+    if (password.length < 8) {
+      return NextResponse.json(
+        { error: 'Password must be at least 8 characters' },
+        { status: 400 }
+      );
+    }
 
     const existing = await prisma.user.findUnique({
-      where: { email: email.toLowerCase().trim() },
+      where: { email },
     });
 
     if (existing) {
@@ -40,7 +59,7 @@ export async function POST(req: Request) {
 
     const user = await prisma.user.create({
       data: {
-        email: email.toLowerCase().trim(),
+        email,
         name: name || 'Creator',
         passwordHash,
         role: UserRole.CUSTOMER,
@@ -102,7 +121,7 @@ export async function POST(req: Request) {
   } catch (error: any) {
     console.error('Registration error:', error);
     return NextResponse.json(
-      { error: error.message || 'Internal server error' },
+      { error: 'Internal server error' },
       { status: 500 }
     );
   }

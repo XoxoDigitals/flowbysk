@@ -1,10 +1,22 @@
 import { NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { getSiteSettings } from '@/lib/site-settings';
+
+const isStaff = (role?: string) => role === 'ADMIN' || role === 'SUPER_ADMIN';
+
+async function ticketsDisabledFor(role?: string) {
+  if (isStaff(role)) return false;
+  const settings = await getSiteSettings();
+  return !settings.ticketSystemEnabled;
+}
 
 export async function GET(req: Request) {
   try {
     const session = await requireAuth(req);
+    if (await ticketsDisabledFor(session.role)) {
+      return NextResponse.json({ error: 'Support tickets are disabled' }, { status: 403 });
+    }
     const tickets = await prisma.supportTicket.findMany({
       where: { userId: session.userId },
       orderBy: { updatedAt: 'desc' },
@@ -25,6 +37,9 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const session = await requireAuth(req);
+    if (await ticketsDisabledFor(session.role)) {
+      return NextResponse.json({ error: 'Support tickets are disabled' }, { status: 403 });
+    }
     const body = await req.json();
     const subject = String(body.subject || '').trim();
     const message = String(body.message || '').trim();

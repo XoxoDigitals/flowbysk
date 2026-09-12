@@ -3,18 +3,15 @@ import { getOrCreateStudioUser } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { handleProviderAuthLost } from '@/lib/allocation';
 import { UserRole } from '@prisma/client';
+import { isInternalRequestAllowed } from '@/lib/internalAuth';
 
 /**
  * Called by flow-bib health loop when a Google session dies.
- * Header: x-internal-secret must match INTERNAL_API_SECRET or JWT_SECRET.
+ * Header: x-internal-secret must match INTERNAL_API_SECRET or JWT_SECRET
+ * (or the request must originate from localhost, as a dev convenience).
  */
 export async function POST(req: Request) {
-  const secret = req.headers.get('x-internal-secret') || '';
-  const expected =
-    process.env.INTERNAL_API_SECRET ||
-    process.env.JWT_SECRET ||
-    'google-flow-saas-super-secret-jwt-key-2026-production-ready';
-  if (!secret || secret !== expected) {
+  if (!isInternalRequestAllowed(req)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

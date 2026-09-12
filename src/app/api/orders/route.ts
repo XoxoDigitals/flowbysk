@@ -37,11 +37,17 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const auth = await requireAuth(req);
-    const body = await req.json();
-    const { planId, gateway, bankReference, proofImageUrl } = body;
+    const body = await req.json().catch(() => null);
+    const planId = typeof body?.planId === 'string' ? body.planId.trim() : '';
+    const gateway = typeof body?.gateway === 'string' ? body.gateway : undefined;
+    const bankReference = typeof body?.bankReference === 'string' ? body.bankReference.trim() : undefined;
+    const proofImageUrl = typeof body?.proofImageUrl === 'string' ? body.proofImageUrl.trim() : undefined;
 
     if (!planId) {
       return NextResponse.json({ error: 'Plan ID is required' }, { status: 400 });
+    }
+    if (gateway !== undefined && !['STRIPE', 'RESELLER', 'MANUAL_BANK'].includes(gateway)) {
+      return NextResponse.json({ error: 'Invalid payment gateway' }, { status: 400 });
     }
 
     const plan = await prisma.plan.findUnique({
@@ -192,8 +198,9 @@ export async function POST(req: Request) {
       order,
     });
   } catch (error: any) {
+    console.error('Order creation error:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to create order' },
+      { error: 'Failed to create order' },
       { status: 400 }
     );
   }

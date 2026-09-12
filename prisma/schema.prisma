@@ -585,6 +585,8 @@ model SiteSettings {
   contactEmail   String   @default("support@flowbysk.com")
   /// When false, public registration is disabled
   allowSignups   Boolean  @default(true)
+  /// When false, the support ticket system is hidden from end users
+  ticketSystemEnabled Boolean @default(true)
   updatedAt      DateTime @updatedAt
 }
 

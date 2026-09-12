@@ -123,7 +123,7 @@ export async function POST(req: Request) {
     }
 
     let project = clientProjectId
-      ? await prisma.project.findFirst({ where: { id: clientProjectId, userId: session.userId } })
+      ? await prisma.project.findFirst({ where: { id: clientProjectId, userId: session.userId, deletedAt: null } })
       : await prisma.project.findFirst({ where: { userId: session.userId, deletedAt: null } });
 
     if (!project) {

@@ -2,7 +2,9 @@
 
 import { FormEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { LifeBuoy, Plus } from 'lucide-react';
+import { useSiteSettings } from '@/components/SiteSettingsProvider';
 
 type Ticket = {
   id: string;
@@ -14,6 +16,8 @@ type Ticket = {
 };
 
 export default function DashboardSupportPage() {
+  const router = useRouter();
+  const { ticketSystemEnabled } = useSiteSettings();
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
   const [showNew, setShowNew] = useState(false);
@@ -33,6 +37,10 @@ export default function DashboardSupportPage() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (ticketSystemEnabled === false) router.replace('/dashboard');
+  }, [ticketSystemEnabled, router]);
 
   useEffect(() => {
     load();

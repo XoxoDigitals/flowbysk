@@ -1,5 +1,41 @@
+const fs = require('fs');
+const path = require('path');
 const { PrismaClient } = require('@prisma/client');
 const p = new PrismaClient();
+
+/** Tiny manual .env loader (mirrors ecosystem.config.cjs) — fills process.env for keys not already set. */
+function loadRootEnv() {
+  try {
+    const raw = fs.readFileSync(path.join(__dirname, '..', '.env'), 'utf8');
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const i = trimmed.indexOf('=');
+      if (i < 1) continue;
+      const key = trimmed.slice(0, i).trim();
+      let val = trimmed.slice(i + 1).trim();
+      if (
+        (val.startsWith('"') && val.endsWith('"')) ||
+        (val.startsWith("'") && val.endsWith("'"))
+      ) {
+        val = val.slice(1, -1);
+      }
+      if (!(key in process.env)) process.env[key] = val;
+    }
+  } catch {
+    /* .env optional */
+  }
+}
+loadRootEnv();
+
+const INTERNAL_SECRET = process.env.INTERNAL_API_SECRET || process.env.JWT_SECRET || '';
+if (!INTERNAL_SECRET) {
+  console.error(
+    '[smoke-bib] INTERNAL_API_SECRET (or JWT_SECRET) is not set in the repo-root .env — cannot authenticate against gated BiB endpoints.'
+  );
+  process.exit(1);
+}
+const authHeaders = { 'x-internal-secret': INTERNAL_SECRET };
 
 async function main() {
   const acc = await p.providerAccount.create({
@@ -17,7 +53,7 @@ async function main() {
   // Launch via BiB
   const launch = await fetch(`http://127.0.0.1:8010/accounts/${acc.id}/launch`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
     body: JSON.stringify({ maxSlots: 3 }),
   });
   const launchBody = await launch.json();
@@ -47,11 +83,6 @@ async function main() {
     },
   });
 
-  const secret =
-    process.env.INTERNAL_API_SECRET ||
-    process.env.JWT_SECRET ||
-    'google-flow-saas-super-secret-jwt-key-2026-production-ready';
-
   // Mark wasReady path: update acc then call redistribute directly via webhook after marking
   await p.providerAccount.update({
     where: { id: acc.id },
@@ -60,7 +91,7 @@ async function main() {
 
   const lost = await fetch('http://127.0.0.1:3000/api/internal/provider-auth-lost', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-internal-secret': secret },
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
     body: JSON.stringify({ accountId: acc.id, detail: 'test logout' }),
   });
   const lostBody = await lost.json();
@@ -80,7 +111,7 @@ async function main() {
   // Disconnect browser
   const disc = await fetch(`http://127.0.0.1:8010/accounts/${acc.id}/disconnect`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
     body: JSON.stringify({}),
   });
   console.log('disconnect', disc.status, await disc.json());

@@ -1,5 +1,10 @@
 const accountId = 'c7cf5f65-2862-40a3-a6df-6778827e99e7';
-const BIB = 'http://127.0.0.1:8010';
+const BIB = (process.env.BIB_WORKER_URL || 'http://127.0.0.1:8010').replace(/\/$/, '');
+const INTERNAL_SECRET = process.env.INTERNAL_API_SECRET || process.env.JWT_SECRET || '';
+const jsonHeaders = {
+  'Content-Type': 'application/json',
+  ...(INTERNAL_SECRET ? { 'x-internal-secret': INTERNAL_SECRET } : {}),
+};
 const { PrismaClient } = require('@prisma/client');
 const p = new PrismaClient();
 
@@ -7,7 +12,7 @@ const p = new PrismaClient();
   console.log('launch…');
   const launch = await (await fetch(`${BIB}/accounts/${accountId}/launch`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonHeaders,
     body: JSON.stringify({ maxSlots: 25 }),
   })).json();
   console.log('launch status', launch.status, 'auth', launch.authenticated);
@@ -15,7 +20,7 @@ const p = new PrismaClient();
   console.log('scrape/ensure…');
   const ensured = await fetch(`${BIB}/accounts/${accountId}/ensure-projects`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonHeaders,
     body: JSON.stringify({ maxSlots: 25 }),
   });
   const body = await ensured.json();

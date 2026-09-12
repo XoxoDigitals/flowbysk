@@ -24,6 +24,7 @@ export async function PUT(req: Request) {
       logoUrl: body.logoUrl === '' ? null : body.logoUrl,
       contactEmail: body.contactEmail,
       allowSignups: body.allowSignups,
+      ticketSystemEnabled: body.ticketSystemEnabled,
     });
     return NextResponse.json({ success: true, settings });
   } catch (error: any) {

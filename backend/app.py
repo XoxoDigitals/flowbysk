@@ -15,11 +15,13 @@ from typing import Any, Dict, List, Optional
 
 import re
 import requests
+from urllib.parse import urlparse
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from backend.env_util import get_env
 from backend.flow_service import flow_service, project_url
 from backend.studio_logs import (
     append_log,
@@ -81,14 +83,61 @@ def _backfill_studio_logs() -> None:
 
 threading.Thread(target=_backfill_studio_logs, daemon=True).start()
 
-# Enable CORS for local dev flexibility
+# CORS — explicit allowlist required alongside allow_credentials=True ("*" + credentials
+# is rejected by browsers anyway, and would leak session cookies cross-origin).
+_worker_allowed_origins = [
+    o.strip()
+    for o in (get_env("WORKER_ALLOWED_ORIGINS") or "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_worker_allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# ------------------------------------------------------------------------------
+# Lightweight in-memory rate limiter for the generation endpoints (no external
+# deps). Fixed window per identity: x-gflow-user-id header, else client IP.
+# ------------------------------------------------------------------------------
+_RATE_LIMIT_MAX = int(os.environ.get("GENERATE_RATE_LIMIT_MAX", "30"))
+_RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("GENERATE_RATE_LIMIT_WINDOW_SECONDS", "60"))
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets: Dict[str, "tuple[int, float]"] = {}
+
+
+def _rate_limit_identity(request: Request) -> str:
+    uid = (request.headers.get("x-gflow-user-id") or "").strip()
+    if uid:
+        return f"user:{uid}"
+    client_host = request.client.host if request.client else "unknown"
+    return f"ip:{client_host}"
+
+
+def _enforce_rate_limit(request: Request) -> None:
+    """Raise HTTP 429 if this identity has exceeded the generation rate limit."""
+    import time as _time
+
+    identity = _rate_limit_identity(request)
+    now = _time.time()
+    with _rate_limit_lock:
+        count, window_start = _rate_limit_buckets.get(identity, (0, now))
+        if now - window_start >= _RATE_LIMIT_WINDOW_SECONDS:
+            count, window_start = 0, now
+        count += 1
+        _rate_limit_buckets[identity] = (count, window_start)
+    if count > _RATE_LIMIT_MAX:
+        retry_after = max(1, int(_RATE_LIMIT_WINDOW_SECONDS - (now - window_start)))
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Rate limit exceeded ({_RATE_LIMIT_MAX} requests per "
+                f"{_RATE_LIMIT_WINDOW_SECONDS}s). Please slow down."
+            ),
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
 @app.middleware("http")
@@ -584,6 +633,7 @@ def _resolve_image_id(image_id: Optional[str], staged_id: Optional[str]) -> Opti
 @app.post("/api/generate/image")
 def generate_image(req: ImageGenerateRequest, request: Request) -> Dict[str, Any]:
     """Generate images via Google Flow Imagen 4."""
+    _enforce_rate_limit(request)
     _bind_studio_identity(request, getattr(req, "run_id", None))
     try:
         if getattr(req, "cookies", None) and str(req.cookies).strip():
@@ -629,6 +679,7 @@ def generate_image(req: ImageGenerateRequest, request: Request) -> Dict[str, Any
 @app.post("/api/generate/video")
 def generate_video(req: VideoGenerateRequest, request: Request) -> Dict[str, Any]:
     """Initiate Veo 3.1 video generation."""
+    _enforce_rate_limit(request)
     _bind_studio_identity(request, getattr(req, "run_id", None))
     try:
         if getattr(req, "cookies", None) and str(req.cookies).strip():
@@ -734,6 +785,7 @@ def check_video_status(asset_id: str) -> Dict[str, Any]:
 @app.post("/api/video/extend")
 def extend_video(req: VideoExtendRequest, request: Request) -> Dict[str, Any]:
     """Extend a video via last-frame extraction → upload → image-to-video (HTTP-first)."""
+    _enforce_rate_limit(request)
     _bind_studio_identity(request, getattr(req, "run_id", None))
     try:
         if getattr(req, "cookies", None) and str(req.cookies).strip():
@@ -903,6 +955,7 @@ def stream_video_endpoint(asset_id: str, upscaled: bool = Query(False)) -> Respo
 @app.post("/api/generate/image-to-video")
 def generate_image_to_video(req: ImageToVideoRequest, request: Request) -> Dict[str, Any]:
     """Animate an image or first/last frames into video using Veo 3.1."""
+    _enforce_rate_limit(request)
     _bind_studio_identity(request, getattr(req, "run_id", None))
     try:
         if getattr(req, "cookies", None) and str(req.cookies).strip():
@@ -967,6 +1020,7 @@ def generate_image_to_video(req: ImageToVideoRequest, request: Request) -> Dict[
 @app.post("/api/generate/image-to-image")
 def generate_image_to_image(req: ImageToImageRequest, request: Request) -> Dict[str, Any]:
     """Generate or edit an image with single or multiple reference inputs."""
+    _enforce_rate_limit(request)
     _bind_studio_identity(request, getattr(req, "run_id", None))
     try:
         if getattr(req, "cookies", None) and str(req.cookies).strip():
@@ -1116,6 +1170,7 @@ def delete_character_route(character_id: str) -> Dict[str, Any]:
 @app.post("/api/generate/ingredients")
 def generate_ingredients_route(req: IngredientGenerateRequest, request: Request) -> Dict[str, Any]:
     """Generate consistent video or image using multiple assets in Ingredient Mode."""
+    _enforce_rate_limit(request)
     _bind_studio_identity(request, getattr(req, "run_id", None))
     try:
         if getattr(req, "cookies", None) and str(req.cookies).strip():
@@ -1485,12 +1540,38 @@ def clear_all_assets() -> Dict[str, Any]:
     return {"success": True}
 
 
+# Exact hostnames (or hostname suffixes for the wildcard entries) allowed to receive
+# the Flow session cookie jar via the proxy. Substring matching on the raw URL let
+# any attacker-controlled URL containing "google" (e.g. evil.com/google) get cookies.
+_PROXY_COOKIE_HOST_ALLOWLIST = {
+    "aisandbox-pa.googleapis.com",
+    "flow.google.com",
+    "labs.google",
+    "flow-content.google",
+}
+_PROXY_COOKIE_HOST_SUFFIXES = (
+    ".googleusercontent.com",
+)
+
+
+def _proxy_target_allows_cookies(url: str) -> bool:
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    if host in _PROXY_COOKIE_HOST_ALLOWLIST:
+        return True
+    return any(host.endswith(suffix) for suffix in _PROXY_COOKIE_HOST_SUFFIXES)
+
+
 @app.get("/api/assets/proxy")
 def proxy_media(url: str = Query(..., description="Target media URL to proxy")):
     """CORS-safe proxy for Google Cloud Storage media streams."""
     try:
         headers = {}
-        if "google" in url and flow_service.cookies:
+        if flow_service.cookies and _proxy_target_allows_cookies(url):
             headers["Cookie"] = flow_service.cookies
 
         req = requests.get(url, headers=headers, stream=True, timeout=30)

@@ -5,6 +5,7 @@ export type PublicSiteSettings = {
   logoUrl: string | null;
   contactEmail: string;
   allowSignups: boolean;
+  ticketSystemEnabled: boolean;
 };
 
 const DEFAULTS: PublicSiteSettings = {
@@ -12,6 +13,7 @@ const DEFAULTS: PublicSiteSettings = {
   logoUrl: null,
   contactEmail: 'support@flowbysk.com',
   allowSignups: true,
+  ticketSystemEnabled: true,
 };
 
 export async function getSiteSettings(): Promise<PublicSiteSettings> {
@@ -24,6 +26,7 @@ export async function getSiteSettings(): Promise<PublicSiteSettings> {
         logoUrl: DEFAULTS.logoUrl,
         contactEmail: DEFAULTS.contactEmail,
         allowSignups: DEFAULTS.allowSignups,
+        ticketSystemEnabled: DEFAULTS.ticketSystemEnabled,
       },
       update: {},
     });
@@ -32,6 +35,7 @@ export async function getSiteSettings(): Promise<PublicSiteSettings> {
       logoUrl: row.logoUrl,
       contactEmail: row.contactEmail || DEFAULTS.contactEmail,
       allowSignups: row.allowSignups !== false,
+      ticketSystemEnabled: row.ticketSystemEnabled !== false,
     };
   } catch {
     return { ...DEFAULTS };
@@ -43,6 +47,7 @@ export async function updateSiteSettings(data: {
   logoUrl?: string | null;
   contactEmail?: string;
   allowSignups?: boolean;
+  ticketSystemEnabled?: boolean;
 }): Promise<PublicSiteSettings> {
   const row = await prisma.siteSettings.upsert({
     where: { id: 'default' },
@@ -52,6 +57,7 @@ export async function updateSiteSettings(data: {
       logoUrl: data.logoUrl ?? null,
       contactEmail: data.contactEmail?.trim() || DEFAULTS.contactEmail,
       allowSignups: data.allowSignups ?? DEFAULTS.allowSignups,
+      ticketSystemEnabled: data.ticketSystemEnabled ?? DEFAULTS.ticketSystemEnabled,
     },
     update: {
       ...(data.siteName !== undefined ? { siteName: data.siteName.trim() || DEFAULTS.siteName } : {}),
@@ -60,6 +66,9 @@ export async function updateSiteSettings(data: {
         ? { contactEmail: data.contactEmail.trim() || DEFAULTS.contactEmail }
         : {}),
       ...(data.allowSignups !== undefined ? { allowSignups: Boolean(data.allowSignups) } : {}),
+      ...(data.ticketSystemEnabled !== undefined
+        ? { ticketSystemEnabled: Boolean(data.ticketSystemEnabled) }
+        : {}),
     },
   });
   return {
@@ -67,5 +76,6 @@ export async function updateSiteSettings(data: {
     logoUrl: row.logoUrl,
     contactEmail: row.contactEmail,
     allowSignups: row.allowSignups !== false,
+    ticketSystemEnabled: row.ticketSystemEnabled !== false,
   };
 }

@@ -6,8 +6,9 @@ import { WalletType, LedgerType } from '@prisma/client';
 export async function POST(req: Request) {
   try {
     const session = await getOrCreateStudioUser(req);
-    const body = await req.json();
-    const { transactionId, reason } = body;
+    const body = await req.json().catch(() => ({}));
+    const transactionId = typeof body?.transactionId === 'string' ? body.transactionId.trim() : '';
+    const reason = typeof body?.reason === 'string' ? body.reason : undefined;
 
     if (!transactionId) {
       return NextResponse.json({ error: 'Transaction ID is required' }, { status: 400 });
@@ -68,6 +69,6 @@ export async function POST(req: Request) {
     });
   } catch (err: any) {
     console.error('Credit refund error:', err);
-    return NextResponse.json({ error: err.message || 'Refund failed' }, { status: 500 });
+    return NextResponse.json({ error: 'Refund failed' }, { status: 500 });
   }
 }

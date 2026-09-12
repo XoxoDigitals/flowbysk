@@ -31,6 +31,7 @@ export default function AdminSettingsPage() {
   const [logoUrl, setLogoUrl] = useState('');
   const [contactEmail, setContactEmail] = useState('');
   const [allowSignups, setAllowSignups] = useState(true);
+  const [ticketSystemEnabled, setTicketSystemEnabled] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -70,6 +71,7 @@ export default function AdminSettingsPage() {
           setLogoUrl(data.settings.logoUrl || '');
           setContactEmail(data.settings.contactEmail || '');
           setAllowSignups(data.settings.allowSignups !== false);
+          setTicketSystemEnabled(data.settings.ticketSystemEnabled !== false);
         }
       }
       if (gRes.ok) {
@@ -109,7 +111,7 @@ export default function AdminSettingsPage() {
       const res = await fetch('/api/admin/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ siteName, logoUrl, contactEmail, allowSignups }),
+        body: JSON.stringify({ siteName, logoUrl, contactEmail, allowSignups, ticketSystemEnabled }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Save failed');
@@ -285,6 +287,19 @@ export default function AdminSettingsPage() {
             on={allowSignups}
             onChange={setAllowSignups}
             label={allowSignups ? 'Open' : 'Closed'}
+          />
+        </div>
+        <div className="flex items-center justify-between rounded-[11px] border border-[var(--line)] bg-[var(--bg2)] px-3 py-3">
+          <div>
+            <p className="text-sm font-medium text-[var(--ink)]">Support ticket system</p>
+            <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
+              When off, the Support tab and ticket system are hidden from users.
+            </p>
+          </div>
+          <Toggle
+            on={ticketSystemEnabled}
+            onChange={setTicketSystemEnabled}
+            label={ticketSystemEnabled ? 'Enabled' : 'Disabled'}
           />
         </div>
         {message && <p className="text-sm text-[var(--a1)]">{message}</p>}

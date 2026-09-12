@@ -3,10 +3,8 @@
 import { FormEvent, useState } from 'react';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
-import { useSiteSettings } from '@/components/SiteSettingsProvider';
 
 export default function ContactPage() {
-  const { contactEmail } = useSiteSettings();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [subject, setSubject] = useState('Plans and billing');
@@ -50,16 +48,6 @@ export default function ContactPage() {
               business day.
             </p>
             <div className="mt-2 flex flex-col">
-              <div className="flex flex-col gap-1 border-t border-[var(--line)] py-[18px]">
-                <span className="font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">SALES</span>
-                <span className="text-base">{contactEmail || 'sales@flowbysk.com'}</span>
-              </div>
-              <div className="flex flex-col gap-1 border-t border-[var(--line)] py-[18px]">
-                <span className="font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">
-                  SUPPORT
-                </span>
-                <span className="text-base">{contactEmail || 'help@flowbysk.com'}</span>
-              </div>
               <div className="flex flex-col gap-1 border-y border-[var(--line)] py-[18px]">
                 <span className="font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">
                   COMMUNITY

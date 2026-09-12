@@ -50,7 +50,7 @@ export async function DELETE(
     const { id } = await params;
 
     const project = await prisma.project.findFirst({
-      where: { id, userId: session.userId },
+      where: { id, userId: session.userId, deletedAt: null },
     });
 
     if (!project) {

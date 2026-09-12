@@ -20,11 +20,35 @@ const {
 const HEADLESS = process.env.HEADLESS === 'false' ? false : true;
 const PROFILES_ROOT =
   process.env.BIB_PROFILES_DIR || path.resolve(__dirname, '..', '..', 'data', 'bib-profiles');
+const PROFILES_ROOT_RESOLVED = path.resolve(PROFILES_ROOT);
+
+/** Strip path separators / traversal segments so accountId can't escape PROFILES_ROOT. */
+function sanitizeAccountId(accountId) {
+  return String(accountId || '').replace(/[\\/]/g, '_').replace(/\.\./g, '_') || 'unknown';
+}
+
+/**
+ * Resolve a requested profile dir, rejecting (falling back to the safe default)
+ * anything that would land outside PROFILES_ROOT.
+ */
+function safeProfileDir(accountId, requestedDir) {
+  const safeId = sanitizeAccountId(accountId);
+  const fallback = path.join(PROFILES_ROOT_RESOLVED, safeId);
+  if (!requestedDir) return fallback;
+  const resolved = path.resolve(requestedDir);
+  if (resolved === PROFILES_ROOT_RESOLVED || resolved.startsWith(PROFILES_ROOT_RESOLVED + path.sep)) {
+    return resolved;
+  }
+  console.warn(
+    `[${accountId}] rejected profileDir outside PROFILES_ROOT: ${requestedDir} — using ${fallback}`
+  );
+  return fallback;
+}
 
 class AccountSession {
   constructor(accountId, opts = {}) {
     this.accountId = accountId;
-    this.profileDir = opts.profileDir || path.join(PROFILES_ROOT, accountId);
+    this.profileDir = safeProfileDir(accountId, opts.profileDir);
     this.maxSlots = opts.maxSlots || 5;
     this.status = 'STOPPED'; // STOPPED | STARTING | NEEDS_LOGIN | READY | ERROR
     this.browser = null;
@@ -42,6 +66,13 @@ class AccountSession {
     this.wasReady = false;
     this._labsTokenCache = null;
     this._bearerSniffInstalled = false;
+  }
+
+  /** Safely update profileDir post-construction (e.g. re-launch with a new opts.profileDir). */
+  setProfileDir(requestedDir) {
+    if (!requestedDir) return this.profileDir;
+    this.profileDir = safeProfileDir(this.accountId, requestedDir);
+    return this.profileDir;
   }
 
   broadcast(obj) {
@@ -736,6 +767,23 @@ class AccountSession {
         this.status = 'READY';
         this.wasReady = true;
         this.authLostNotified = false;
+        // Auto-refresh the aisandbox (labs) Bearer token while READY so the user never
+        // has to click "Refresh aisandbox token" manually. Fire-and-forget so it never
+        // blocks status refresh. Retries on each health cycle until a token is actually
+        // obtained (an early attempt can fail before the labs session is warm), and is
+        // not marked done until success — then it only re-runs after the cache expires.
+        if (
+          typeof this.fetchLabsAccessToken === 'function' &&
+          !this._cachedAccessToken(false) &&
+          !this._labsAutofetchInFlight
+        ) {
+          this._labsAutofetchInFlight = true;
+          Promise.resolve(this.fetchLabsAccessToken({ force: true }))
+            .catch(() => {})
+            .finally(() => {
+              this._labsAutofetchInFlight = false;
+            });
+        }
         // try read email from page
         try {
           this.email = await this.page.evaluate(() => {
@@ -924,7 +972,31 @@ class AccountSession {
     return this.publicStatus();
   }
 
-  handleWsMessage(raw) {
+  /**
+   * Per-client inbound-input throttle: mouse-move is capped to ~1 per 16ms
+   * (still feels smooth, avoids CDP flooding) and all input events combined
+   * are capped at 200/s per client. Excess events are dropped silently.
+   * State lives on the ws object itself — cheap, no extra bookkeeping.
+   * Only gates inbound Input.* dispatch; screencast frame output is untouched.
+   */
+  _allowWsInput(ws, m) {
+    if (!ws) return true;
+    const now = Date.now();
+    const rl = ws._inputRl || (ws._inputRl = { windowStart: now, count: 0, lastMove: 0 });
+    if (now - rl.windowStart >= 1000) {
+      rl.windowStart = now;
+      rl.count = 0;
+    }
+    if (m.type === 'mouse' && m.event === 'mouseMoved') {
+      if (now - rl.lastMove < 16) return false;
+      rl.lastMove = now;
+    }
+    if (rl.count >= 200) return false;
+    rl.count += 1;
+    return true;
+  }
+
+  handleWsMessage(raw, ws) {
     if (!this.cdp) return;
     let m;
     try {
@@ -932,6 +1004,7 @@ class AccountSession {
     } catch {
       return;
     }
+    if (!this._allowWsInput(ws, m)) return;
     (async () => {
       try {
         if (m.type === 'mouse') {

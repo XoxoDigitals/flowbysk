@@ -114,7 +114,7 @@ export async function POST(req: Request) {
 
     // 2. Validate user owns project
     const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: session.userId },
+      where: { id: projectId, userId: session.userId, deletedAt: null },
     });
 
     if (!project) {

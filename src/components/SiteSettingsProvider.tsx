@@ -7,6 +7,8 @@ const defaults: PublicSiteSettings = {
   siteName: 'Flowbysk',
   logoUrl: null,
   contactEmail: 'support@flowbysk.com',
+  allowSignups: true,
+  ticketSystemEnabled: true,
 };
 
 const SiteSettingsContext = createContext<PublicSiteSettings>(defaults);

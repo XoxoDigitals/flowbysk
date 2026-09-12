@@ -4,11 +4,16 @@ import { prisma } from '@/lib/prisma';
 import { getModelPricing, resolveModelPricing } from '@/lib/credits';
 import { WalletType, LedgerType } from '@prisma/client';
 
+/** Thrown for expected, user-facing business errors — safe to surface as-is. */
+class InsufficientCreditsError extends Error {}
+
 export async function POST(req: Request) {
   try {
     const session = await getOrCreateStudioUser(req);
-    const body = await req.json();
-    const { model, prompt, type } = body;
+    const body = await req.json().catch(() => ({}));
+    const model = typeof body?.model === 'string' ? body.model : undefined;
+    const type = typeof body?.type === 'string' ? body.type : undefined;
+    const prompt = typeof body?.prompt === 'string' ? body.prompt : undefined;
 
     const pricing =
       (await resolveModelPricing(model)) ||
@@ -38,7 +43,7 @@ export async function POST(req: Request) {
 
       const available = wallet.balance - wallet.reserved;
       if (available < cost) {
-        throw new Error(
+        throw new InsufficientCreditsError(
           `Insufficient ${walletType} credits: needed ${cost}, available ${available}. Please upgrade or top-up.`
         );
       }
@@ -78,11 +83,12 @@ export async function POST(req: Request) {
       message: `Reserved ${cost} ${walletType} credits`,
     });
   } catch (err: any) {
-    console.warn('Credit deduction error:', err.message);
+    console.warn('Credit deduction error:', err);
+    const message = err instanceof InsufficientCreditsError ? err.message : 'Credit deduction failed';
     return NextResponse.json(
       {
         success: false,
-        error: err.message || 'Credit deduction failed',
+        error: message,
       },
       { status: 402 }
     );

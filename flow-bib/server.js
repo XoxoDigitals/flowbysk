@@ -8,6 +8,7 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const { AccountSession, PROFILES_ROOT } = require('./lib/AccountSession');
 const {
@@ -31,9 +32,53 @@ const {
   uid,
 } = require('./lib/helpers');
 
+/**
+ * Dev-only .env loader. PM2 (ecosystem.config.cjs) injects the repo-root .env
+ * into this process in production; in dev we're started via
+ * `npm --prefix flow-bib run start` and get nothing, so fill in any keys
+ * that aren't already set in the environment. Mirrors loadEnv() in
+ * ecosystem.config.cjs — kept tiny on purpose, no dependency added.
+ */
+(function loadRootEnv() {
+  try {
+    const fs = require('fs');
+    const envPath = path.join(__dirname, '..', '.env');
+    const raw = fs.readFileSync(envPath, 'utf8');
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const i = trimmed.indexOf('=');
+      if (i < 1) continue;
+      const key = trimmed.slice(0, i).trim();
+      let val = trimmed.slice(i + 1).trim();
+      if (
+        (val.startsWith('"') && val.endsWith('"')) ||
+        (val.startsWith("'") && val.endsWith("'"))
+      ) {
+        val = val.slice(1, -1);
+      }
+      if (!(key in process.env)) process.env[key] = val;
+    }
+  } catch {
+    /* .env optional — production gets its env from PM2 */
+  }
+})();
+
 const PORT = Number(process.env.BIB_PORT || process.env.PORT || 8010);
 const NEXT_URL = process.env.NEXT_PUBLIC_APP_URL || process.env.NEXT_URL || 'http://127.0.0.1:3000';
-const INTERNAL_SECRET = process.env.INTERNAL_API_SECRET || process.env.JWT_SECRET || 'google-flow-saas-super-secret-jwt-key-2026-production-ready';
+const INTERNAL_SECRET = process.env.INTERNAL_API_SECRET || process.env.JWT_SECRET || '';
+if (!INTERNAL_SECRET) {
+  if (process.env.NODE_ENV === 'production') {
+    console.error(
+      '[FATAL] INTERNAL_API_SECRET (or JWT_SECRET) is not set. Refusing to start in production without it.'
+    );
+    process.exit(1);
+  } else {
+    console.warn(
+      '[!] INTERNAL_API_SECRET/JWT_SECRET not set — dev mode will only accept requests from localhost. Set it in the repo-root .env to enable normal auth.'
+    );
+  }
+}
 const STATE_FILE =
   process.env.BIB_STATE_FILE ||
   path.resolve(__dirname, '..', 'data', 'bib-autolaunch.json');
@@ -50,7 +95,7 @@ function getOrCreate(accountId, opts = {}) {
   } else {
     if (opts.maxSlots) s.maxSlots = opts.maxSlots;
     if (Array.isArray(opts.projectIds)) s.projectIds = opts.projectIds;
-    if (opts.profileDir) s.profileDir = opts.profileDir;
+    if (opts.profileDir) s.setProfileDir(opts.profileDir);
   }
   return s;
 }
@@ -143,7 +188,56 @@ async function launchAccountEntry(a) {
   return { id: a.id, ok: true, ...st };
 }
 
-/** Restore browsers after BiB process restart — only accounts explicitly saved in state. */
+/**
+ * Fetch the authoritative account roster from the app (DB-backed).
+ * Retries while the Next app is still booting; returns null if unreachable so
+ * the caller can fall back to the local JSON cache.
+ */
+async function fetchRosterFromApp({ attempts = 20, delayMs = 1500 } = {}) {
+  const url = `${NEXT_URL.replace(/\/$/, '')}/api/internal/bib/roster`;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const r = await fetch(url, {
+        headers: INTERNAL_SECRET ? { 'x-internal-secret': INTERNAL_SECRET } : {},
+      });
+      if (r.ok) {
+        const data = await r.json().catch(() => null);
+        if (data && Array.isArray(data.accounts)) return data.accounts;
+      }
+    } catch {
+      /* app not reachable yet */
+    }
+    await new Promise((res) => setTimeout(res, delayMs));
+  }
+  return null;
+}
+
+/** Rewrite the local JSON cache to contain only the given account ids. */
+function pruneAutolaunchStateTo(ids) {
+  try {
+    const keep = new Set(ids);
+    const state = readAutolaunchState();
+    const next = state.accounts.filter((a) => keep.has(a.id));
+    if (next.length !== state.accounts.length) {
+      const fs = require('fs');
+      const pathMod = require('path');
+      fs.mkdirSync(pathMod.dirname(STATE_FILE), { recursive: true });
+      fs.writeFileSync(
+        STATE_FILE,
+        JSON.stringify({ updatedAt: new Date().toISOString(), accounts: next }, null, 2)
+      );
+      console.log(`[auto-restore] pruned local cache to ${next.length} account(s) from roster`);
+    }
+  } catch (e) {
+    console.warn('[state] prune failed:', e.message);
+  }
+}
+
+/**
+ * Restore browsers after BiB process restart. The DB (via the app roster) is the
+ * source of truth; the local bib-autolaunch.json is only a fallback for when the
+ * app is unreachable at boot. This prevents stale/orphan profiles from launching.
+ */
 async function autoRestoreAccounts() {
   if (!AUTO_RESTORE) {
     console.log('[auto-restore] skipped (BIB_AUTO_RESTORE=false)');
@@ -151,15 +245,21 @@ async function autoRestoreAccounts() {
   }
   const wanted = new Map();
 
-  for (const a of readAutolaunchState().accounts) {
-    if (a?.id) wanted.set(a.id, a);
+  const roster = await fetchRosterFromApp();
+  if (roster) {
+    for (const a of roster) if (a?.id) wanted.set(a.id, a);
+    console.log(`[auto-restore] roster from app (DB): ${wanted.size} account(s)`);
+    // Reconcile the local cache so orphan entries stop coming back.
+    pruneAutolaunchStateTo([...wanted.keys()]);
+  } else {
+    for (const a of readAutolaunchState().accounts) if (a?.id) wanted.set(a.id, a);
+    console.log(
+      `[auto-restore] app roster unavailable — falling back to local cache: ${wanted.size} account(s)`
+    );
   }
 
-  // Do NOT scan bib-profiles — leftover folders from deleted/test accounts
-  // were launching 5 browsers when only 1 account exists in admin.
-
   if (!wanted.size) {
-    console.log('[auto-restore] no saved accounts in bib-autolaunch.json');
+    console.log('[auto-restore] no accounts to restore');
     return;
   }
 
@@ -199,6 +299,28 @@ const app = express();
 app.use(express.json({ limit: '12mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+/**
+ * Gate for mutating/control routes (browser launch, account control, generation,
+ * shutdown, cookie export). Requires header x-internal-secret to match
+ * INTERNAL_SECRET via constant-time compare. If INTERNAL_SECRET is unset
+ * (dev only — production exits at boot instead), fall back to localhost-only.
+ */
+function requireInternalSecret(req, res, next) {
+  if (INTERNAL_SECRET) {
+    const provided = req.get('x-internal-secret') || '';
+    const a = Buffer.from(String(provided));
+    const b = Buffer.from(INTERNAL_SECRET);
+    const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+    if (!ok) return res.status(401).json({ error: 'unauthorized' });
+    return next();
+  }
+  // Dev fallback: no secret configured — only allow localhost callers.
+  const ip = req.ip || req.socket?.remoteAddress || '';
+  const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+  if (!isLocal) return res.status(401).json({ error: 'unauthorized (no INTERNAL_API_SECRET configured)' });
+  return next();
+}
+
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
@@ -211,7 +333,7 @@ app.get('/accounts', (_req, res) => {
   res.json({ accounts: [...pool.values()].map((s) => s.publicStatus()) });
 });
 
-app.post('/accounts/:id/launch', async (req, res) => {
+app.post('/accounts/:id/launch', requireInternalSecret, async (req, res) => {
   try {
     const id = req.params.id;
     const st = await launchAccountEntry({
@@ -227,7 +349,7 @@ app.post('/accounts/:id/launch', async (req, res) => {
   }
 });
 
-app.post('/accounts/:id/disconnect', async (req, res) => {
+async function disconnectHandler(req, res) {
   try {
     const s = pool.get(req.params.id);
     if (!s) {
@@ -241,7 +363,10 @@ app.post('/accounts/:id/disconnect', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
+}
+app.post('/accounts/:id/disconnect', requireInternalSecret, disconnectHandler);
+// Alias: some operators/scripts POST /stop; treat it as disconnect (no /stop route existed before).
+app.post('/accounts/:id/stop', requireInternalSecret, disconnectHandler);
 
 app.get('/accounts/:id/status', async (req, res) => {
   try {
@@ -256,6 +381,11 @@ app.get('/accounts/:id/status', async (req, res) => {
   }
 });
 
+// Viewer-operational endpoints (called by the account.html browser page, which
+// cannot carry x-internal-secret). Low-risk: they act on the already-signed-in
+// browser and never return cookies/tokens to the caller. The sensitive endpoints
+// (export-cookies, launch, bootstrap, shutdown, disconnect/stop, set-projects,
+// generate*, create-character) stay secret-gated below.
 app.post('/accounts/:id/navigate', async (req, res) => {
   try {
     const s = pool.get(req.params.id);
@@ -301,14 +431,14 @@ app.post('/accounts/:id/scrape-projects', async (req, res) => {
   }
 });
 
-app.post('/accounts/:id/set-projects', (req, res) => {
+app.post('/accounts/:id/set-projects', requireInternalSecret, (req, res) => {
   const s = getOrCreate(req.params.id);
   if (Array.isArray(req.body?.projectIds)) s.projectIds = req.body.projectIds.filter(Boolean);
   if (req.body?.maxSlots) s.maxSlots = Number(req.body.maxSlots);
   res.json({ success: true, ...s.publicStatus() });
 });
 
-app.get('/accounts/:id/export-cookies', async (req, res) => {
+app.get('/accounts/:id/export-cookies', requireInternalSecret, async (req, res) => {
   try {
     const s = pool.get(req.params.id);
     if (!s?.browser) return res.status(409).json({ error: 'not launched' });
@@ -338,7 +468,7 @@ app.get('/accounts/:id/export-cookies', async (req, res) => {
  * Create a Google Flow character entity (C4BZMd) using the live BiB Flow page WIZ `at`.
  * Optional imageMediaId attaches an already-uploaded Flow image (no AI portrait gen).
  */
-app.post('/create-character', async (req, res) => {
+app.post('/create-character', requireInternalSecret, async (req, res) => {
   const t0 = Date.now();
   try {
     const {
@@ -468,7 +598,7 @@ app.post('/accounts/:id/ensure-labs', async (req, res) => {
 });
 
 /** Single image generation via BiB (no CDP fetch). */
-app.post('/generate', async (req, res) => {
+app.post('/generate', requireInternalSecret, async (req, res) => {
   const t0 = Date.now();
   try {
     const {
@@ -597,7 +727,7 @@ app.post('/generate', async (req, res) => {
 });
 
 /** Parallel batch across projects (pre-mint serial, POST parallel). */
-app.post('/batch-run', async (req, res) => {
+app.post('/batch-run', requireInternalSecret, async (req, res) => {
   const t0 = Date.now();
   try {
     const {
@@ -677,7 +807,7 @@ app.post('/batch-run', async (req, res) => {
   }
 });
 
-app.post('/generate-video', async (req, res) => {
+app.post('/generate-video', requireInternalSecret, async (req, res) => {
   const t0 = Date.now();
   try {
     const {
@@ -954,7 +1084,7 @@ app.post('/generate-video', async (req, res) => {
 });
 
 /** Native Flow 1080p upsample via aisandbox (BiB page mint — no Python CDP). */
-app.post('/upsample-video', async (req, res) => {
+app.post('/upsample-video', requireInternalSecret, async (req, res) => {
   const t0 = Date.now();
   try {
     const {
@@ -1052,7 +1182,7 @@ app.post('/upsample-video', async (req, res) => {
 });
 
 /** One-shot poll for a submitted video mediaId (jwpduf + as29s). */
-app.post('/video-status', async (req, res) => {
+app.post('/video-status', requireInternalSecret, async (req, res) => {
   try {
     const { accountId, mediaId, projectId: preferredProject } = req.body || {};
     if (!accountId || !mediaId) {
@@ -1110,7 +1240,7 @@ app.post('/video-status', async (req, res) => {
 });
 
 /** Auto-launch many accounts on boot (called by startup script). */
-app.post('/bootstrap', async (req, res) => {
+app.post('/bootstrap', requireInternalSecret, async (req, res) => {
   const list = Array.isArray(req.body?.accounts) ? req.body.accounts : [];
   const results = [];
   for (const a of list) {
@@ -1145,7 +1275,7 @@ server.on('upgrade', (req, socket, head) => {
         /* ignore */
       }
     }
-    ws.on('message', (raw) => s.handleWsMessage(raw));
+    ws.on('message', (raw) => s.handleWsMessage(raw, ws));
     ws.on('close', () => s.wsClients.delete(ws));
   });
 });
@@ -1166,7 +1296,7 @@ async function gracefulClose(code = 0) {
 }
 process.on('SIGINT', () => gracefulClose(0));
 process.on('SIGTERM', () => gracefulClose(0));
-app.post('/shutdown', async (_req, res) => {
+app.post('/shutdown', requireInternalSecret, async (_req, res) => {
   res.json({ ok: true });
   gracefulClose(0);
 });

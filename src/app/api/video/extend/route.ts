@@ -62,10 +62,10 @@ export async function POST(req: Request) {
 
     let project =
       (job?.projectId
-        ? await prisma.project.findFirst({ where: { id: job.projectId, userId: session.userId } })
+        ? await prisma.project.findFirst({ where: { id: job.projectId, userId: session.userId, deletedAt: null } })
         : null) ||
       (asset?.projectId
-        ? await prisma.project.findFirst({ where: { id: asset.projectId, userId: session.userId } })
+        ? await prisma.project.findFirst({ where: { id: asset.projectId, userId: session.userId, deletedAt: null } })
         : null) ||
       (await prisma.project.findFirst({ where: { userId: session.userId, deletedAt: null } }));
 
