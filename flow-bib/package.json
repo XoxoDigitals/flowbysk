@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "install:chrome": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "express": "^4.22.2",

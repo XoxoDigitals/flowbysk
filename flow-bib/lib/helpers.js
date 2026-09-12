@@ -37,22 +37,72 @@ function cookieAllowed(name) {
 
 const WEB_SESSION = ['SID', 'HSID', 'APISID'];
 
+function _exists(p) {
+  try {
+    return !!(p && fs.existsSync(p));
+  } catch {
+    return false;
+  }
+}
+
+/** Walk Puppeteer cache for a downloaded chrome binary. */
+function findCachedPuppeteerChrome() {
+  const cacheRoot =
+    process.env.PUPPETEER_CACHE_DIR ||
+    path.join(process.env.HOME || '/root', '.cache', 'puppeteer');
+  if (!_exists(cacheRoot)) return null;
+  const chromeRoot = path.join(cacheRoot, 'chrome');
+  if (!_exists(chromeRoot)) return null;
+  let versions = [];
+  try {
+    versions = fs.readdirSync(chromeRoot);
+  } catch {
+    return null;
+  }
+  // Prefer newest folder name
+  versions.sort().reverse();
+  for (const ver of versions) {
+    const candidates = [
+      path.join(chromeRoot, ver, 'chrome-linux64', 'chrome'),
+      path.join(chromeRoot, ver, 'chrome-linux', 'chrome'),
+      path.join(chromeRoot, ver, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+      path.join(chromeRoot, ver, 'chrome-win64', 'chrome.exe'),
+    ];
+    for (const c of candidates) {
+      if (_exists(c)) return c;
+    }
+  }
+  return null;
+}
+
 function findChrome() {
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
+  const fromEnv = process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (_exists(fromEnv)) return fromEnv;
+
   const candidates = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
     '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
   ];
-  return candidates.find((p) => {
-    try {
-      return fs.existsSync(p);
-    } catch {
-      return false;
+  const system = candidates.find((p) => _exists(p));
+  if (system) return system;
+
+  try {
+    // eslint-disable-next-line global-require
+    const puppeteer = require('puppeteer');
+    if (typeof puppeteer.executablePath === 'function') {
+      const bundled = puppeteer.executablePath();
+      if (_exists(bundled)) return bundled;
     }
-  });
+  } catch {
+    /* ignore */
+  }
+
+  return findCachedPuppeteerChrome() || null;
 }
 
 const uid = () => crypto.randomUUID().toUpperCase();

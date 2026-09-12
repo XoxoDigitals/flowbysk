@@ -85,19 +85,35 @@ class AccountSession {
     this.authLostNotified = false;
     fs.mkdirSync(this.profileDir, { recursive: true });
 
-    this.browser = await puppeteer.launch({
-      headless: HEADLESS,
-      executablePath: findChrome() || undefined,
-      userDataDir: this.profileDir,
-      defaultViewport: { width: VIEW_W, height: VIEW_H },
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        `--window-size=${VIEW_W},${VIEW_H}`,
-      ],
-    });
+    const chromePath = findChrome();
+    if (!chromePath) {
+      const tip =
+        'Chrome not found. On the server run: cd /opt/flowbysk/flow-bib && npm run install:chrome';
+      this.status = 'ERROR';
+      this.lastError = tip;
+      throw new Error(tip);
+    }
+
+    try {
+      this.browser = await puppeteer.launch({
+        headless: HEADLESS,
+        executablePath: chromePath,
+        userDataDir: this.profileDir,
+        defaultViewport: { width: VIEW_W, height: VIEW_H },
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-blink-features=AutomationControlled',
+          `--window-size=${VIEW_W},${VIEW_H}`,
+        ],
+      });
+    } catch (e) {
+      this.status = 'ERROR';
+      this.lastError = e.message || String(e);
+      this.browser = null;
+      throw e;
+    }
 
     const pages = await this.browser.pages();
     this.page = pages[0] || (await this.browser.newPage());
