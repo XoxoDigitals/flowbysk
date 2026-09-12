@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 
 const SITE_KEY = process.env.RECAPTCHA_SITE_KEY || '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV';
