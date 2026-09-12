@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth';
 import { releaseProviderAccountIfIdle } from '@/lib/allocation';
 
-export async function POST(req?: Request) {
+export async function POST(req: Request) {
   try {
     const session = await getSessionUser(req);
     if (session?.userId) {
