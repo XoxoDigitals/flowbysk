@@ -952,16 +952,38 @@ class AccountSession {
             deltaY: m.deltaY || 0,
           });
         } else if (m.type === 'text') {
-          await this.cdp.send('Input.insertText', { text: m.text });
+          await this.cdp.send('Input.insertText', { text: String(m.text || '') });
         } else if (m.type === 'key') {
+          const keyCode = Number(m.windowsVirtualKeyCode || m.nativeVirtualKeyCode || m.keyCode || 0);
+          const text = typeof m.text === 'string' ? m.text : '';
+          const eventType = m.event === 'keyUp' ? 'keyUp' : m.event === 'char' ? 'char' : 'keyDown';
           const common = {
-            key: m.key,
-            code: m.code,
-            windowsVirtualKeyCode: m.keyCode,
-            nativeVirtualKeyCode: m.keyCode,
+            key: m.key || text || '',
+            code: m.code || '',
+            text: eventType === 'keyUp' ? '' : text,
+            unmodifiedText: eventType === 'keyUp' ? '' : text || m.unmodifiedText || '',
+            windowsVirtualKeyCode: keyCode,
+            nativeVirtualKeyCode: keyCode,
           };
-          await this.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', ...common });
-          await this.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common });
+
+          // Printable chars: insertText is most reliable for Google login fields
+          if (eventType === 'keyDown' && text && text.length === 1 && !m.code?.startsWith('Arrow')) {
+            await this.cdp.send('Input.insertText', { text });
+            return;
+          }
+
+          await this.cdp.send('Input.dispatchKeyEvent', { type: eventType, ...common });
+
+          // If client only sent one "key" packet (legacy), also fire keyUp
+          if (!m.event && eventType === 'keyDown') {
+            await this.cdp.send('Input.dispatchKeyEvent', {
+              type: 'keyUp',
+              key: common.key,
+              code: common.code,
+              windowsVirtualKeyCode: keyCode,
+              nativeVirtualKeyCode: keyCode,
+            });
+          }
         }
       } catch {
         /* ignore */

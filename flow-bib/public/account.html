@@ -15,6 +15,8 @@
   .pill.on { color:var(--ok); border-color:var(--ok); }
   .pill.off { color:var(--bad); border-color:var(--bad); }
   #screen { display:block; width:100%; max-height:70vh; background:#000; cursor:crosshair; }
+  #screen:focus { outline: 2px solid #3b82f6; outline-offset: -2px; }
+  #kb { position:fixed; left:-9999px; top:0; width:1px; height:1px; opacity:0; }
   .mut { color:var(--mut); font-size:12px; padding:8px; }
 </style>
 </head>
@@ -29,6 +31,7 @@
   <span id="projPill" class="pill">projects: —</span>
 </div>
 <img id="screen" alt="remote browser" tabindex="0" />
+<input id="kb" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
 <div class="mut" id="hint">Connect stream, then sign into Google on <b>flow.google.com</b> inside the remote browser. For multi-image / first+last video, click <b>Refresh aisandbox token</b> until it turns green. (labs.google tools UI redirects to Flow — do not use it.)</div>
 <script>
 const params = new URLSearchParams(location.search);
@@ -39,7 +42,13 @@ const $ = (id) => document.getElementById(id);
 let ws = null;
 let reconnectTimer = null;
 let intentionalClose = false;
+let streamActive = false;
 const screen = $('screen');
+const kb = $('kb');
+
+function focusCapture() {
+  try { kb.focus({ preventScroll: true }); } catch (_) { try { screen.focus(); } catch (__) {} }
+}
 
 function setPill(id, text, on) {
   const el = $(id);
@@ -52,7 +61,6 @@ async function pollStatus() {
   if (!accountId) return;
   try {
     const s = await (await fetch(`${BASE}/accounts/${encodeURIComponent(accountId)}/status`)).json();
-    // Flow UI login (avatar) ≠ BiB "authenticated" — needs WIZ at + SID/HSID/APISID cookies
     const signedIn = !!(s.authenticated || (s.at && s.hasWebSession) || s.status === 'READY');
     setPill('authPill', 'auth: ' + (signedIn ? 'signed in' : 'signed out'), signedIn);
     const n = Array.isArray(s.projectIds) ? s.projectIds.length : (s.projectCount || 0);
@@ -71,12 +79,14 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}${BASE}/ws/${encodeURIComponent(accountId)}`);
   ws.onopen = () => {
+    streamActive = true;
     setPill('connPill', 'stream: live', true);
     pollStatus();
+    focusCapture();
   };
   ws.onclose = () => {
+    streamActive = false;
     setPill('connPill', 'stream: offline', false);
-    // Screencast WS often drops on sleep / BiB restart / proxy idle — auto-reconnect
     if (!intentionalClose) {
       reconnectTimer = setTimeout(() => connect(), 1500);
     }
@@ -88,7 +98,6 @@ function connect() {
   };
 }
 $('connectBtn').onclick = connect;
-// Auto-connect so Admin iframe shows stream without an extra click
 if (accountId) connect();
 setInterval(pollStatus, 3000);
 pollStatus();
@@ -98,6 +107,7 @@ $('goFlow').onclick = async () => {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({})
   });
   setTimeout(pollStatus, 1500);
+  focusCapture();
 };
 
 $('ensureLabs').onclick = async () => {
@@ -116,6 +126,7 @@ $('ensureLabs').onclick = async () => {
   } catch (e) {
     setPill('labsPill', 'aisandbox: error', false);
   }
+  focusCapture();
 };
 
 function pt(e){ const r=screen.getBoundingClientRect(); return { x:(e.clientX-r.left)*(1280/r.width), y:(e.clientY-r.top)*(800/r.height) }; }
@@ -123,22 +134,44 @@ function send(o){ if(ws && ws.readyState===1) ws.send(JSON.stringify(o)); }
 let buttons=0;
 const BTN=['left','middle','right'];
 screen.addEventListener('mousemove', e=>{ const p=pt(e); send({type:'mouse',event:'mouseMoved',x:p.x,y:p.y,buttons}); });
-screen.addEventListener('mousedown', e=>{ e.preventDefault(); const p=pt(e); const b=BTN[e.button]||'left'; buttons|=(e.button===2?2:1); send({type:'mouse',event:'mousePressed',x:p.x,y:p.y,button:b,buttons,clickCount:1}); });
+screen.addEventListener('mousedown', e=>{ e.preventDefault(); focusCapture(); const p=pt(e); const b=BTN[e.button]||'left'; buttons|=(e.button===2?2:1); send({type:'mouse',event:'mousePressed',x:p.x,y:p.y,button:b,buttons,clickCount:1}); });
 screen.addEventListener('mouseup', e=>{ e.preventDefault(); const p=pt(e); const b=BTN[e.button]||'left'; buttons&=~(e.button===2?2:1); send({type:'mouse',event:'mouseReleased',x:p.x,y:p.y,button:b,buttons,clickCount:1}); });
 screen.addEventListener('contextmenu', e=>e.preventDefault());
 screen.addEventListener('wheel', e=>{ e.preventDefault(); const p=pt(e); send({type:'wheel',x:p.x,y:p.y,deltaX:e.deltaX,deltaY:e.deltaY}); }, {passive:false});
-screen.addEventListener('click', ()=> screen.focus());
+screen.addEventListener('click', ()=> focusCapture());
+
 const SPECIAL = new Set(['Enter','Backspace','Tab','Escape','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Delete','Home','End']);
-document.addEventListener('keydown', e=>{
-  if (document.activeElement !== screen && e.target !== screen) return;
+function onKey(e, eventName) {
+  if (!streamActive) return;
+  if (e.target && (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' && e.target.id !== 'kb')) {
+    if (e.target.tagName === 'BUTTON') return;
+  }
+  if (e.target && e.target.tagName === 'BUTTON') return;
   e.preventDefault();
-  send({ type:'key', event:'keyDown', key:e.key, code:e.code, text: SPECIAL.has(e.key) ? '' : e.key, unmodifiedText:e.key, windowsVirtualKeyCode:e.keyCode, nativeVirtualKeyCode:e.keyCode });
-});
-document.addEventListener('keyup', e=>{
-  if (document.activeElement !== screen && e.target !== screen) return;
-  e.preventDefault();
-  send({ type:'key', event:'keyUp', key:e.key, code:e.code, windowsVirtualKeyCode:e.keyCode, nativeVirtualKeyCode:e.keyCode });
-});
+  e.stopPropagation();
+  const printable = e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey;
+  send({
+    type: 'key',
+    event: eventName,
+    key: e.key,
+    code: e.code,
+    text: eventName === 'keyDown' && printable ? e.key : (SPECIAL.has(e.key) ? '' : ''),
+    unmodifiedText: printable ? e.key : '',
+    windowsVirtualKeyCode: e.keyCode || e.which || 0,
+    nativeVirtualKeyCode: e.keyCode || e.which || 0,
+  });
+}
+document.addEventListener('keydown', (e) => onKey(e, 'keyDown'), true);
+document.addEventListener('keyup', (e) => onKey(e, 'keyUp'), true);
+// Keep capture focused while streaming
+setInterval(() => {
+  if (!streamActive) return;
+  const t = document.activeElement;
+  if (t && (t.tagName === 'BUTTON' || (t.tagName === 'INPUT' && t.id !== 'kb'))) return;
+  if (t !== kb && t !== screen) focusCapture();
+}, 800);
+window.addEventListener('focus', focusCapture);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) focusCapture(); });
 </script>
 </body>
 </html>
