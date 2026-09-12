@@ -17,7 +17,7 @@ const {
   sleep,
 } = require('./helpers');
 
-const HEADLESS = process.env.HEADLESS === 'false' ? false : 'new';
+const HEADLESS = process.env.HEADLESS === 'false' ? false : true;
 const PROFILES_ROOT =
   process.env.BIB_PROFILES_DIR || path.resolve(__dirname, '..', '..', 'data', 'bib-profiles');
 
