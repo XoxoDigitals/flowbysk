@@ -1191,8 +1191,13 @@ server.listen(PORT, () => {
   console.log(`[✓] Flow BiB multi-account manager on http://127.0.0.1:${PORT}`);
   console.log(`    profiles: ${PROFILES_ROOT}`);
   console.log(`    state: ${STATE_FILE}`);
-  // Restore Chrome sessions after every BiB restart
+  // Ensure Chrome exists, then restore sessions
   setTimeout(() => {
-    autoRestoreAccounts().catch((e) => console.warn('[auto-restore]', e.message));
+    const { ensureChrome } = require('./lib/ensureChrome');
+    ensureChrome()
+      .then(() => autoRestoreAccounts())
+      .catch((e) => {
+        console.warn('[chrome/auto-restore]', e.message);
+      });
   }, 500);
 });
