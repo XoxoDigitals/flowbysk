@@ -113,18 +113,18 @@ function rememberAccount(accountId, opts = {}) {
 }
 
 function forgetAccount(accountId) {
-  const state = readAutolaunchState();
-  const next = state.accounts.filter((a) => a.id !== accountId);
   try {
     const fs = require('fs');
     const pathMod = require('path');
+    const state = readAutolaunchState();
+    const next = state.accounts.filter((a) => a.id !== accountId);
     fs.mkdirSync(pathMod.dirname(STATE_FILE), { recursive: true });
     fs.writeFileSync(
       STATE_FILE,
       JSON.stringify({ updatedAt: new Date().toISOString(), accounts: next }, null, 2)
     );
-  } catch {
-    /* ignore */
+  } catch (e) {
+    console.warn('[state] forget failed:', e.message);
   }
 }
 
@@ -143,39 +143,23 @@ async function launchAccountEntry(a) {
   return { id: a.id, ok: true, ...st };
 }
 
-/** Restore browsers after BiB process restart. */
+/** Restore browsers after BiB process restart — only accounts explicitly saved in state. */
 async function autoRestoreAccounts() {
   if (!AUTO_RESTORE) {
     console.log('[auto-restore] skipped (BIB_AUTO_RESTORE=false)');
     return;
   }
-  const fs = require('fs');
-  const pathMod = require('path');
   const wanted = new Map();
 
   for (const a of readAutolaunchState().accounts) {
     if (a?.id) wanted.set(a.id, a);
   }
 
-  // First boot / empty state: adopt every existing Chrome profile once
-  if (!wanted.size) {
-    try {
-      const fs = require('fs');
-      const pathMod = require('path');
-      if (fs.existsSync(PROFILES_ROOT)) {
-        for (const name of fs.readdirSync(PROFILES_ROOT)) {
-          const full = pathMod.join(PROFILES_ROOT, name);
-          if (!fs.statSync(full).isDirectory()) continue;
-          wanted.set(name, { id: name, profileDir: full, maxSlots: 5, projectIds: [] });
-        }
-      }
-    } catch (e) {
-      console.warn('[auto-restore] profile scan failed:', e.message);
-    }
-  }
+  // Do NOT scan bib-profiles — leftover folders from deleted/test accounts
+  // were launching 5 browsers when only 1 account exists in admin.
 
   if (!wanted.size) {
-    console.log('[auto-restore] no saved accounts / profiles');
+    console.log('[auto-restore] no saved accounts in bib-autolaunch.json');
     return;
   }
 
@@ -1187,7 +1171,7 @@ app.post('/shutdown', async (_req, res) => {
   gracefulClose(0);
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`[✓] Flow BiB multi-account manager on http://127.0.0.1:${PORT}`);
   console.log(`    profiles: ${PROFILES_ROOT}`);
   console.log(`    state: ${STATE_FILE}`);

@@ -33,6 +33,8 @@
 <script>
 const params = new URLSearchParams(location.search);
 const accountId = params.get('accountId') || '';
+// When proxied at https://domain/bib/..., API + WS must stay under /bib
+const BASE = location.pathname.indexOf('/bib/') === 0 ? '/bib' : '';
 const $ = (id) => document.getElementById(id);
 let ws = null;
 let reconnectTimer = null;
@@ -49,7 +51,7 @@ function setPill(id, text, on) {
 async function pollStatus() {
   if (!accountId) return;
   try {
-    const s = await (await fetch(`/accounts/${encodeURIComponent(accountId)}/status`)).json();
+    const s = await (await fetch(`${BASE}/accounts/${encodeURIComponent(accountId)}/status`)).json();
     // Flow UI login (avatar) ≠ BiB "authenticated" — needs WIZ at + SID/HSID/APISID cookies
     const signedIn = !!(s.authenticated || (s.at && s.hasWebSession) || s.status === 'READY');
     setPill('authPill', 'auth: ' + (signedIn ? 'signed in' : 'signed out'), signedIn);
@@ -67,7 +69,7 @@ function connect() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   try { if (ws) ws.close(); } catch (_) {}
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(accountId)}`);
+  ws = new WebSocket(`${proto}://${location.host}${BASE}/ws/${encodeURIComponent(accountId)}`);
   ws.onopen = () => {
     setPill('connPill', 'stream: live', true);
     pollStatus();
@@ -92,7 +94,7 @@ setInterval(pollStatus, 3000);
 pollStatus();
 
 $('goFlow').onclick = async () => {
-  await fetch(`/accounts/${encodeURIComponent(accountId)}/navigate`, {
+  await fetch(`${BASE}/accounts/${encodeURIComponent(accountId)}/navigate`, {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({})
   });
   setTimeout(pollStatus, 1500);
@@ -101,7 +103,7 @@ $('goFlow').onclick = async () => {
 $('ensureLabs').onclick = async () => {
   setPill('labsPill', 'aisandbox: checking…', null);
   try {
-    const r = await fetch(`/accounts/${encodeURIComponent(accountId)}/ensure-labs`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+    const r = await fetch(`${BASE}/accounts/${encodeURIComponent(accountId)}/ensure-labs`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
     const j = await r.json();
     if (j.hasAccessToken || j.success) {
       setPill('labsPill', 'aisandbox: token OK', true);

@@ -60,8 +60,10 @@ class AccountSession {
   async startScreencast() {
     if (this.screencasting || !this.cdp) return;
     this.screencasting = true;
+    this._lastFrameAt = 0;
     this.cdp.on('Page.screencastFrame', async (ev) => {
       this.latestFrame = ev.data;
+      this._lastFrameAt = Date.now();
       this.broadcast({ type: 'frame', data: ev.data });
       try {
         await this.cdp.send('Page.screencastFrameAck', { sessionId: ev.sessionId });
@@ -76,6 +78,30 @@ class AccountSession {
       maxHeight: VIEW_H,
       everyNthFrame: 1,
     });
+
+    // Headless Chrome often sends no CDP screencast frames — fall back to screenshots
+    if (this._shotTimer) clearInterval(this._shotTimer);
+    this._shotTimer = setInterval(() => {
+      this._screenshotFallback().catch(() => {});
+    }, 700);
+  }
+
+  async _screenshotFallback() {
+    if (!this.page || !this.browser) return;
+    if (this._lastFrameAt && Date.now() - this._lastFrameAt < 1500) return;
+    try {
+      const buf = await this.page.screenshot({
+        type: 'jpeg',
+        quality: 55,
+        encoding: 'base64',
+      });
+      if (!buf) return;
+      this.latestFrame = buf;
+      this._lastFrameAt = Date.now();
+      this.broadcast({ type: 'frame', data: buf });
+    } catch {
+      /* page may be navigating */
+    }
   }
 
   async launch() {
@@ -144,6 +170,10 @@ class AccountSession {
   async disconnect({ clearProfile = false } = {}) {
     this._stopHealthLoop();
     this.screencasting = false;
+    if (this._shotTimer) {
+      clearInterval(this._shotTimer);
+      this._shotTimer = null;
+    }
     try {
       if (this.browser) await this.browser.close();
     } catch (e) {

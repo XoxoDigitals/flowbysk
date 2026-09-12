@@ -4,6 +4,18 @@ export function getBibWorkerUrl() {
   return BIB_WORKER_URL.replace(/\/$/, '');
 }
 
+/** Browser-facing BiB URL (nginx /bib proxy). Falls back to worker URL. */
+export function getBibPublicUrl() {
+  const pub =
+    process.env.BIB_PUBLIC_URL ||
+    process.env.NEXT_PUBLIC_BIB_URL ||
+    '';
+  if (pub.trim()) return pub.replace(/\/$/, '');
+  const app = (process.env.NEXT_PUBLIC_APP_URL || '').replace(/\/$/, '');
+  if (app) return `${app}/bib`;
+  return getBibWorkerUrl();
+}
+
 export async function bibFetch(path: string, init?: RequestInit) {
   const url = `${getBibWorkerUrl()}${path.startsWith('/') ? path : `/${path}`}`;
   const res = await fetch(url, {
@@ -291,7 +303,7 @@ export async function bibBootstrap(accounts: { id: string; maxSlots?: number; pr
 }
 
 export function bibViewerUrl(accountId: string) {
-  return `${getBibWorkerUrl()}/account.html?accountId=${encodeURIComponent(accountId)}`;
+  return `${getBibPublicUrl()}/account.html?accountId=${encodeURIComponent(accountId)}`;
 }
 
 export { BIB_WORKER_URL };
