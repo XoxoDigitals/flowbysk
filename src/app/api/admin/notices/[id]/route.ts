@@ -5,11 +5,11 @@ import { NoticeSeverity } from '@prisma/client';
 
 export async function PATCH(
   req: Request,
-  { params }: { params: Promise<{ id: string }> | { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     await requireAdmin(req);
-    const { id } = await Promise.resolve(params);
+    const { id } = await params;
     const body = await req.json();
     const data: any = {};
     if (typeof body.title === 'string') data.title = body.title.trim();
@@ -27,11 +27,11 @@ export async function PATCH(
 
 export async function DELETE(
   req: Request,
-  { params }: { params: Promise<{ id: string }> | { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     await requireAdmin(req);
-    const { id } = await Promise.resolve(params);
+    const { id } = await params;
     await prisma.notice.delete({ where: { id } });
     return NextResponse.json({ success: true });
   } catch (error: any) {
