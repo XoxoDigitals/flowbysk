@@ -14,9 +14,10 @@ export async function POST(
     const result = await cancelJob(id, session.userId, { force: true });
     return NextResponse.json(result);
   } catch (error: any) {
+    const status = error.message === 'UNAUTHORIZED' ? 401 : 400;
     return NextResponse.json(
       { error: error.message || 'Failed to cancel job' },
-      { status: 400 }
+      { status }
     );
   }
 }

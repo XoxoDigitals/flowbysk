@@ -318,6 +318,34 @@ export default function AdminUsersPage() {
         </div>
 
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+          <button
+            type="button"
+            className="btn-secondary !text-[13px]"
+            onClick={async () => {
+              if (
+                !confirm(
+                  'Delete all auto-created guest_* accounts from the database? Real customers are kept.'
+                )
+              ) {
+                return;
+              }
+              try {
+                const res = await fetch('/api/admin/users', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ action: 'purge_guests' }),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.error || 'Purge failed');
+                alert(data.message || `Deleted ${data.deleted} guests`);
+                fetchUsers();
+              } catch (err: any) {
+                alert(err.message || 'Purge failed');
+              }
+            }}
+          >
+            Purge guest spam
+          </button>
           <button type="button" className="btn-primary !text-[13px]" onClick={() => setShowCreate(true)}>
             <Plus className="h-3.5 w-3.5" />
             Add user

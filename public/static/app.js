@@ -3771,10 +3771,14 @@
       const res = await fetch(`${API_BASE}/api/generations/${encodeURIComponent(taskId)}/cancel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         console.warn('Cancel generation API response:', data);
+        showToast(data.error || 'Cancel failed — please sign in again', 'error');
+        await loadAssets();
+        return;
       }
       showToast('Generation cancelled. Credits refunded.', 'success');
       await loadAssets();

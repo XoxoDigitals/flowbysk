@@ -157,23 +157,36 @@ export async function POST(req: Request) {
       const active = await prisma.generationJob.findMany({
         where: {
           status: {
-            in: [JobStatus.PREPARING, JobStatus.GENERATING, JobStatus.RETRYING, JobStatus.CHECKING_STATUS],
+            in: [
+              JobStatus.IN_QUEUE,
+              JobStatus.PREPARING,
+              JobStatus.GENERATING,
+              JobStatus.RETRYING,
+              JobStatus.CHECKING_STATUS,
+            ],
           },
         },
-        select: { id: true, userId: true },
-        take: 200,
+        select: { id: true, userId: true, status: true },
+        take: 2000,
       });
       let cancelled = 0;
+      const errors: string[] = [];
       for (const j of active) {
         try {
           const r = await cancelJob(j.id, j.userId, { force: true, skipDispatch: true });
-          if (r?.success) cancelled += 1;
-        } catch {
-          /* ignore */
+          if (r?.success !== false) cancelled += 1;
+        } catch (e: any) {
+          errors.push(`${j.id}: ${e?.message || e}`);
         }
       }
       checkAndDispatchNextJobs().catch(console.error);
-      return NextResponse.json({ success: true, cancelled, total: active.length });
+      return NextResponse.json({
+        success: true,
+        cancelled,
+        total: active.length,
+        message: `Cancelled ${cancelled}/${active.length} active job(s)`,
+        errors: errors.slice(0, 5),
+      });
     }
 
     return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });

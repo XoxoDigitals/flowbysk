@@ -235,6 +235,64 @@ export async function POST(req: Request) {
   try {
     const admin = await requireAdmin(req);
     const body = await req.json();
+
+    // One-shot cleanup of auto-minted guest_* spam accounts
+    if (String(body.action || '') === 'purge_guests') {
+      const guests = await prisma.user.findMany({
+        where: {
+          role: UserRole.CUSTOMER,
+          OR: [
+            { email: { startsWith: 'guest_' } },
+            { email: { endsWith: '@googleflow.ai' } },
+          ],
+        },
+        select: { id: true, email: true },
+        take: 5000,
+      });
+      let deleted = 0;
+      for (const g of guests) {
+        try {
+          await prisma.$transaction(async (tx) => {
+            await tx.user.update({
+              where: { id: g.id },
+              data: { assignedProviderAccountId: null },
+            });
+            await tx.studioLog.deleteMany({ where: { userId: g.id } });
+            await tx.creditLedger.deleteMany({ where: { userId: g.id } });
+            await tx.wallet.deleteMany({ where: { userId: g.id } });
+            await tx.welcomeGrant.deleteMany({ where: { userId: g.id } });
+            await tx.subscription.deleteMany({ where: { userId: g.id } });
+            await tx.order.deleteMany({ where: { userId: g.id } });
+            await tx.generationJob.deleteMany({ where: { userId: g.id } });
+            await tx.asset.deleteMany({ where: { userId: g.id } });
+            await tx.character.deleteMany({ where: { userId: g.id } });
+            await tx.whiskState.deleteMany({ where: { userId: g.id } });
+            await tx.supportTicket.deleteMany({ where: { userId: g.id } });
+            await tx.project.deleteMany({ where: { userId: g.id } });
+            await tx.user.delete({ where: { id: g.id } });
+          });
+          deleted += 1;
+        } catch (e) {
+          console.warn('purge guest failed', g.email, e);
+        }
+      }
+      await prisma.adminAuditLog.create({
+        data: {
+          adminId: admin.userId,
+          action: 'ADMIN_PURGE_GUESTS',
+          targetType: 'USER',
+          targetId: admin.userId,
+          details: { matched: guests.length, deleted },
+        },
+      });
+      return NextResponse.json({
+        success: true,
+        matched: guests.length,
+        deleted,
+        message: `Purged ${deleted}/${guests.length} guest accounts`,
+      });
+    }
+
     const email = String(body.email || '')
       .toLowerCase()
       .trim();
