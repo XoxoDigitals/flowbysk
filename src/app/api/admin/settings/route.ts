@@ -23,6 +23,7 @@ export async function PUT(req: Request) {
       siteName: body.siteName,
       logoUrl: body.logoUrl === '' ? null : body.logoUrl,
       contactEmail: body.contactEmail,
+      allowSignups: body.allowSignups,
     });
     return NextResponse.json({ success: true, settings });
   } catch (error: any) {

@@ -22,8 +22,8 @@ export default function GuidePage() {
           <div className="mb-8 flex items-start gap-3 rounded-[18px] border border-[var(--line)] bg-[var(--a1soft)] p-4 text-xs text-[var(--ink)] sm:text-sm">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-[var(--a1)]" />
             <div>
-              <span className="font-semibold">One-time welcome grant:</span> Eligible free users receive{' '}
-              <strong>30 Standard + 20 Pro credits</strong> once on registration.
+              <span className="font-semibold">Plan credits:</span> For $0 plans, credits come from
+              the Standard/Pro amounts configured on that plan in the admin dashboard.
             </div>
           </div>
 

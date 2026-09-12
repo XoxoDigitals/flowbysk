@@ -19,6 +19,7 @@ import {
   downgradeExpiredSubscription,
   resolveEffectiveParallel,
 } from '@/lib/customDeals';
+import { toUserFacingQueueMessage, toUserFacingError } from '@/lib/userMessages';
 
 const PYTHON_WORKER_URL = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
 
@@ -117,12 +118,14 @@ export async function dispatchJob(jobId: string) {
 
   if (!provider) {
     // Keep in queue waiting for provider browser / sticky user capacity
+    const internal =
+      providerReason ||
+      'In Queue: Waiting for a Google provider account (BiB Launch / free user slot).';
+    console.warn(`[dispatchJob ${jobId}] ${internal}`);
     await prisma.generationJob.update({
       where: { id: jobId },
       data: {
-        errorMessage:
-          providerReason ||
-          'In Queue: Waiting for a Google provider account (BiB Launch / free user slot).',
+        errorMessage: toUserFacingQueueMessage(internal),
       },
     });
     return;
@@ -579,12 +582,14 @@ export async function handleJobFailure(jobId: string, errorMessage: string) {
     where: { id: jobId },
     data: {
       status: JobStatus.FAILED,
-      errorMessage: errorMessage,
+      errorMessage: toUserFacingError(errorMessage),
       completedAt: new Date(),
       // Failed cards auto-purge after 4h (see retention.ts)
       expiresAt: new Date(Date.now() + 4 * 60 * 60 * 1000),
     },
   });
+
+  console.error(`[jobFailure ${jobId}]`, errorMessage);
 
   // Release customer reserved credits
   await releaseCredits(job.userId, job.walletType, job.creditCost, job.id, errorMessage);

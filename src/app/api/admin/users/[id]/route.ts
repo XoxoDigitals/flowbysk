@@ -290,3 +290,76 @@ export async function PATCH(
     );
   }
 }
+
+export async function DELETE(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const admin = await requireAdmin(req);
+    const { id } = await params;
+
+    if (id === admin.userId) {
+      return NextResponse.json({ error: 'You cannot delete your own account' }, { status: 400 });
+    }
+
+    const target = await prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        resellerProfile: { select: { id: true } },
+      },
+    });
+
+    if (!target) {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+
+    if (target.role === 'SUPER_ADMIN') {
+      return NextResponse.json({ error: 'Cannot delete super admin accounts' }, { status: 403 });
+    }
+
+    if (target.role === 'ADMIN' && admin.role !== 'SUPER_ADMIN') {
+      return NextResponse.json({ error: 'Only super admin can delete admin accounts' }, { status: 403 });
+    }
+
+    // Clear FKs that are not cascade-safe
+    await prisma.user.updateMany({
+      where: { ownedByAdminId: id },
+      data: { ownedByAdminId: null },
+    });
+    await prisma.user.updateMany({
+      where: { createdByAdminId: id },
+      data: { createdByAdminId: null },
+    });
+
+    if (target.resellerProfile?.id) {
+      const rid = target.resellerProfile.id;
+      await prisma.resellerUserAssignment.deleteMany({ where: { resellerProfileId: rid } });
+      await prisma.resellerSeatGrant.deleteMany({ where: { resellerProfileId: rid } });
+      await prisma.resellerProfile.delete({ where: { id: rid } });
+    }
+
+    await prisma.adminAuditLog.create({
+      data: {
+        adminId: admin.userId,
+        action: 'ADMIN_USER_DELETED',
+        targetType: 'USER',
+        targetId: id,
+        details: { email: target.email, role: target.role },
+      },
+    });
+
+    await prisma.user.delete({ where: { id } });
+
+    return NextResponse.json({ success: true, message: 'User deleted' });
+  } catch (error: any) {
+    console.error('Delete user error:', error);
+    return NextResponse.json(
+      { error: error.message || 'Failed to delete user' },
+      { status: 400 }
+    );
+  }
+}

@@ -170,7 +170,7 @@ export async function POST(req: Request) {
       await prisma.generationJob.update({
         where: { id: job.id },
         data: {
-          errorMessage: `In Queue: Max parallel generation limit (${limit}) reached for your plan. Will start automatically when an active slot frees up.`,
+          errorMessage: 'Waiting in queue. Your plan parallel limit is reached.',
         },
       });
     }

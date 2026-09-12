@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getOrCreateStudioUser } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { getModelPricing, reserveCredits, settleCredits, releaseCredits, resolveModelPricing } from '@/lib/credits';
+import { toUserFacingQueueMessage } from '@/lib/userMessages';
 import { selectProviderAccountForJobDetailed } from '@/lib/routing';
 import { getUserPlanLimit, countUserActiveJobs, checkAndDispatchNextJobs } from '@/lib/queue';
 import { JobStatus, WalletType } from '@prisma/client';
@@ -135,9 +136,11 @@ export async function POST(req: Request) {
     );
 
     if (!provider) {
-      const queueMsg =
+      const internal =
         providerReason ||
         'In Queue: Waiting for a Google provider (BiB Launch / free user slot).';
+      console.warn('[generate/ingredients]', internal);
+      const queueMsg = toUserFacingQueueMessage(internal);
       await prisma.generationJob.update({
         where: { id: job.id },
         data: { errorMessage: queueMsg },

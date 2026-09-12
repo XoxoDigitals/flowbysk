@@ -259,7 +259,7 @@ export default function HomePage() {
                 {
                   n: '01',
                   t: 'Create your account',
-                  d: 'Sign up with email and welcome credits land in your balance.',
+                  d: 'Sign up with email and pick a plan that fits your workflow.',
                 },
                 {
                   n: '02',

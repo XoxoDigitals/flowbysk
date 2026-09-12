@@ -30,6 +30,7 @@ export default function AdminSettingsPage() {
   const [siteName, setSiteName] = useState('Flowbysk');
   const [logoUrl, setLogoUrl] = useState('');
   const [contactEmail, setContactEmail] = useState('');
+  const [allowSignups, setAllowSignups] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -68,6 +69,7 @@ export default function AdminSettingsPage() {
           setSiteName(data.settings.siteName || 'Flowbysk');
           setLogoUrl(data.settings.logoUrl || '');
           setContactEmail(data.settings.contactEmail || '');
+          setAllowSignups(data.settings.allowSignups !== false);
         }
       }
       if (gRes.ok) {
@@ -107,7 +109,7 @@ export default function AdminSettingsPage() {
       const res = await fetch('/api/admin/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ siteName, logoUrl, contactEmail }),
+        body: JSON.stringify({ siteName, logoUrl, contactEmail, allowSignups }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Save failed');
@@ -272,6 +274,19 @@ export default function AdminSettingsPage() {
             className={inputClass}
           />
         </label>
+        <div className="flex items-center justify-between rounded-[11px] border border-[var(--line)] bg-[var(--bg2)] px-3 py-3">
+          <div>
+            <p className="text-sm font-medium text-[var(--ink)]">Allow new signups</p>
+            <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
+              When off, public registration is closed.
+            </p>
+          </div>
+          <Toggle
+            on={allowSignups}
+            onChange={setAllowSignups}
+            label={allowSignups ? 'Open' : 'Closed'}
+          />
+        </div>
         {message && <p className="text-sm text-[var(--a1)]">{message}</p>}
         {error && <p className="text-sm text-rose-500">{error}</p>}
         <button type="submit" disabled={saving} className="btn-primary">

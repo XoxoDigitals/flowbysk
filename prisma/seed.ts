@@ -16,9 +16,9 @@ async function main() {
       priceMonthly: 0,
       standardCreditsCycle: 0,
       proCreditsCycle: 0,
-      description: 'Ideal for trying out Google Flow generation. 50 one-time credits grant.',
+      description: 'Ideal for trying out Google Flow generation.',
       features: [
-        '50 welcome credits (once)',
+        'Credits set by admin on this plan',
         'Veo & image models',
         'Community support',
       ],
@@ -125,57 +125,63 @@ async function main() {
     }
   }
 
-  // Grant One-Time Free Welcome Credits (30 Standard + 20 Pro)
-  const existingGrant = await prisma.welcomeGrant.findUnique({
-    where: { userId: demoUser.id },
-  });
-
-  if (!existingGrant) {
-    await prisma.welcomeGrant.create({
-      data: {
-        userId: demoUser.id,
-        standardAmount: 30,
-        proAmount: 20,
-      },
+  // Grant plan credits for $0 Free plan (amounts from plan dashboard fields)
+  if (Number(freePlan?.priceMonthly || 0) === 0 && freePlan) {
+    const standardAmount = Math.max(0, Math.floor(freePlan.standardCreditsCycle || 0));
+    const proAmount = Math.max(0, Math.floor(freePlan.proCreditsCycle || 0));
+    const existingGrant = await prisma.welcomeGrant.findUnique({
+      where: { userId: demoUser.id },
     });
 
-    // Create or update Standard wallet
-    await prisma.wallet.upsert({
-      where: { userId_walletType: { userId: demoUser.id, walletType: WalletType.STANDARD } },
-      update: { balance: { increment: 30 } },
-      create: { userId: demoUser.id, walletType: WalletType.STANDARD, balance: 30 },
-    });
+    if (!existingGrant && (standardAmount > 0 || proAmount > 0)) {
+      await prisma.welcomeGrant.create({
+        data: {
+          userId: demoUser.id,
+          standardAmount,
+          proAmount,
+        },
+      });
 
-    await prisma.creditLedger.create({
-      data: {
-        userId: demoUser.id,
-        walletType: WalletType.STANDARD,
-        amount: 30,
-        balanceAfter: 30,
-        type: LedgerType.GRANT,
-        reason: 'One-time Free Welcome Grant (Standard)',
-      },
-    });
+      if (standardAmount > 0) {
+        await prisma.wallet.upsert({
+          where: { userId_walletType: { userId: demoUser.id, walletType: WalletType.STANDARD } },
+          update: { balance: { increment: standardAmount } },
+          create: { userId: demoUser.id, walletType: WalletType.STANDARD, balance: standardAmount },
+        });
+        await prisma.creditLedger.create({
+          data: {
+            userId: demoUser.id,
+            walletType: WalletType.STANDARD,
+            amount: standardAmount,
+            balanceAfter: standardAmount,
+            type: LedgerType.GRANT,
+            reason: 'Free plan credits (Standard)',
+          },
+        });
+      }
 
-    // Create or update Pro wallet
-    await prisma.wallet.upsert({
-      where: { userId_walletType: { userId: demoUser.id, walletType: WalletType.PRO } },
-      update: { balance: { increment: 20 } },
-      create: { userId: demoUser.id, walletType: WalletType.PRO, balance: 20 },
-    });
+      if (proAmount > 0) {
+        await prisma.wallet.upsert({
+          where: { userId_walletType: { userId: demoUser.id, walletType: WalletType.PRO } },
+          update: { balance: { increment: proAmount } },
+          create: { userId: demoUser.id, walletType: WalletType.PRO, balance: proAmount },
+        });
+        await prisma.creditLedger.create({
+          data: {
+            userId: demoUser.id,
+            walletType: WalletType.PRO,
+            amount: proAmount,
+            balanceAfter: proAmount,
+            type: LedgerType.GRANT,
+            reason: 'Free plan credits (Pro)',
+          },
+        });
+      }
 
-    await prisma.creditLedger.create({
-      data: {
-        userId: demoUser.id,
-        walletType: WalletType.PRO,
-        amount: 20,
-        balanceAfter: 20,
-        type: LedgerType.GRANT,
-        reason: 'One-time Free Welcome Grant (Pro)',
-      },
-    });
-
-    console.log('✓ Granted 50 Welcome Credits to Demo User (30 Standard + 20 Pro)');
+      console.log(`✓ Granted Free plan credits to Demo User (${standardAmount} Standard + ${proAmount} Pro)`);
+    }
+  } else {
+    console.log('✓ Free plan is paid or has 0 credits — skipped demo grant');
   }
 
   // 4. Seed Default Provider Account from data/settings.json

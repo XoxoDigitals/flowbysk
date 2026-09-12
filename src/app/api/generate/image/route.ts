@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getOrCreateStudioUser } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { getModelPricing, reserveCredits, settleCredits, releaseCredits, resolveModelPricing } from '@/lib/credits';
+import { toUserFacingQueueMessage } from '@/lib/userMessages';
 import { selectProviderAccountForJobDetailed } from '@/lib/routing';
 import { getUserPlanLimit, countUserActiveJobs, checkAndDispatchNextJobs } from '@/lib/queue';
 import { JobStatus, WalletType, BrowserStatus } from '@prisma/client';
@@ -95,7 +96,7 @@ export async function POST(req: Request) {
 
     // Storyteller background: enqueue only — dispatcher starts jobs as parallel slots free.
     if (body.enqueue_only === true || body.background === true) {
-      const queueMsg = 'In Queue: Storyteller background';
+      const queueMsg = toUserFacingQueueMessage('In Queue: Storyteller background');
       await prisma.generationJob.update({
         where: { id: job.id },
         data: { errorMessage: queueMsg },
@@ -131,10 +132,12 @@ export async function POST(req: Request) {
     );
 
     if (!provider || activeJobs >= planLimit) {
-      const queueMsg = !provider
+      const internal = !provider
         ? providerReason ||
           'In Queue: Waiting for a Google provider (BiB Launch / free user slot).'
         : `In Queue: Plan parallel generation limit (${planLimit}) reached.`;
+      if (!provider) console.warn('[generate/image]', internal);
+      const queueMsg = toUserFacingQueueMessage(internal);
 
       await prisma.generationJob.update({
         where: { id: job.id },

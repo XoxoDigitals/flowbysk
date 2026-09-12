@@ -5885,7 +5885,16 @@
         <div class="queue-card-center-loader">
           <div class="queue-spinner-ring"></div>
           <div class="queue-card-title">Waiting in Queue</div>
-          <div class="queue-card-desc">${escapeHtml(item.error || item.queueMessage || 'Plan limit active. Will start automatically when next slot frees up.')}</div>
+          <div class="queue-card-desc">${escapeHtml((function (raw) {
+            const msg = String(raw || '');
+            if (/provider|BiB|Google account|admin must|aisandbox|chrome|puppeteer/i.test(msg)) {
+              return 'Waiting in queue. Your generation will start shortly.';
+            }
+            if (/parallel|plan limit/i.test(msg)) {
+              return 'Waiting in queue. Your plan parallel limit is reached.';
+            }
+            return msg || 'Waiting in queue…';
+          })(item.error || item.queueMessage))}</div>
           <button type="button" class="queue-card-cancel-btn" data-id="${item.id}" title="Cancel queue job">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             <span>Cancel</span>

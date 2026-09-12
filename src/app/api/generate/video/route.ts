@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getOrCreateStudioUser } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { getModelPricing, reserveCredits, settleCredits, releaseCredits, resolveModelPricing } from '@/lib/credits';
+import { toUserFacingQueueMessage } from '@/lib/userMessages';
 import { resolveVideoFrontendModel, resolveVideoWireModel } from '@/lib/modelWire';
 import { selectProviderAccountForJobDetailed } from '@/lib/routing';
 import { getUserPlanLimit, countUserActiveJobs, checkAndDispatchNextJobs } from '@/lib/queue';
@@ -97,7 +98,7 @@ export async function POST(req: Request) {
 
     // Bulk T2V / Storyteller-style background: enqueue only — dispatcher starts jobs as slots free.
     if (body.enqueue_only === true || body.background === true) {
-      const queueMsg = 'In Queue: Bulk T2V background';
+      const queueMsg = toUserFacingQueueMessage('In Queue: Bulk T2V background');
       await prisma.generationJob.update({
         where: { id: job.id },
         data: { errorMessage: queueMsg },
@@ -135,10 +136,12 @@ export async function POST(req: Request) {
 
     if (!provider || activeJobs >= planLimit) {
       // Keep in queue
-      const queueMsg = !provider
+      const internal = !provider
         ? providerReason ||
           'In Queue: Waiting for a Google provider (BiB Launch / free user slot).'
         : `In Queue: Plan parallel generation limit (${planLimit}) reached.`;
+      if (!provider) console.warn('[generate/video]', internal);
+      const queueMsg = toUserFacingQueueMessage(internal);
 
       await prisma.generationJob.update({
         where: { id: job.id },

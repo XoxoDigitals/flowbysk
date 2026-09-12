@@ -10,6 +10,7 @@ import {
   Edit2,
   ArrowUpRight,
   Plus,
+  Trash2,
 } from 'lucide-react';
 
 interface UserItem {
@@ -249,6 +250,27 @@ export default function AdminUsersPage() {
       fetchUsers();
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleDeleteUser = async (user: UserItem) => {
+    if (user.role === 'SUPER_ADMIN' || user.role === 'ADMIN') {
+      alert('Admin accounts cannot be deleted from this list.');
+      return;
+    }
+    const ok = window.confirm(
+      `Permanently delete ${user.email}? This removes their projects, jobs, and wallets.`
+    );
+    if (!ok) return;
+    const typed = window.prompt(`Type DELETE to confirm deleting ${user.email}:`);
+    if (typed !== 'DELETE') return;
+    try {
+      const res = await fetch(`/api/admin/users/${user.id}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Delete failed');
+      fetchUsers();
+    } catch (err: any) {
+      alert(err.message || 'Delete failed');
     }
   };
 
@@ -549,6 +571,16 @@ export default function AdminUsersPage() {
                             <Ban className="h-4 w-4" />
                           )}
                         </button>
+                        {u.role === 'CUSTOMER' || u.role === 'RESELLER' ? (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteUser(u)}
+                            className="rounded-lg p-1 text-rose-500 transition hover:bg-rose-500/10"
+                            title="Delete user"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        ) : null}
                       </div>
                     </td>
                   </tr>

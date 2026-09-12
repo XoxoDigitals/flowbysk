@@ -203,62 +203,90 @@ export async function resolveModelPricing(modelKey: string): Promise<ModelPricin
   return getModelPricing(modelKey);
 }
 
-export async function grantWelcomeCredits(userId: string) {
+/** Grant credits from a $0 plan's configured cycle amounts (once per user). */
+export async function grantZeroPricePlanCredits(
+  userId: string,
+  plan: {
+    name: string;
+    priceMonthly: number;
+    standardCreditsCycle: number;
+    proCreditsCycle: number;
+  }
+) {
+  if (Number(plan.priceMonthly) > 0) {
+    return { granted: false, reason: 'Paid plan — credits come from billing' };
+  }
+
+  const standardAmount = Math.max(0, Math.floor(Number(plan.standardCreditsCycle) || 0));
+  const proAmount = Math.max(0, Math.floor(Number(plan.proCreditsCycle) || 0));
+
   return prisma.$transaction(async (tx) => {
-    const existing = await tx.welcomeGrant.findUnique({
-      where: { userId },
-    });
+    const existing = await tx.welcomeGrant.findUnique({ where: { userId } });
     if (existing) {
       return { granted: false, reason: 'Already granted' };
     }
 
-    // 1. Record welcome grant
     await tx.welcomeGrant.create({
-      data: {
-        userId,
-        standardAmount: 30,
-        proAmount: 20,
-      },
+      data: { userId, standardAmount, proAmount },
     });
 
-    // 2. Standard wallet +30
-    const standardWallet = await tx.wallet.upsert({
-      where: { userId_walletType: { userId, walletType: WalletType.STANDARD } },
-      update: { balance: { increment: 30 } },
-      create: { userId, walletType: WalletType.STANDARD, balance: 30, reserved: 0 },
-    });
+    if (standardAmount > 0) {
+      const standardWallet = await tx.wallet.upsert({
+        where: { userId_walletType: { userId, walletType: WalletType.STANDARD } },
+        update: { balance: { increment: standardAmount } },
+        create: {
+          userId,
+          walletType: WalletType.STANDARD,
+          balance: standardAmount,
+          reserved: 0,
+        },
+      });
+      await tx.creditLedger.create({
+        data: {
+          userId,
+          walletType: WalletType.STANDARD,
+          amount: standardAmount,
+          balanceAfter: standardWallet.balance,
+          type: LedgerType.GRANT,
+          reason: `${plan.name} plan credits (Standard)`,
+        },
+      });
+    }
 
-    await tx.creditLedger.create({
-      data: {
-        userId,
-        walletType: WalletType.STANDARD,
-        amount: 30,
-        balanceAfter: standardWallet.balance,
-        type: LedgerType.GRANT,
-        reason: 'One-time Free Welcome Grant (30 Standard Credits)',
-      },
-    });
+    if (proAmount > 0) {
+      const proWallet = await tx.wallet.upsert({
+        where: { userId_walletType: { userId, walletType: WalletType.PRO } },
+        update: { balance: { increment: proAmount } },
+        create: {
+          userId,
+          walletType: WalletType.PRO,
+          balance: proAmount,
+          reserved: 0,
+        },
+      });
+      await tx.creditLedger.create({
+        data: {
+          userId,
+          walletType: WalletType.PRO,
+          amount: proAmount,
+          balanceAfter: proWallet.balance,
+          type: LedgerType.GRANT,
+          reason: `${plan.name} plan credits (Pro)`,
+        },
+      });
+    }
 
-    // 3. Pro wallet +20
-    const proWallet = await tx.wallet.upsert({
-      where: { userId_walletType: { userId, walletType: WalletType.PRO } },
-      update: { balance: { increment: 20 } },
-      create: { userId, walletType: WalletType.PRO, balance: 20, reserved: 0 },
-    });
-
-    await tx.creditLedger.create({
-      data: {
-        userId,
-        walletType: WalletType.PRO,
-        amount: 20,
-        balanceAfter: proWallet.balance,
-        type: LedgerType.GRANT,
-        reason: 'One-time Free Welcome Grant (20 Pro Credits)',
-      },
-    });
-
-    return { granted: true, standard: 30, pro: 20 };
+    return { granted: true, standard: standardAmount, pro: proAmount };
   });
+}
+
+/** @deprecated Use grantZeroPricePlanCredits — hardcoded welcome grant removed. */
+export async function grantWelcomeCredits(userId: string) {
+  const freePlan = await prisma.plan.findUnique({ where: { name: 'Free' } });
+  if (!freePlan) {
+    return { granted: false, reason: 'No Free plan' };
+  }
+  return grantZeroPricePlanCredits(userId, freePlan);
 }
 
 export async function getUserWallets(userId: string) {

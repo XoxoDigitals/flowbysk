@@ -583,6 +583,8 @@ model SiteSettings {
   siteName       String   @default("Flowbysk")
   logoUrl        String?
   contactEmail   String   @default("support@flowbysk.com")
+  /// When false, public registration is disabled
+  allowSignups   Boolean  @default(true)
   updatedAt      DateTime @updatedAt
 }
 

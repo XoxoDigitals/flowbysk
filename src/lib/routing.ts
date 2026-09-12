@@ -262,11 +262,13 @@ export async function selectProviderAccountForJobDetailed(
 
   if (poolBase.length === 0) {
     if (accounts.length === 0) {
+      console.warn('[routing] No provider accounts in DB — admin must add/launch BiB');
       return {
         account: null,
         reason: 'In Queue: No Google provider account available. Admin must add/launch a BiB account.',
       };
     }
+    console.warn('[routing] Provider accounts exist but none READY/dispatchable');
     return {
       account: null,
       reason:
