@@ -104,9 +104,20 @@ class AccountSession {
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--no-first-run',
+          '--no-default-browser-check',
           '--disable-blink-features=AutomationControlled',
           `--window-size=${VIEW_W},${VIEW_H}`,
         ],
+      });
+      this.browser.on('disconnected', () => {
+        console.warn(`[${this.accountId}] browser disconnected`);
+        this.browser = null;
+        this.page = null;
+        this.cdp = null;
+        this.screencasting = false;
+        if (this.status !== 'STOPPED') this.status = 'STOPPED';
       });
     } catch (e) {
       this.status = 'ERROR';

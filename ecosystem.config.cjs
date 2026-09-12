@@ -77,11 +77,16 @@ module.exports = {
       exec_mode: 'fork',
       autorestart: true,
       max_restarts: 30,
+      min_uptime: '10s',
+      kill_timeout: 15000,
+      exp_backoff_restart_delay: 2000,
       env: {
         ...shared,
         NODE_ENV: 'production',
         BIB_PORT: '8010',
         HEADLESS: 'true',
+        PUPPETEER_EXECUTABLE_PATH:
+          shared.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
         NEXT_PUBLIC_APP_URL:
           shared.NEXT_PUBLIC_APP_URL || 'https://flow.jkdigitalmy.shop',
       },

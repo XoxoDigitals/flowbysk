@@ -39,8 +39,9 @@ function cookieAllowed(name) {
 const WEB_SESSION = ['SID', 'HSID', 'APISID'];
 
 function _exists(p) {
+  if (typeof p !== 'string' || !p) return false;
   try {
-    return !!(p && fs.existsSync(p));
+    return fs.existsSync(p);
   } catch {
     return false;
   }
