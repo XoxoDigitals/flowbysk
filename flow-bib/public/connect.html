@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Flow BiB Console</title>
+<style>
+  :root { --bg:#0e1116; --panel:#171b22; --line:#262c36; --fg:#e6e9ef; --mut:#8a93a3; --acc:#3b82f6; --ok:#22c55e; --bad:#ef4444; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  .pill { font-size:12px; padding:3px 9px; border-radius:999px; border:1px solid var(--line); color:var(--mut); }
+  .pill.on { color:var(--ok); border-color:var(--ok); }
+  .pill.off { color:var(--bad); border-color:var(--bad); }
+  main { display:grid; grid-template-columns:1fr 340px; gap:14px; padding:14px; align-items:start; }
+  .stage { background:#000; border:1px solid var(--line); border-radius:10px; overflow:hidden; position:relative; }
+  #screen { display:block; width:100%; height:auto; cursor:crosshair; background:#000; }
+  .overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:14px; background:rgba(8,10,14,.82); }
+  .overlay.hidden { display:none; }
+  button { font:inherit; border:1px solid var(--line); background:#222834; color:var(--fg); padding:9px 14px; border-radius:8px; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#fff; font-weight:600; }
+  button.big { padding:14px 26px; font-size:16px; }
+  aside { display:flex; flex-direction:column; gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); margin:0 0 10px; }
+  label { display:block; font-size:12px; color:var(--mut); margin:8px 0 4px; }
+  input, textarea, select { width:100%; background:#0f1319; border:1px solid var(--line); color:var(--fg); border-radius:7px; padding:8px; font:inherit; }
+  textarea { resize:vertical; min-height:64px; }
+  .row { display:flex; gap:8px; }
+  .row > * { flex:1; }
+  .kv { display:flex; justify-content:space-between; gap:8px; font-size:12px; padding:3px 0; border-bottom:1px dashed var(--line); }
+  .kv span:first-child { color:var(--mut); }
+  .mut { color:var(--mut); font-size:12px; }
+  .log { font:11px ui-monospace,Consolas,monospace; white-space:pre-wrap; word-break:break-all; max-height:150px; overflow:auto; color:#b9c2d0; }
+  #result img { width:100%; border-radius:8px; border:1px solid var(--line); margin-top:8px; }
+  .toolbar { display:flex; gap:6px; padding:8px; border-bottom:1px solid var(--line); background:var(--panel); align-items:center; }
+  .toolbar input { flex:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎬 Flow Browser‑in‑Browser Console</h1>
+  <span id="connPill" class="pill off">stream: offline</span>
+  <span id="authPill" class="pill off">auth: signed out</span>
+  <span id="projPill" class="pill">project: —</span>
+</header>
+
+<main>
+  <section>
+    <div class="stage">
+      <div class="toolbar">
+        <button id="goFlow">↻ Open Flow / Login</button>
+        <input id="navUrl" placeholder="https://flow.google.com/" />
+        <button id="navBtn">Go</button>
+      </div>
+      <div style="position:relative">
+        <img id="screen" alt="remote browser" />
+        <div id="overlay" class="overlay">
+          <div class="mut">Click connect to open the server browser. Log into your Google account inside it.</div>
+          <button id="connectBtn" class="primary big">🔌 Connect</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <h2>Session</h2>
+      <div class="kv"><span>URL</span><span id="sUrl">—</span></div>
+      <div class="kv"><span>Origin</span><span id="sOrigin">—</span></div>
+      <div class="kv"><span>WIZ at</span><span id="sAt">—</span></div>
+      <div class="kv"><span>f.sid</span><span id="sSid">—</span></div>
+      <div class="row" style="margin-top:10px">
+        <button id="mintBtn">Test reCAPTCHA mint</button>
+        <button id="ckBtn">Check cookies</button>
+      </div>
+      <div id="sessLog" class="log" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Generate (server-side POST)</h2>
+      <label>Type</label>
+      <select id="genType">
+        <option value="image">🖼️ Image</option>
+        <option value="t2v">🎬 Text → Video</option>
+        <option value="i2v">🎞️ Image → Video (animate)</option>
+      </select>
+
+      <label>Prompt</label>
+      <textarea id="prompt">A majestic golden eagle soaring over snow-capped mountains at sunrise, cinematic, photorealistic, 8k</textarea>
+
+      <div id="imgPromptRow" hidden>
+        <label>Source image prompt <span class="mut">(image is generated, then animated)</span></label>
+        <textarea id="imagePrompt">a red vintage car on a mountain road</textarea>
+      </div>
+
+      <div class="row">
+        <div><label>Aspect</label>
+          <select id="aspect"><option>16:9</option><option>9:16</option><option>1:1</option></select></div>
+        <div id="modelWrap"><label>Model</label>
+          <select id="model">
+            <optgroup label="Image" id="grpImage"><option value="GEM_PIX_2">GEM_PIX_2 (Nano Banana 2)</option><option value="NARWHAL">NARWHAL</option></optgroup>
+            <optgroup label="Text→Video" id="grpT2V" hidden><option value="veo_3_1_t2v_lite">veo 3.1 lite (t2v)</option></optgroup>
+            <optgroup label="Image→Video" id="grpI2V" hidden><option value="veo_3_1_r2v_lite">veo 3.1 lite (i2v)</option><option value="abra_r2v_10s">abra_r2v_10s (10s)</option></optgroup>
+          </select></div>
+      </div>
+      <label>Project ID <span class="mut">(auto from open project)</span></label>
+      <input id="project" placeholder="auto-detected from browser" />
+      <button id="genBtn" class="primary" style="width:100%;margin-top:10px">✨ Generate</button>
+      <div id="result"></div>
+      <div class="mut" id="genNote" style="margin-top:6px"></div>
+    </div>
+  </aside>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const screen = $('screen');
+let ws = null;
+
+function slog(m){ const el=$('sessLog'); el.textContent = (new Date().toLocaleTimeString()+'  '+m+'\n')+el.textContent; }
+
+// ---- WebSocket stream ----
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => { $('connPill').textContent='stream: live'; $('connPill').className='pill on'; $('overlay').classList.add('hidden'); slog('stream connected'); };
+  ws.onclose = () => { $('connPill').textContent='stream: offline'; $('connPill').className='pill off'; slog('stream closed'); setTimeout(()=>{ if(!$('overlay').classList.contains('hidden')) return; },0); };
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'frame') screen.src = 'data:image/jpeg;base64,' + m.data;
+  };
+}
+$('connectBtn').onclick = () => connect();
+
+// ---- Map DOM coords → 1280x800 browser space ----
+function pt(e){ const r=screen.getBoundingClientRect(); return { x:(e.clientX-r.left)*(1280/r.width), y:(e.clientY-r.top)*(800/r.height) }; }
+function send(o){ if(ws && ws.readyState===1) ws.send(JSON.stringify(o)); }
+let buttons=0;
+const BTN=['left','middle','right'];
+screen.addEventListener('mousemove', e=>{ const p=pt(e); send({type:'mouse',event:'mouseMoved',x:p.x,y:p.y,buttons}); });
+screen.addEventListener('mousedown', e=>{ e.preventDefault(); const p=pt(e); const b=BTN[e.button]||'left'; buttons|=(e.button===2?2:1); send({type:'mouse',event:'mousePressed',x:p.x,y:p.y,button:b,buttons,clickCount:1}); });
+screen.addEventListener('mouseup', e=>{ e.preventDefault(); const p=pt(e); const b=BTN[e.button]||'left'; buttons&=~(e.button===2?2:1); send({type:'mouse',event:'mouseReleased',x:p.x,y:p.y,button:b,buttons,clickCount:1}); });
+screen.addEventListener('contextmenu', e=>e.preventDefault());
+screen.addEventListener('wheel', e=>{ e.preventDefault(); const p=pt(e); send({type:'wheel',x:p.x,y:p.y,deltaX:e.deltaX,deltaY:e.deltaY}); }, {passive:false});
+
+// Keyboard: focus the stage to capture keys
+screen.setAttribute('tabindex','0');
+screen.addEventListener('click', ()=> screen.focus());
+const SPECIAL = new Set(['Enter','Backspace','Tab','Escape','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Delete','Home','End']);
+window.addEventListener('keydown', e=>{
+  if (document.activeElement!==screen) return;
+  e.preventDefault();
+  if (e.key.length===1 && !e.ctrlKey && !e.metaKey && !e.altKey) send({type:'text',text:e.key});
+  else if (SPECIAL.has(e.key)) send({type:'key',key:e.key,code:e.code,keyCode:e.keyCode});
+});
+
+// ---- Toolbar ----
+$('goFlow').onclick = async ()=>{ slog('navigating to Flow…'); await fetch('/api/navigate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}); };
+$('navBtn').onclick = async ()=>{ const url=$('navUrl').value.trim(); if(!url) return; await fetch('/api/navigate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})}); };
+
+// ---- Status polling ----
+async function poll(){
+  try {
+    const s = await (await fetch('/api/status')).json();
+    if (!s.ready) return;
+    $('sUrl').textContent = (s.url||'').slice(0,42);
+    $('sOrigin').textContent = s.origin||'—';
+    $('sAt').textContent = s.authenticated ? '✓ present' : '—';
+    $('sSid').textContent = s.sid ? s.sid.slice(0,14) : '—';
+    $('authPill').textContent = 'auth: '+(s.authenticated?'signed in':'signed out');
+    $('authPill').className = 'pill '+(s.authenticated?'on':'off');
+    $('projPill').textContent = 'project: '+(s.projectId? s.projectId.slice(0,8)+'…':'—');
+    $('projPill').className = 'pill '+(s.hasProject?'on':'');
+    if (s.projectId && !$('project').value) $('project').value = s.projectId;
+  } catch(e){}
+}
+setInterval(poll, 2000); poll();
+
+// ---- Buttons ----
+$('mintBtn').onclick = async ()=>{ slog('minting reCAPTCHA…'); const r=await (await fetch('/api/mint',{method:'POST'})).json(); slog('mint: len='+r.length+' ('+r.durationMs+'ms) '+(r.success?'OK':'FAIL')); };
+$('ckBtn').onclick = async ()=>{ const r=await (await fetch('/api/export-cookies')).json(); slog('cookies: '+r.cookieLength+' chars, auth='+r.authenticated); };
+
+// Switch prompt/model UI by generation type
+function syncType(){
+  const t=$('genType').value;
+  $('imgPromptRow').hidden = (t!=='i2v');
+  $('grpImage').hidden = (t!=='image');
+  $('grpT2V').hidden = (t!=='t2v');
+  $('grpI2V').hidden = (t!=='i2v');
+  // pick first visible option
+  const grp = t==='image'?'grpImage':(t==='t2v'?'grpT2V':'grpI2V');
+  const first=$(grp).querySelector('option'); if(first) $('model').value=first.value;
+  $('genNote').textContent = t==='image' ? '' : 'Video is async — this polls until the clip is ready (can take 1–3 min).';
+  $('genBtn').textContent = t==='image' ? '✨ Generate' : '🎬 Generate Video';
+}
+$('genType').onchange = syncType; syncType();
+
+$('genBtn').onclick = async ()=>{
+  const btn=$('genBtn'); const t=$('genType').value; btn.disabled=true; btn.textContent='Generating…';
+  const aspectMap={'16:9':2,'9:16':1,'1:1':1};
+  try {
+    if (t==='image'){
+      $('result').innerHTML='<div class="mut">Submitting server-side POST…</div>';
+      const payload={ prompt:$('prompt').value, aspectRatio:$('aspect').value, model:$('model').value, projectId:$('project').value||undefined };
+      const r = await (await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+      if (r.success) $('result').innerHTML = '<div class="mut">HTTP '+r.httpStatus+' · '+r.durationMs+'ms · seed '+r.seed+'</div><img src="'+r.imageUrl+'"/><div class="log">'+r.imageUrl+'</div>';
+      else $('result').innerHTML = '<div style="color:var(--bad)">Failed (HTTP '+(r.httpStatus||'-')+')</div><div class="log">'+(r.error||r.raw||'')+'</div>';
+    } else {
+      $('result').innerHTML='<div class="mut">Submitting '+(t==='i2v'?'image→video':'text→video')+' and polling… (1–3 min)</div>';
+      const payload={ mode:t, prompt:$('prompt').value, imagePrompt:$('imagePrompt').value, videoModel:$('model').value, aspect:aspectMap[$('aspect').value]||2, projectId:$('project').value||undefined };
+      const r = await (await fetch('/api/generate-video',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+      if (r.success) {
+        const img = r.imageUrl ? '<div class="mut">source image:</div><img src="'+r.imageUrl+'"/>' : '';
+        $('result').innerHTML = '<div class="mut">'+r.mode+' · '+r.model+' · '+Math.round(r.ms/1000)+'s · '+r.polls+' polls</div>'+img+'<video src="'+r.videoUrl+'" controls autoplay loop style="width:100%;border-radius:8px;border:1px solid var(--line);margin-top:8px"></video><div class="log">'+r.videoUrl+'</div>';
+      } else {
+        $('result').innerHTML = '<div style="color:var(--bad)">Failed at stage: '+(r.stage||'poll')+'</div><div class="log">'+(r.error||r.raw||JSON.stringify(r.stages||{}))+'</div>';
+      }
+    }
+  } catch(e){ $('result').innerHTML='<div style="color:var(--bad)">'+e.message+'</div>'; }
+  btn.disabled=false; syncType();
+};
+</script>
+</body>
+</html>

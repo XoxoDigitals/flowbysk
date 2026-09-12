@@ -1,0 +1,15 @@
+---
+description: Always use Superpowers skills before acting in this workspace
+alwaysApply: true
+---
+
+# Superpowers (required every turn)
+
+Before exploring, editing, or answering in this project:
+
+1. Invoke `using-superpowers` (skill check first).
+2. For bugs / failures / log errors → use `systematic-debugging` before patching.
+3. Before claiming anything is fixed / done / passing → use `verification-before-completion` and run fresh evidence commands.
+4. For non-trivial features → brainstorm / write a short plan when trade-offs exist.
+
+Do not skip these because the task “looks small.” This Studio’s auth/reCAPTCHA/project bugs often look fixed in code while still failing at runtime.

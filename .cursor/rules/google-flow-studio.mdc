@@ -1,0 +1,15 @@
+---
+description: Google Flow Studio domain rules (auth, projects, generation)
+alwaysApply: true
+---
+
+# Google Flow Studio
+
+- **Generation path (T2V/T2I with reCAPTCHA):** mint + aisandbox POST in the **same CDP page** (existing signed-in labs/flow tab first, else helper Chrome with full SID inject). Never stamp a minted token onto external Python HTTP — aisandbox returns 403 `reCAPTCHA evaluation failed` / `UNUSUAL_ACTIVITY`.
+- **Cookies:** Bearer from labs `/fx/api/auth/session`. **Project create** = labs trpc (next-auth alone OK). **Video/image** = same-page reCAPTCHA; needs plain **`SID`/`HSID`/`APISID`** in the jar (Secure companions alone still get `UNUSUAL_ACTIVITY`). Inject full jar into helper Chrome when present. Partial Secure-only export → projects work, generate fails — Sync from extension while signed into google.com.
+- Never invent phantom project UUIDs. On account switch, clear `active_project_id` and bind/create a **real** Flow project for that account.
+- Do not gate labs session success on Google `tokeninfo` — Flow Bearers are often rejected there while aisandbox still works.
+- Do not open new Flow tabs via `createTarget` on the user’s everyday Chrome. Helper profile: `~/.gflow/chrome-profile-recaptcha`.
+- Plan badge: Ultra = `plan_name` contains Ultra OR `PAYGATE_TIER_THREE` / `SERVICE_TIER_ADVANCED`. Never default non-Ultra accounts to Pro. Default T2V wire model: Ultra → `veo_3_1_t2v_fast_ultra`, else `veo_3_1_t2v_fast`.
+- After backend changes, restart `python run.py` (`reload=False`).
+- Reference tree: `Google Flow v3` — payloads match; do **not** port v3’s HTTP-first mint-then-stamp retry.

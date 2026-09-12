@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Account BiB</title>
+<style>
+  :root { --bg:#0e1116; --panel:#171b22; --line:#262c36; --fg:#e6e9ef; --mut:#8a93a3; --acc:#3b82f6; --ok:#22c55e; --bad:#ef4444; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.4 system-ui,Segoe UI,sans-serif; background:var(--bg); color:var(--fg); }
+  .toolbar { display:flex; gap:8px; padding:8px; border-bottom:1px solid var(--line); background:var(--panel); align-items:center; flex-wrap:wrap; }
+  button { font:inherit; border:1px solid var(--line); background:#222834; color:var(--fg); padding:8px 12px; border-radius:8px; cursor:pointer; }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#fff; font-weight:600; }
+  .pill { font-size:11px; padding:3px 8px; border-radius:999px; border:1px solid var(--line); color:var(--mut); }
+  .pill.on { color:var(--ok); border-color:var(--ok); }
+  .pill.off { color:var(--bad); border-color:var(--bad); }
+  #screen { display:block; width:100%; max-height:70vh; background:#000; cursor:crosshair; }
+  .mut { color:var(--mut); font-size:12px; padding:8px; }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <button id="connectBtn" class="primary">Connect stream</button>
+  <button id="goFlow">Open Flow / Login</button>
+  <button id="ensureLabs">Refresh aisandbox token</button>
+  <span id="connPill" class="pill off">stream: offline</span>
+  <span id="authPill" class="pill off">auth: —</span>
+  <span id="labsPill" class="pill off">aisandbox: —</span>
+  <span id="projPill" class="pill">projects: —</span>
+</div>
+<img id="screen" alt="remote browser" tabindex="0" />
+<div class="mut" id="hint">Connect stream, then sign into Google on <b>flow.google.com</b> inside the remote browser. For multi-image / first+last video, click <b>Refresh aisandbox token</b> until it turns green. (labs.google tools UI redirects to Flow — do not use it.)</div>
+<script>
+const params = new URLSearchParams(location.search);
+const accountId = params.get('accountId') || '';
+const $ = (id) => document.getElementById(id);
+let ws = null;
+let reconnectTimer = null;
+let intentionalClose = false;
+const screen = $('screen');
+
+function setPill(id, text, on) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'pill ' + (on === true ? 'on' : on === false ? 'off' : '');
+}
+
+async function pollStatus() {
+  if (!accountId) return;
+  try {
+    const s = await (await fetch(`/accounts/${encodeURIComponent(accountId)}/status`)).json();
+    // Flow UI login (avatar) ≠ BiB "authenticated" — needs WIZ at + SID/HSID/APISID cookies
+    const signedIn = !!(s.authenticated || (s.at && s.hasWebSession) || s.status === 'READY');
+    setPill('authPill', 'auth: ' + (signedIn ? 'signed in' : 'signed out'), signedIn);
+    const n = Array.isArray(s.projectIds) ? s.projectIds.length : (s.projectCount || 0);
+    setPill('projPill', 'projects: ' + (n || '—'), n > 0 ? true : null);
+    if (s.hasAccessToken || s.labsOk) {
+      setPill('labsPill', 'aisandbox: token OK', true);
+    }
+  } catch (_) { /* ignore transient */ }
+}
+
+function connect() {
+  if (!accountId) { alert('missing accountId'); return; }
+  intentionalClose = false;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  try { if (ws) ws.close(); } catch (_) {}
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(accountId)}`);
+  ws.onopen = () => {
+    setPill('connPill', 'stream: live', true);
+    pollStatus();
+  };
+  ws.onclose = () => {
+    setPill('connPill', 'stream: offline', false);
+    // Screencast WS often drops on sleep / BiB restart / proxy idle — auto-reconnect
+    if (!intentionalClose) {
+      reconnectTimer = setTimeout(() => connect(), 1500);
+    }
+  };
+  ws.onerror = () => { /* onclose handles reconnect */ };
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'frame') screen.src = 'data:image/jpeg;base64,' + m.data;
+  };
+}
+$('connectBtn').onclick = connect;
+// Auto-connect so Admin iframe shows stream without an extra click
+if (accountId) connect();
+setInterval(pollStatus, 3000);
+pollStatus();
+
+$('goFlow').onclick = async () => {
+  await fetch(`/accounts/${encodeURIComponent(accountId)}/navigate`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({})
+  });
+  setTimeout(pollStatus, 1500);
+};
+
+$('ensureLabs').onclick = async () => {
+  setPill('labsPill', 'aisandbox: checking…', null);
+  try {
+    const r = await fetch(`/accounts/${encodeURIComponent(accountId)}/ensure-labs`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+    const j = await r.json();
+    if (j.hasAccessToken || j.success) {
+      setPill('labsPill', 'aisandbox: token OK', true);
+      $('hint').textContent = 'Aisandbox access token ready — multi-image / first+last video should work now.';
+    } else {
+      setPill('labsPill', 'aisandbox: need sign-in', false);
+      $('hint').textContent = j.hint || 'Sign into flow.google.com in the stream, then Refresh aisandbox token again.';
+    }
+    pollStatus();
+  } catch (e) {
+    setPill('labsPill', 'aisandbox: error', false);
+  }
+};
+
+function pt(e){ const r=screen.getBoundingClientRect(); return { x:(e.clientX-r.left)*(1280/r.width), y:(e.clientY-r.top)*(800/r.height) }; }
+function send(o){ if(ws && ws.readyState===1) ws.send(JSON.stringify(o)); }
+let buttons=0;
+const BTN=['left','middle','right'];
+screen.addEventListener('mousemove', e=>{ const p=pt(e); send({type:'mouse',event:'mouseMoved',x:p.x,y:p.y,buttons}); });
+screen.addEventListener('mousedown', e=>{ e.preventDefault(); const p=pt(e); const b=BTN[e.button]||'left'; buttons|=(e.button===2?2:1); send({type:'mouse',event:'mousePressed',x:p.x,y:p.y,button:b,buttons,clickCount:1}); });
+screen.addEventListener('mouseup', e=>{ e.preventDefault(); const p=pt(e); const b=BTN[e.button]||'left'; buttons&=~(e.button===2?2:1); send({type:'mouse',event:'mouseReleased',x:p.x,y:p.y,button:b,buttons,clickCount:1}); });
+screen.addEventListener('contextmenu', e=>e.preventDefault());
+screen.addEventListener('wheel', e=>{ e.preventDefault(); const p=pt(e); send({type:'wheel',x:p.x,y:p.y,deltaX:e.deltaX,deltaY:e.deltaY}); }, {passive:false});
+screen.addEventListener('click', ()=> screen.focus());
+const SPECIAL = new Set(['Enter','Backspace','Tab','Escape','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Delete','Home','End']);
+document.addEventListener('keydown', e=>{
+  if (document.activeElement !== screen && e.target !== screen) return;
+  e.preventDefault();
+  send({ type:'key', event:'keyDown', key:e.key, code:e.code, text: SPECIAL.has(e.key) ? '' : e.key, unmodifiedText:e.key, windowsVirtualKeyCode:e.keyCode, nativeVirtualKeyCode:e.keyCode });
+});
+document.addEventListener('keyup', e=>{
+  if (document.activeElement !== screen && e.target !== screen) return;
+  e.preventDefault();
+  send({ type:'key', event:'keyUp', key:e.key, code:e.code, windowsVirtualKeyCode:e.keyCode, nativeVirtualKeyCode:e.keyCode });
+});
+</script>
+</body>
+</html>

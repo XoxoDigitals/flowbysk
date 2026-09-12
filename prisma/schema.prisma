@@ -1,0 +1,637 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  CUSTOMER
+  ADMIN
+  SUPER_ADMIN
+  RESELLER
+}
+
+enum AcquiredVia {
+  SIGNUP
+  ADMIN_MANUAL
+  RESELLER
+}
+
+enum UserStatus {
+  ACTIVE
+  BANNED
+}
+
+enum WalletType {
+  STANDARD
+  PRO
+}
+
+enum LedgerType {
+  GRANT
+  RESERVE
+  SETTLE
+  RELEASE
+  DEDUCT
+  ADMIN_ADJUSTMENT
+}
+
+enum JobStatus {
+  IN_QUEUE
+  PREPARING
+  GENERATING
+  RETRYING
+  CHECKING_STATUS
+  COMPLETED
+  FAILED
+  CANCELLED
+  EXPIRED
+}
+
+enum ProviderStatus {
+  HEALTHY
+  PAUSED
+  RATE_LIMITED
+  CREDENTIALS_EXPIRED
+  UNAVAILABLE
+}
+
+enum CreditClassification {
+  CREDITS_AVAILABLE
+  CREDITS_EXHAUSTED
+  UNKNOWN
+}
+
+enum BrowserStatus {
+  STOPPED
+  STARTING
+  NEEDS_LOGIN
+  READY
+  ERROR
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  PAST_DUE
+}
+
+model User {
+  id                         String           @id @default(uuid())
+  email                      String           @unique
+  passwordHash               String
+  name                       String?
+  role                       UserRole         @default(CUSTOMER)
+  status                     UserStatus       @default(ACTIVE)
+  isLocked                   Boolean          @default(false)
+  lastIp                     String?
+  lastSeenAt                 DateTime?
+  assignedProviderAccountId  String?
+  /// Pinned Google Flow project UUID for this user on their assigned provider (sticky slot)
+  assignedFlowProjectId      String?
+  /// When true, admin pinned this user — never auto-release or reassign until set back to Automatic
+  providerAssignmentManual   Boolean          @default(false)
+  /// Bumped on each login; JWT must match or session is rejected (single concurrent login)
+  sessionVersion             Int              @default(0)
+  /// Admin who owns this customer for dashboard scoping (null = unclaimed pool)
+  ownedByAdminId             String?
+  /// Admin who manually created this user (if any)
+  createdByAdminId           String?
+  /// Reseller user id who created this customer (if any)
+  createdByResellerId        String?
+  acquiredVia                AcquiredVia      @default(SIGNUP)
+  claimedAt                  DateTime?
+  createdAt                  DateTime         @default(now())
+  updatedAt                  DateTime         @updatedAt
+
+  wallets                    Wallet[]
+  ledgerEntries              CreditLedger[]
+  welcomeGrant               WelcomeGrant?
+  subscriptions              Subscription[]
+  orders                     Order[]
+  projects                   Project[]
+  generationJobs             GenerationJob[]
+  assets                     Asset[]
+  characters                 Character[]
+  whiskStates                WhiskState[]
+  auditLogsPerformed         AdminAuditLog[]  @relation("AdminActor")
+  assignedProviderAccount    ProviderAccount? @relation("AssignedUsers", fields: [assignedProviderAccountId], references: [id])
+  supportTickets             SupportTicket[]
+  studioLogs                 StudioLog[]
+  ownedByAdmin               User?            @relation("OwnedCustomers", fields: [ownedByAdminId], references: [id], onDelete: SetNull)
+  ownedCustomers             User[]           @relation("OwnedCustomers")
+  createdByAdmin             User?            @relation("CreatedCustomers", fields: [createdByAdminId], references: [id], onDelete: SetNull)
+  createdCustomers           User[]           @relation("CreatedCustomers")
+  resellerProfile            ResellerProfile?
+  parentResellerProfiles     ResellerProfile[] @relation("ResellerParentAdmin")
+  resellerAssignmentsCreated ResellerUserAssignment[] @relation("ResellerAssignmentCustomer")
+
+  @@index([email])
+  @@index([lastSeenAt])
+  @@index([ownedByAdminId])
+  @@index([createdByAdminId])
+  @@index([createdByResellerId])
+  @@index([role])
+}
+
+model WelcomeGrant {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  standardAmount Int      @default(30)
+  proAmount      Int      @default(20)
+  grantedAt      DateTime @default(now())
+
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Plan {
+  id                   String         @id @default(uuid())
+  name                 String         @unique // Free, Starter, Pro, Business, Custom
+  maxParallel          Int            @default(1) // 1, 3, 5, 10
+  priceMonthly         Float          @default(0.0)
+  /// When true, public pricing shows "Contact Your Seller" and hides CTA
+  contactSeller        Boolean        @default(false)
+  standardCreditsCycle Int            @default(0)
+  proCreditsCycle      Int            @default(0)
+  description          String?
+  /// Marketing / billing feature bullets (string[])
+  features             Json?
+  isActive             Boolean        @default(true)
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  subscriptions        Subscription[]
+  orders               Order[]
+  resellerSeatGrants   ResellerSeatGrant[]
+  resellerAssignments  ResellerUserAssignment[]
+}
+
+model Subscription {
+  id                  String             @id @default(uuid())
+  userId              String
+  planId              String
+  status              SubscriptionStatus @default(ACTIVE)
+  currentPeriodStart  DateTime           @default(now())
+  currentPeriodEnd    DateTime
+  cancelAtPeriodEnd   Boolean            @default(false)
+  /// Admin custom deal: price shown to the user (not catalog)
+  displayPrice        Float?
+  /// Admin custom deal: parallel slots override (null = use plan.maxParallel)
+  maxParallelOverride Int?
+  /// Admin-assigned deal (create/renew), not a public catalog purchase
+  isCustomDeal        Boolean            @default(false)
+  /// Length of current custom/renew period in days
+  periodDays          Int?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan                Plan               @relation(fields: [planId], references: [id])
+
+  @@index([userId])
+}
+
+model Wallet {
+  id         String     @id @default(uuid())
+  userId     String
+  walletType WalletType // STANDARD or PRO
+  balance    Int        @default(0) // Available credits
+  reserved   Int        @default(0) // Credits locked in active/queued jobs
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, walletType])
+  @@index([userId])
+}
+
+model CreditLedger {
+  id           String     @id @default(uuid())
+  userId       String
+  walletType   WalletType
+  amount       Int        // Positive for grant/settle/release, negative for deductions/spend
+  balanceAfter Int
+  type         LedgerType
+  jobId        String?
+  adminId      String?
+  reason       String?
+  createdAt    DateTime   @default(now())
+
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, walletType])
+  @@index([createdAt])
+}
+
+model ProviderAccount {
+  id                     String               @id @default(uuid())
+  label                  String
+  accountEmail           String?
+  cookies                String               @db.Text @default("")
+  sessionToken           String?              @db.Text
+  status                 ProviderStatus       @default(HEALTHY)
+  creditClassification   CreditClassification @default(CREDITS_AVAILABLE)
+  googleCreditsBalance   Float                @default(0.0)
+  googleCreditsReserved  Float                @default(0.0)
+  maxParallelLimit       Int                  @default(5)
+  planTier               String?              @default("Google AI Ultra")
+  projectUrl             String?              @db.Text
+  activeProjectId        String?
+  supportedModels        Json?                // Array of model keys supported
+  browserStatus          BrowserStatus        @default(STOPPED)
+  profileDir             String?
+  flowProjectIds         Json?                // string[] of Flow project UUIDs (parallel slots)
+  bibLastSeenAt          DateTime?
+  bibLastError           String?
+  lastHealthCheck        DateTime?
+  cookieExpiresAt        DateTime?
+  lastErrorMessage       String?
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  assignedUsers          User[]               @relation("AssignedUsers")
+  projectBindings        ProjectProviderBinding[]
+  generationJobs         GenerationJob[]
+
+  @@index([status, creditClassification])
+  @@index([browserStatus])
+}
+
+model Project {
+  id          String                   @id @default(uuid())
+  userId      String
+  name        String
+  description String?
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+  deletedAt   DateTime?
+
+  user        User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bindings    ProjectProviderBinding[]
+  jobs        GenerationJob[]
+  assets      Asset[]
+  characters  Character[]
+  whiskState  WhiskState?
+
+  @@index([userId])
+}
+
+model ProjectProviderBinding {
+  id                    String          @id @default(uuid())
+  projectId             String
+  providerAccountId     String
+  upstreamFlowProjectId String?
+  isActive              Boolean         @default(true)
+  createdAt             DateTime        @default(now())
+
+  project               Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  providerAccount       ProviderAccount @relation(fields: [providerAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, providerAccountId])
+}
+
+model GenerationJob {
+  id                String           @id @default(uuid())
+  userId            String
+  projectId         String
+  providerAccountId String?
+  modelKey          String           // veo_3_1_lite_low_priority, nano_banana_2, veo_3_1_fast, etc.
+  walletType        WalletType       // STANDARD or PRO
+  creditCost        Int
+  status            JobStatus        @default(IN_QUEUE)
+  progress          Int              @default(0) // 0 - 100
+  prompt            String           @db.Text
+  parameters        Json             // aspect_ratio, duration, seed, etc.
+  inputAssetIds     Json?            // string[]
+  characterIds      Json?            // string[]
+  outputMediaUrl    String?          @db.Text
+  outputMetadata    Json?
+  errorMessage      String?          @db.Text
+  retryCount        Int              @default(0)
+  queuePosition     Int?
+  submittedAt       DateTime         @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+  expiresAt         DateTime         // 24 hours after completion or submission
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project           Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  providerAccount   ProviderAccount? @relation(fields: [providerAccountId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([status, submittedAt])
+  @@index([expiresAt])
+}
+
+model Asset {
+  id              String    @id @default(uuid())
+  userId          String
+  projectId       String
+  fileName        String
+  fileType        String    // image, video, audio
+  mimeType        String
+  fileSize        Int
+  storagePath     String
+  url             String
+  upstreamAssetId String?
+  expiresAt       DateTime  // 24 hours from upload
+  createdAt       DateTime  @default(now())
+
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project         Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model Character {
+  id                  String    @id @default(uuid())
+  userId              String
+  projectId           String
+  name                String
+  gender              String?
+  voiceName           String?
+  portraitUrl         String?
+  upstreamCharacterId String?
+  traits              Json?
+  expiresAt       DateTime  // far-future for durable user characters; legacy rows used 24h
+  createdAt       DateTime  @default(now())
+
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project             Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model AdminAuditLog {
+  id         String   @id @default(uuid())
+  adminId    String
+  action     String   // CREDIT_ADJUSTMENT, USER_BAN, PLAN_CHANGE, PROVIDER_ACCOUNT_UPDATE, etc.
+  targetType String   // USER, PROVIDER_ACCOUNT, PLAN, JOB
+  targetId   String?
+  details    Json?
+  createdAt  DateTime @default(now())
+
+  admin      User     @relation("AdminActor", fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@index([createdAt])
+}
+
+/// Reseller login linked to a parent ADMIN / SUPER_ADMIN
+model ResellerProfile {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  parentAdminId String
+  label         String?
+  isActive      Boolean  @default(true)
+  /// Shown to reseller (and optionally their users) when deactivated
+  deactivationMessage String? @db.Text
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parentAdmin   User     @relation("ResellerParentAdmin", fields: [parentAdminId], references: [id], onDelete: Cascade)
+  seatGrants    ResellerSeatGrant[]
+  assignments   ResellerUserAssignment[]
+
+  @@index([parentAdminId])
+}
+
+/// Monthly seat allocation for one catalog plan under a reseller
+model ResellerSeatGrant {
+  id                String   @id @default(uuid())
+  resellerProfileId String
+  planId            String
+  /// Calendar month key YYYY-MM
+  monthKey          String
+  seatsAllocated    Int
+  seatsUsed         Int      @default(0)
+  /// Price admin sells/gives this plan pack to the reseller at
+  wholesalePrice    Float    @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  reseller          ResellerProfile @relation(fields: [resellerProfileId], references: [id], onDelete: Cascade)
+  plan              Plan            @relation(fields: [planId], references: [id])
+
+  @@unique([resellerProfileId, planId, monthKey])
+  @@index([monthKey])
+}
+
+model ResellerUserAssignment {
+  id                String    @id @default(uuid())
+  resellerProfileId String
+  customerId        String
+  planId            String
+  displayPrice      Float     @default(0)
+  addedAt           DateTime  @default(now())
+  removedAt         DateTime?
+  /// False when removed same calendar day — excluded from admin paid counts
+  countsForAdmin    Boolean   @default(true)
+
+  reseller          ResellerProfile @relation(fields: [resellerProfileId], references: [id], onDelete: Cascade)
+  customer          User            @relation("ResellerAssignmentCustomer", fields: [customerId], references: [id], onDelete: Cascade)
+  plan              Plan            @relation(fields: [planId], references: [id])
+
+  @@index([resellerProfileId, removedAt])
+  @@index([customerId])
+}
+
+model SystemSetting {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+enum NoticeSeverity {
+  INFO
+  WARNING
+  SUCCESS
+}
+
+model Notice {
+  id        String         @id @default(uuid())
+  title     String
+  body      String         @db.Text
+  severity  NoticeSeverity @default(INFO)
+  isActive  Boolean        @default(true)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  @@index([isActive, createdAt])
+}
+
+enum PaymentGateway {
+  STRIPE
+  MANUAL_BANK
+  RESELLER
+}
+
+enum OrderStatus {
+  PENDING_APPROVAL
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+model Order {
+  id            String         @id @default(uuid())
+  userId        String
+  planId        String
+  gateway       PaymentGateway @default(MANUAL_BANK)
+  status        OrderStatus    @default(PENDING_APPROVAL)
+  amount        Float
+  currency      String         @default("USD")
+  bankReference String?
+  proofImageUrl String?
+  adminNotes    String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan          Plan           @relation(fields: [planId], references: [id])
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum LogCategory {
+  AUTH
+  GENERATION
+  BILLING
+  SYSTEM
+  SECURITY_ALERT
+}
+
+enum LogLevel {
+  INFO
+  WARN
+  ERROR
+  CRITICAL
+}
+
+model SystemLog {
+  id        String      @id @default(uuid())
+  category  LogCategory @default(SYSTEM)
+  level     LogLevel    @default(INFO)
+  message   String
+  details   Json?
+  ipAddress String?
+  userId    String?
+  createdAt DateTime    @default(now())
+
+  @@index([category, level])
+  @@index([createdAt])
+}
+
+/// Studio / Flow worker diagnostics (generation, auth, CDP, UI). Admin-only surface.
+model StudioLog {
+  id        String         @id @default(uuid())
+  level     StudioLogLevel @default(INFO)
+  message   String
+  source    String         @default("studio")
+  details   Json?
+  /// Groups all events for one user generation request / job
+  runId     String?
+  userId    String?
+  userEmail String?
+  flowEmail String?
+  createdAt DateTime       @default(now())
+
+  user      User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([level])
+  @@index([source])
+  @@index([runId])
+  @@index([userId])
+  @@index([userEmail])
+  @@index([flowEmail])
+}
+
+enum StudioLogLevel {
+  INFO
+  WARN
+  ERROR
+  DEBUG
+}
+
+model WhiskState {
+  id        String   @id @default(uuid())
+  userId    String
+  projectId String   @unique
+  data      Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model SiteSettings {
+  id             String   @id @default("default")
+  siteName       String   @default("Flowbysk")
+  logoUrl        String?
+  contactEmail   String   @default("support@flowbysk.com")
+  updatedAt      DateTime @updatedAt
+}
+
+model ContactMessage {
+  id        String   @id @default(uuid())
+  name      String
+  email     String
+  subject   String?
+  message   String   @db.Text
+  status    String   @default("NEW") // NEW | READ | ARCHIVED
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([status])
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+model SupportTicket {
+  id        String       @id @default(uuid())
+  userId    String
+  subject   String
+  status    TicketStatus @default(OPEN)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  user      User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  SupportTicketMessage[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([updatedAt])
+}
+
+model SupportTicketMessage {
+  id         String   @id @default(uuid())
+  ticketId   String
+  authorId   String
+  isStaff    Boolean  @default(false)
+  body       String   @db.Text
+  createdAt  DateTime @default(now())
+
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@index([createdAt])
+}

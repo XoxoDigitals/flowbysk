@@ -1,0 +1,15 @@
+{
+  "name": "flow-bib",
+  "version": "1.0.0",
+  "description": "Multi-account Browser-in-Browser manager for Google Flow",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "puppeteer": "^22.10.0",
+    "ws": "^8.17.0"
+  }
+}
