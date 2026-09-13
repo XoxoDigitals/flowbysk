@@ -159,6 +159,7 @@ export function readEgressProxyMirror(): {
 
 /**
  * Fetch public IP + country via the given HTTP proxy (proves proxy works).
+ * Uses curl (no undici dependency required on the server).
  */
 export async function probeProxyEgress(proxyUrl: string): Promise<{
   ok: boolean;
@@ -172,51 +173,91 @@ export async function probeProxyEgress(proxyUrl: string): Promise<{
     return { ok: false, error: 'Invalid proxy URL' };
   }
 
-  try {
-    const { ProxyAgent, fetch: undiciFetch } = await import('undici');
-    const dispatcher = new ProxyAgent(normalized);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
+  const { execFile } = await import('child_process');
+  const { promisify } = await import('util');
+  const execFileAsync = promisify(execFile);
+
+  async function curlJson(url: string): Promise<Record<string, unknown> | null> {
     try {
-      const res = await undiciFetch('https://ipapi.co/json/', {
-        dispatcher,
-        signal: controller.signal,
-        headers: { Accept: 'application/json', 'User-Agent': 'Flowbysk-ProxyCheck/1.0' },
-      });
-      const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-      if (!res.ok || !data) {
-        // Fallback: ipify IP only
-        const ipRes = await undiciFetch('https://api.ipify.org?format=json', {
-          dispatcher,
-          signal: controller.signal,
-        });
-        const ipData = (await ipRes.json().catch(() => null)) as { ip?: string } | null;
-        if (ipData?.ip) {
-          return { ok: true, ip: ipData.ip, country: 'Unknown', countryCode: '' };
-        }
-        return { ok: false, error: `Lookup failed (${res.status})` };
-      }
-      if (data.error) {
-        return { ok: false, error: String(data.reason || data.error || 'lookup failed') };
-      }
-      const ip = String(data.ip || '');
-      if (!ip) return { ok: false, error: 'No IP in response' };
+      const { stdout } = await execFileAsync(
+        'curl',
+        [
+          '-sS',
+          '-x',
+          normalized!,
+          '--max-time',
+          '20',
+          '-H',
+          'Accept: application/json',
+          '-H',
+          'User-Agent: Flowbysk-ProxyCheck/1.0',
+          url,
+        ],
+        { encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 }
+      );
+      const text = String(stdout || '').trim();
+      if (!text) return null;
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const data = await curlJson('https://ipapi.co/json/');
+    if (data && !data.error && data.ip) {
       return {
         ok: true,
-        ip,
+        ip: String(data.ip),
         country: String(data.country_name || data.country || 'Unknown'),
         countryCode: String(data.country_code || data.country || ''),
       };
-    } finally {
-      clearTimeout(timer);
-      try {
-        await dispatcher.close();
-      } catch {
-        /* ignore */
-      }
     }
+
+    const ipData = await curlJson('https://api.ipify.org?format=json');
+    if (ipData?.ip) {
+      return { ok: true, ip: String(ipData.ip), country: 'Unknown', countryCode: '' };
+    }
+
+    // Last resort: try node:undici / undici if curl unavailable
+    try {
+      let undiciMod: any = null;
+      try {
+        undiciMod = await import('node:undici');
+      } catch {
+        undiciMod = await import('undici');
+      }
+      const { ProxyAgent, fetch: undiciFetch } = undiciMod;
+      const dispatcher = new ProxyAgent(normalized);
+      try {
+        const res = await undiciFetch('https://api.ipify.org?format=json', {
+          dispatcher,
+          headers: { Accept: 'application/json' },
+        });
+        const j = (await res.json().catch(() => null)) as { ip?: string } | null;
+        if (j?.ip) {
+          return { ok: true, ip: j.ip, country: 'Unknown', countryCode: '' };
+        }
+      } finally {
+        try {
+          await dispatcher.close();
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+
+    return {
+      ok: false,
+      error:
+        (data && data.reason ? String(data.reason) : null) ||
+        'Proxy check failed (curl could not reach ip lookup through this proxy)',
+    };
   } catch (e: any) {
     const msg = e?.cause?.message || e?.message || String(e);
     return { ok: false, error: msg.slice(0, 200) };
   }
 }
+
