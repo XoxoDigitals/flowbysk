@@ -36,7 +36,10 @@ export default function AdminSettingsPage() {
   const [allowSignups, setAllowSignups] = useState(true);
   const [ticketSystemEnabled, setTicketSystemEnabled] = useState(true);
   const [contactPageEnabled, setContactPageEnabled] = useState(true);
-  const [egressProxyUrl, setEgressProxyUrl] = useState('');
+  const [egressProxies, setEgressProxies] = useState<
+    { id: string; url: string; enabled: boolean }[]
+  >([]);
+  const [newProxyUrl, setNewProxyUrl] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -87,7 +90,28 @@ export default function AdminSettingsPage() {
           setAllowSignups(data.settings.allowSignups !== false);
           setTicketSystemEnabled(data.settings.ticketSystemEnabled !== false);
           setContactPageEnabled(data.settings.contactPageEnabled !== false);
-          setEgressProxyUrl(data.settings.egressProxyUrl || '');
+          const list = Array.isArray(data.settings.egressProxies)
+            ? data.settings.egressProxies
+            : [];
+          if (list.length) {
+            setEgressProxies(
+              list.map((p: any) => ({
+                id: String(p.id || crypto.randomUUID()),
+                url: String(p.url || ''),
+                enabled: p.enabled !== false,
+              }))
+            );
+          } else if (data.settings.egressProxyUrl) {
+            setEgressProxies([
+              {
+                id: crypto.randomUUID(),
+                url: String(data.settings.egressProxyUrl),
+                enabled: true,
+              },
+            ]);
+          } else {
+            setEgressProxies([]);
+          }
         }
       }
       if (gRes.ok) {
@@ -140,16 +164,23 @@ export default function AdminSettingsPage() {
           allowSignups,
           ticketSystemEnabled,
           contactPageEnabled,
-          egressProxyUrl,
+          egressProxies,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Save failed');
       setMessage('Site settings saved.');
       if (data?.settings?.siteName) setSiteName(data.settings.siteName);
-      if (data?.settings?.egressProxyUrl !== undefined) {
-        setEgressProxyUrl(data.settings.egressProxyUrl || '');
+      if (Array.isArray(data?.settings?.egressProxies)) {
+        setEgressProxies(
+          data.settings.egressProxies.map((p: any) => ({
+            id: String(p.id || crypto.randomUUID()),
+            url: String(p.url || ''),
+            enabled: p.enabled !== false,
+          }))
+        );
       }
+      setNewProxyUrl('');
       await refreshSiteSettings();
     } catch (err: any) {
       setError(err.message || 'Save failed');
@@ -361,23 +392,82 @@ export default function AdminSettingsPage() {
             label={contactPageEnabled ? 'Enabled' : 'Disabled'}
           />
         </div>
-        <label className="block text-sm">
-          <span className="mb-1.5 block font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">
-            EGRESS PROXY
-          </span>
-          <input
-            value={egressProxyUrl}
-            onChange={(e) => setEgressProxyUrl(e.target.value)}
-            placeholder="http://user:pass@host:port"
-            className={inputClass}
-            autoComplete="off"
-          />
-          <p className="mt-1 text-[12px] text-[var(--ink3)]">
-            Optional HTTP(S) proxy for BiB Chrome and the Python worker when calling Google.
-            Leave empty for direct. After saving, restart BiB browsers so Chrome picks it up
-            (`pm2 restart flowbysk-bib`).
-          </p>
-        </label>
+        <div className="space-y-3 rounded-[11px] border border-[var(--line)] bg-[var(--bg2)] p-3">
+          <div>
+            <p className="font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">EGRESS PROXIES</p>
+            <p className="mt-1 text-[12px] text-[var(--ink3)]">
+              Add one or more HTTP(S) proxies. Toggle off to disable without deleting. The first
+              enabled proxy is used by BiB Chrome and the Python worker. After saving, restart BiB
+              (`pm2 restart flowbysk-bib`).
+            </p>
+          </div>
+          {egressProxies.length === 0 && (
+            <p className="text-[13px] text-[var(--ink3)]">No proxies saved yet.</p>
+          )}
+          <ul className="space-y-2">
+            {egressProxies.map((p) => (
+              <li
+                key={p.id}
+                className="flex flex-col gap-2 rounded-[10px] border border-[var(--line)] bg-[var(--card)] p-3 sm:flex-row sm:items-center"
+              >
+                <input
+                  value={p.url}
+                  onChange={(e) =>
+                    setEgressProxies((prev) =>
+                      prev.map((x) => (x.id === p.id ? { ...x, url: e.target.value } : x))
+                    )
+                  }
+                  className={`${inputClass} flex-1 font-mono text-[12px]`}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <div className="flex items-center justify-between gap-3 sm:justify-end">
+                  <Toggle
+                    on={p.enabled}
+                    onChange={(on) =>
+                      setEgressProxies((prev) =>
+                        prev.map((x) => (x.id === p.id ? { ...x, enabled: on } : x))
+                      )
+                    }
+                    label={p.enabled ? 'On' : 'Off'}
+                  />
+                  <button
+                    type="button"
+                    className="rounded-[9px] border border-[var(--line)] px-2.5 py-1.5 text-[12px] text-rose-500"
+                    onClick={() => setEgressProxies((prev) => prev.filter((x) => x.id !== p.id))}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <input
+              value={newProxyUrl}
+              onChange={(e) => setNewProxyUrl(e.target.value)}
+              placeholder="http://user:pass@host:port or host:port"
+              className={`${inputClass} flex-1`}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <button
+              type="button"
+              className="btn-primary whitespace-nowrap"
+              onClick={() => {
+                const url = newProxyUrl.trim();
+                if (!url) return;
+                setEgressProxies((prev) => [
+                  ...prev,
+                  { id: crypto.randomUUID(), url, enabled: true },
+                ]);
+                setNewProxyUrl('');
+              }}
+            >
+              Add proxy
+            </button>
+          </div>
+        </div>
         {message && <p className="text-sm text-[var(--a1)]">{message}</p>}
         {error && <p className="text-sm text-rose-500">{error}</p>}
         <button type="submit" disabled={saving} className="btn-primary">

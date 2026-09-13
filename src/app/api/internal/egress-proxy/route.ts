@@ -13,15 +13,23 @@ export async function GET(req: Request) {
   }
   try {
     const settings = await getAdminSiteSettings();
-    const url = settings.egressProxyUrl || readEgressProxyMirror();
     try {
-      writeEgressProxyMirror(url);
+      writeEgressProxyMirror(settings.egressProxies);
     } catch {
       /* ignore mirror write */
     }
-    return NextResponse.json({ ok: true, url: url || '' });
+    return NextResponse.json({
+      ok: true,
+      url: settings.egressProxyUrl || '',
+      proxies: settings.egressProxies,
+    });
   } catch (error: any) {
-    const url = readEgressProxyMirror();
-    return NextResponse.json({ ok: true, url: url || '', error: error?.message });
+    const mirror = readEgressProxyMirror();
+    return NextResponse.json({
+      ok: true,
+      url: mirror.url || '',
+      proxies: mirror.proxies,
+      error: error?.message,
+    });
   }
 }

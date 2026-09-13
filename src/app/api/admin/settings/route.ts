@@ -26,18 +26,21 @@ export async function PUT(req: Request) {
       allowSignups: body.allowSignups,
       ticketSystemEnabled: body.ticketSystemEnabled,
       contactPageEnabled: body.contactPageEnabled,
+      egressProxies: body.egressProxies,
+      // Legacy single field only if list not sent
       egressProxyUrl:
-        body.egressProxyUrl === undefined
+        body.egressProxies !== undefined
           ? undefined
-          : body.egressProxyUrl === ''
-            ? null
-            : body.egressProxyUrl,
+          : body.egressProxyUrl === undefined
+            ? undefined
+            : body.egressProxyUrl === ''
+              ? null
+              : body.egressProxyUrl,
     });
     return NextResponse.json({ success: true, settings });
   } catch (error: any) {
-    return NextResponse.json(
-      { error: error.message || 'Forbidden' },
-      { status: error.message === 'FORBIDDEN' ? 403 : 500 }
-    );
+    const msg = error.message || 'Forbidden';
+    const status = msg === 'FORBIDDEN' ? 403 : msg.startsWith('Invalid proxy') ? 400 : 500;
+    return NextResponse.json({ error: msg }, { status });
   }
 }

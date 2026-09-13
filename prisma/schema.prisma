@@ -608,8 +608,10 @@ model SiteSettings {
   ticketSystemEnabled Boolean @default(true)
   /// When false, the public Contact page and form are hidden
   contactPageEnabled Boolean @default(true)
-  /// Optional HTTP(S) egress proxy for BiB Chrome + Python worker (e.g. http://user:pass@host:port)
+  /// Optional HTTP(S) egress proxy for BiB Chrome + Python worker (legacy single; kept in sync with first enabled)
   egressProxyUrl String?
+  /// Proxy list: [{ id, url, enabled }]
+  egressProxies  Json?
   updatedAt      DateTime @updatedAt
 }
 

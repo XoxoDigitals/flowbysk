@@ -13,23 +13,46 @@ let _cache = { url: null, at: 0 };
  * @returns {string|null}
  */
 function normalizeProxyUrl(raw) {
-  const text = String(raw || '').trim();
+  let text = String(raw || '').trim();
   if (!text) return null;
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(text)) {
+    text = `http://${text}`;
+  }
   try {
     const u = new URL(text);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
     if (!u.hostname) return null;
-    return text;
+    const auth =
+      u.username || u.password
+        ? `${encodeURIComponent(decodeURIComponent(u.username))}${
+            u.password ? `:${encodeURIComponent(decodeURIComponent(u.password))}` : ''
+          }@`
+        : '';
+    const port = u.port ? `:${u.port}` : '';
+    return `${u.protocol}//${auth}${u.hostname}${port}`;
   } catch {
     return null;
   }
+}
+
+function activeFromMirror(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (Array.isArray(raw.proxies)) {
+    for (const p of raw.proxies) {
+      if (p && p.enabled !== false) {
+        const url = normalizeProxyUrl(p.url);
+        if (url) return url;
+      }
+    }
+  }
+  return normalizeProxyUrl(raw.url);
 }
 
 function readMirror() {
   try {
     if (!fs.existsSync(MIRROR_FILE)) return null;
     const raw = JSON.parse(fs.readFileSync(MIRROR_FILE, 'utf8'));
-    return normalizeProxyUrl(raw && raw.url);
+    return activeFromMirror(raw);
   } catch {
     return null;
   }
@@ -57,6 +80,14 @@ async function resolveEgressProxyUrl() {
       if (r.ok) {
         const data = await r.json().catch(() => null);
         url = normalizeProxyUrl(data && data.url);
+        if (!url && data && Array.isArray(data.proxies)) {
+          for (const p of data.proxies) {
+            if (p && p.enabled !== false) {
+              url = normalizeProxyUrl(p.url);
+              if (url) break;
+            }
+          }
+        }
       }
     } catch {
       /* app unreachable */

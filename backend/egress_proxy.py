@@ -21,6 +21,8 @@ def _normalize(url: Optional[str]) -> Optional[str]:
     text = (url or "").strip()
     if not text:
         return None
+    if "://" not in text:
+        text = f"http://{text}"
     try:
         parsed = urlparse(text)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -30,12 +32,28 @@ def _normalize(url: Optional[str]) -> Optional[str]:
         return None
 
 
+def _active_from_mirror(data: Any) -> Optional[str]:
+    if not isinstance(data, dict):
+        return None
+    proxies = data.get("proxies")
+    if isinstance(proxies, list):
+        for item in proxies:
+            if not isinstance(item, dict):
+                continue
+            if item.get("enabled") is False:
+                continue
+            url = _normalize(str(item.get("url") or ""))
+            if url:
+                return url
+    return _normalize(str(data.get("url") or "") or None)
+
+
 def _read_mirror() -> Optional[str]:
     try:
         if not _MIRROR.is_file():
             return None
         data = json.loads(_MIRROR.read_text(encoding="utf-8"))
-        return _normalize(data.get("url") if isinstance(data, dict) else None)
+        return _active_from_mirror(data)
     except Exception:
         return None
 
