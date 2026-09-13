@@ -165,6 +165,10 @@ class AccountSession {
           '--no-first-run',
           '--no-default-browser-check',
           '--disable-blink-features=AutomationControlled',
+          // Chrome >= 111 rejects CDP WebSocket upgrades whose Origin header is set; without
+          // this flag the Python worker's attach is refused and it falls back to an anonymous
+          // helper Chrome that Flow scores as UNUSUAL_ACTIVITY.
+          '--remote-allow-origins=*',
           `--window-size=${VIEW_W},${VIEW_H}`,
         ],
       });
@@ -769,17 +773,32 @@ class AccountSession {
         this.authLostNotified = false;
         // Auto-refresh the aisandbox (labs) Bearer token while READY so the user never
         // has to click "Refresh aisandbox token" manually. Fire-and-forget so it never
-        // blocks status refresh. Retries on each health cycle until a token is actually
-        // obtained (an early attempt can fail before the labs session is warm), and is
-        // not marked done until success — then it only re-runs after the cache expires.
+        // blocks status refresh. Backs off exponentially on failure (15s, 30s, 60s, 120s,
+        // capped at 300s) so a signed-out account doesn't spam a warning every health
+        // cycle; a successful fetch resets the delay to 15s, and the cache check above
+        // stops attempts entirely once a valid token exists (resuming once it expires).
         if (
           typeof this.fetchLabsAccessToken === 'function' &&
           !this._cachedAccessToken(false) &&
-          !this._labsAutofetchInFlight
+          !this._labsAutofetchInFlight &&
+          Date.now() >= (this._labsAutofetchNextAt || 0)
         ) {
           this._labsAutofetchInFlight = true;
+          const delay = this._labsAutofetchDelay || 15000;
           Promise.resolve(this.fetchLabsAccessToken({ force: true }))
-            .catch(() => {})
+            .then((token) => {
+              if (token) {
+                this._labsAutofetchDelay = 15000;
+                this._labsAutofetchNextAt = 0;
+              } else {
+                this._labsAutofetchNextAt = Date.now() + delay;
+                this._labsAutofetchDelay = Math.min(delay * 2, 300000);
+              }
+            })
+            .catch(() => {
+              this._labsAutofetchNextAt = Date.now() + delay;
+              this._labsAutofetchDelay = Math.min(delay * 2, 300000);
+            })
             .finally(() => {
               this._labsAutofetchInFlight = false;
             });
