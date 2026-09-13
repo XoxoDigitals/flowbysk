@@ -89,9 +89,14 @@
     }
     if (!text) return 'System Error';
 
-    // Auth / quota / reCAPTCHA / model access are system-side, not policy.
+    // Google reCAPTCHA / unusual-activity — distinct from generic System Error.
+    if (/UNUSUAL_ACTIVITY|RECAPTCHA|unusual\s*activity/i.test(text)) {
+      return 'Unusual activity';
+    }
+
+    // Auth / quota / model access are system-side, not policy.
     if (
-      /RECAPTCHA|UNUSUAL_ACTIVITY|Bearer rejected|MODEL_ACCESS_DENIED|QUOTA|WORKER RETURNED|INTERNAL SERVER|TIMEOUT|CDP|COOKIE/i.test(
+      /Bearer rejected|MODEL_ACCESS_DENIED|QUOTA|WORKER RETURNED|INTERNAL SERVER|TIMEOUT|CDP|COOKIE/i.test(
         text
       )
     ) {
@@ -117,19 +122,31 @@
   }
 
   function isSystemGenerationError(raw) {
-    return toUserFacingGenerationError(raw) === 'System Error';
+    const label = toUserFacingGenerationError(raw);
+    return label === 'System Error' || label === 'Unusual activity';
   }
 
   async function withSystemErrorRetry(fn, label) {
-    try {
-      return await fn();
-    } catch (err) {
-      const msg = err && err.message ? err.message : String(err);
-      if (!isSystemGenerationError(msg)) throw err;
-      console.warn(`[system-retry] ${label || 'generation'}: retrying once —`, msg);
-      await new Promise((r) => setTimeout(r, 1600));
-      return await fn();
+    const maxAttempts = 5;
+    const delayMs = 2500;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        const msg = err && err.message ? err.message : String(err);
+        if (/stop by user|cancelled by user/i.test(msg)) throw err;
+        if (!isSystemGenerationError(msg)) throw err;
+        if (attempt >= maxAttempts) break;
+        console.warn(
+          `[system-retry] ${label || 'generation'}: attempt ${attempt}/${maxAttempts} failed —`,
+          msg
+        );
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
     }
+    throw lastErr;
   }
 
   /**

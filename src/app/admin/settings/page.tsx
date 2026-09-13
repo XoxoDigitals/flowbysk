@@ -36,6 +36,7 @@ export default function AdminSettingsPage() {
   const [allowSignups, setAllowSignups] = useState(true);
   const [ticketSystemEnabled, setTicketSystemEnabled] = useState(true);
   const [contactPageEnabled, setContactPageEnabled] = useState(true);
+  const [egressProxyUrl, setEgressProxyUrl] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -86,6 +87,7 @@ export default function AdminSettingsPage() {
           setAllowSignups(data.settings.allowSignups !== false);
           setTicketSystemEnabled(data.settings.ticketSystemEnabled !== false);
           setContactPageEnabled(data.settings.contactPageEnabled !== false);
+          setEgressProxyUrl(data.settings.egressProxyUrl || '');
         }
       }
       if (gRes.ok) {
@@ -138,12 +140,16 @@ export default function AdminSettingsPage() {
           allowSignups,
           ticketSystemEnabled,
           contactPageEnabled,
+          egressProxyUrl,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Save failed');
       setMessage('Site settings saved.');
       if (data?.settings?.siteName) setSiteName(data.settings.siteName);
+      if (data?.settings?.egressProxyUrl !== undefined) {
+        setEgressProxyUrl(data.settings.egressProxyUrl || '');
+      }
       await refreshSiteSettings();
     } catch (err: any) {
       setError(err.message || 'Save failed');
@@ -355,6 +361,23 @@ export default function AdminSettingsPage() {
             label={contactPageEnabled ? 'Enabled' : 'Disabled'}
           />
         </div>
+        <label className="block text-sm">
+          <span className="mb-1.5 block font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">
+            EGRESS PROXY
+          </span>
+          <input
+            value={egressProxyUrl}
+            onChange={(e) => setEgressProxyUrl(e.target.value)}
+            placeholder="http://user:pass@host:port"
+            className={inputClass}
+            autoComplete="off"
+          />
+          <p className="mt-1 text-[12px] text-[var(--ink3)]">
+            Optional HTTP(S) proxy for BiB Chrome and the Python worker when calling Google.
+            Leave empty for direct. After saving, restart BiB browsers so Chrome picks it up
+            (`pm2 restart flowbysk-bib`).
+          </p>
+        </label>
         {message && <p className="text-sm text-[var(--a1)]">{message}</p>}
         {error && <p className="text-sm text-rose-500">{error}</p>}
         <button type="submit" disabled={saving} className="btn-primary">

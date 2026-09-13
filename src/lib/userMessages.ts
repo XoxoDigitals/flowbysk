@@ -35,6 +35,9 @@ export function toUserFacingQueueMessage(internal?: string | null): string {
 export function toUserFacingError(internal?: string | null, fallback = 'Something went wrong. Please try again.'): string {
   if (!internal) return fallback;
   const msg = String(internal);
+  if (/UNUSUAL_ACTIVITY|RECAPTCHA|unusual\s*activity/i.test(msg)) {
+    return 'Unusual activity';
+  }
   if (/PROMINENT_PEOPLE|PUBLIC_ERROR_PROMINENT_PEOPLE/i.test(msg)) {
     return 'Google blocked this video because a reference looks like a recognizable person. Try different images or a more generic look.';
   }

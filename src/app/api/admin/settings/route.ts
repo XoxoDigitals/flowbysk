@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
-import { getSiteSettings, updateSiteSettings } from '@/lib/site-settings';
+import { getAdminSiteSettings, updateSiteSettings } from '@/lib/site-settings';
 
 export async function GET(req: Request) {
   try {
     await requireAdmin(req);
-    const settings = await getSiteSettings();
+    const settings = await getAdminSiteSettings();
     return NextResponse.json({ success: true, settings });
   } catch (error: any) {
     return NextResponse.json(
@@ -26,6 +26,12 @@ export async function PUT(req: Request) {
       allowSignups: body.allowSignups,
       ticketSystemEnabled: body.ticketSystemEnabled,
       contactPageEnabled: body.contactPageEnabled,
+      egressProxyUrl:
+        body.egressProxyUrl === undefined
+          ? undefined
+          : body.egressProxyUrl === ''
+            ? null
+            : body.egressProxyUrl,
     });
     return NextResponse.json({ success: true, settings });
   } catch (error: any) {

@@ -16,6 +16,7 @@ const {
   projectFromHref,
   sleep,
 } = require('./helpers');
+const { resolveEgressProxyUrl, parseProxyForChrome } = require('./egressProxy');
 
 const HEADLESS = process.env.HEADLESS === 'false' ? false : true;
 const PROFILES_ROOT =
@@ -152,21 +153,37 @@ class AccountSession {
     }
 
     try {
+      const launchArgs = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-blink-features=AutomationControlled',
+        `--window-size=${VIEW_W},${VIEW_H}`,
+      ];
+      let proxyAuth = null;
+      try {
+        const proxyUrl = await resolveEgressProxyUrl();
+        if (proxyUrl) {
+          const parsed = parseProxyForChrome(proxyUrl);
+          launchArgs.push(`--proxy-server=${parsed.server}`);
+          if (parsed.username) {
+            proxyAuth = { username: parsed.username, password: parsed.password || '' };
+          }
+          console.log(`[${this.accountId}] egress proxy: ${parsed.server}`);
+        }
+      } catch (e) {
+        console.warn(`[${this.accountId}] egress proxy resolve failed:`, e.message);
+      }
+
       this.browser = await puppeteer.launch({
         headless: HEADLESS,
         executablePath: chromePath,
         userDataDir: this.profileDir,
         defaultViewport: { width: VIEW_W, height: VIEW_H },
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--no-first-run',
-          '--no-default-browser-check',
-          '--disable-blink-features=AutomationControlled',
-          `--window-size=${VIEW_W},${VIEW_H}`,
-        ],
+        args: launchArgs,
       });
       this.browser.on('disconnected', () => {
         console.warn(`[${this.accountId}] browser disconnected`);
@@ -176,26 +193,29 @@ class AccountSession {
         this.screencasting = false;
         if (this.status !== 'STOPPED') this.status = 'STOPPED';
       });
+
+      const pages = await this.browser.pages();
+      this.page = pages[0] || (await this.browser.newPage());
+      if (proxyAuth) {
+        await this.page.authenticate(proxyAuth);
+      }
+      await this.page.setUserAgent(UA);
+      this.cdp = await this.page.target().createCDPSession();
+      await this._installBearerSniff();
+      await this.page
+        .goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 45000 })
+        .catch((e) => console.warn(`[${this.accountId}] nav:`, e.message));
+      await this.startScreencast();
+
+      const st = await this.refreshAuthStatus();
+      this._startHealthLoop();
+      return st;
     } catch (e) {
       this.status = 'ERROR';
       this.lastError = e.message || String(e);
       this.browser = null;
       throw e;
     }
-
-    const pages = await this.browser.pages();
-    this.page = pages[0] || (await this.browser.newPage());
-    await this.page.setUserAgent(UA);
-    this.cdp = await this.page.target().createCDPSession();
-    await this._installBearerSniff();
-    await this.page
-      .goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 45000 })
-      .catch((e) => console.warn(`[${this.accountId}] nav:`, e.message));
-    await this.startScreencast();
-
-    const st = await this.refreshAuthStatus();
-    this._startHealthLoop();
-    return st;
   }
 
   async disconnect({ clearProfile = false } = {}) {

@@ -52,7 +52,10 @@
       return window.toUserFacingGenerationError(raw);
     }
     if (!text) return 'System Error';
-    if (/RECAPTCHA|UNUSUAL_ACTIVITY|Bearer rejected|MODEL_ACCESS_DENIED|QUOTA|WORKER RETURNED|INTERNAL SERVER|TIMEOUT|CDP|COOKIE|Insufficient/i.test(text)) {
+    if (/UNUSUAL_ACTIVITY|RECAPTCHA|unusual\s*activity/i.test(text)) {
+      return 'Unusual activity';
+    }
+    if (/Bearer rejected|MODEL_ACCESS_DENIED|QUOTA|WORKER RETURNED|INTERNAL SERVER|TIMEOUT|CDP|COOKIE|Insufficient/i.test(text)) {
       return 'System Error';
     }
     const isPolicy =
@@ -100,15 +103,23 @@
     if (typeof window.withSystemErrorRetry === 'function') {
       return window.withSystemErrorRetry(fn, label);
     }
-    try {
-      return await fn();
-    } catch (err) {
-      const msg = err && err.message ? err.message : String(err);
-      if (toUserFacingGenerationError(msg) !== 'System Error') throw err;
-      console.warn(`[BulkT2I] system-retry ${label || ''}:`, msg);
-      await new Promise((r) => setTimeout(r, 1600));
-      return await fn();
+    const maxAttempts = 5;
+    const delayMs = 2500;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        const msg = err && err.message ? err.message : String(err);
+        const labelText = toUserFacingGenerationError(msg);
+        if (labelText !== 'System Error' && labelText !== 'Unusual activity') throw err;
+        if (attempt >= maxAttempts) break;
+        console.warn(`[BulkT2I] system-retry ${label || ''} attempt ${attempt}/${maxAttempts}:`, msg);
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
     }
+    throw lastErr;
   }
 
   function escapeHtml(s) {

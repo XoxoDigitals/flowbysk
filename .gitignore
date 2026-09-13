@@ -29,6 +29,7 @@ data/batchexecute_meta.json
 data/database.sqlite
 data/captures/
 data/settings.json
+data/egress-proxy.json
 data/characters.json
 data/bib-autolaunch.json
 

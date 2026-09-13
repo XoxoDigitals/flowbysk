@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from backend.env_util import get_env
 from backend.flow_service import flow_service, project_url
+from backend.egress_proxy import sync_egress_proxy_env
 from backend.studio_logs import (
     append_log,
     backfill_recent_to_prisma,
@@ -36,6 +37,11 @@ from backend.studio_logs import (
 logger = logging.getLogger("flow_api")
 logging.basicConfig(level=logging.INFO)
 install_logging_bridge()
+
+try:
+    sync_egress_proxy_env()
+except Exception as e:
+    logger.debug("egress proxy sync at startup: %s", e)
 
 app = FastAPI(
     title="Google Flow Web Studio API",

@@ -30,6 +30,7 @@ import requests
 import websocket
 
 from backend.env_util import get_env, is_production
+from backend.egress_proxy import apply_proxies_kwargs, sync_egress_proxy_env
 
 from backend.flow_batchexecute import (
     BATCHEXECUTE_BASES,
@@ -3507,6 +3508,10 @@ class FlowService:
         tab if there is one, otherwise minted over plain HTTP / helper Chrome.
         aisandbox rejects generation with 403 when the token is empty.
         """
+        try:
+            sync_egress_proxy_env()
+        except Exception:
+            pass
         self._ensure_aisandbox_auth()
 
         project_id = clean_project_id(self.active_project_id or "")
@@ -3549,9 +3554,17 @@ class FlowService:
             json.dumps((body or {}).get("clientContext", {}) if isinstance(body, dict) else {})[:300],
         )
         if method.upper() == "GET":
-            resp = requests.get(endpoint, headers=headers, timeout=timeout)
+            resp = requests.get(
+                endpoint, headers=headers, timeout=timeout, **apply_proxies_kwargs(endpoint, {})
+            )
         else:
-            resp = requests.post(endpoint, headers=headers, data=json.dumps(body or {}), timeout=timeout)
+            resp = requests.post(
+                endpoint,
+                headers=headers,
+                data=json.dumps(body or {}),
+                timeout=timeout,
+                **apply_proxies_kwargs(endpoint, {}),
+            )
 
         text = resp.text or ""
         if resp.status_code == 200:
@@ -3568,9 +3581,20 @@ class FlowService:
                 headers["Authorization"] = f"Bearer {self.access_token}"
                 headers["Cookie"] = self.cookies or ""
                 if method.upper() == "GET":
-                    retry_resp = requests.get(endpoint, headers=headers, timeout=timeout)
+                    retry_resp = requests.get(
+                        endpoint,
+                        headers=headers,
+                        timeout=timeout,
+                        **apply_proxies_kwargs(endpoint, {}),
+                    )
                 else:
-                    retry_resp = requests.post(endpoint, headers=headers, data=json.dumps(body or {}), timeout=timeout)
+                    retry_resp = requests.post(
+                        endpoint,
+                        headers=headers,
+                        data=json.dumps(body or {}),
+                        timeout=timeout,
+                        **apply_proxies_kwargs(endpoint, {}),
+                    )
                 if retry_resp.status_code == 200:
                     try:
                         return retry_resp.json()

@@ -29,7 +29,7 @@ export function isSystemGenerationError(raw: unknown): boolean {
   if (!text) return true;
   if (isPolicyGenerationError(text)) return false;
   if (
-    /RECAPTCHA|UNUSUAL_ACTIVITY|Bearer rejected|MODEL_ACCESS_DENIED|QUOTA|WORKER RETURNED|WORKER HTTP|INTERNAL SERVER|TIMEOUT|CDP|COOKIE|Insufficient|ECONNRESET|ETIMEDOUT|fetch failed|network|not ready|mediaId|browser not launched|mint failed/i.test(
+    /RECAPTCHA|UNUSUAL_ACTIVITY|unusual\s*activity|Bearer rejected|MODEL_ACCESS_DENIED|QUOTA|WORKER RETURNED|WORKER HTTP|INTERNAL SERVER|TIMEOUT|CDP|COOKIE|Insufficient|ECONNRESET|ETIMEDOUT|fetch failed|network|not ready|mediaId|browser not launched|mint failed/i.test(
       text
     )
   ) {
@@ -41,7 +41,7 @@ export function isSystemGenerationError(raw: unknown): boolean {
 
 export type SystemRetryOptions = {
   delayMs?: number;
-  /** Total attempts including the first (default 3). */
+  /** Total attempts including the first (default 5). */
   maxAttempts?: number;
   label?: string;
   /** Called before each retry attempt (after the first failure). */
@@ -58,8 +58,8 @@ export async function withSystemErrorRetry<T>(
   fn: () => Promise<T>,
   opts: SystemRetryOptions = {}
 ): Promise<T> {
-  const delayMs = opts.delayMs ?? 1600;
-  const maxAttempts = Math.max(1, opts.maxAttempts ?? 3);
+  const delayMs = opts.delayMs ?? 2500;
+  const maxAttempts = Math.max(1, opts.maxAttempts ?? 5);
   const label = opts.label || 'generation';
 
   let lastErr: unknown;
@@ -83,7 +83,7 @@ export async function withSystemErrorRetry<T>(
       if (opts.shouldContinue && !(await opts.shouldContinue())) {
         throw new Error('Stop by user');
       }
-      await new Promise((r) => setTimeout(r, delayMs * attempt));
+      await new Promise((r) => setTimeout(r, delayMs));
       if (opts.shouldContinue && !(await opts.shouldContinue())) {
         throw new Error('Stop by user');
       }
