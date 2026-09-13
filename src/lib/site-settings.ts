@@ -4,6 +4,7 @@ import {
   EgressProxyEntry,
   normalizeEgressProxyList,
   normalizeEgressProxyUrl,
+  readEgressProxyMirror,
   writeEgressProxyMirror,
 } from './egressProxy';
 import { randomUUID } from 'crypto';
@@ -54,6 +55,9 @@ function proxiesFromRow(row: {
   egressProxyUrl?: string | null;
   egressProxies?: unknown;
 }): EgressProxyEntry[] {
+  const mirror = readEgressProxyMirror();
+  if (mirror.proxies.length) return mirror.proxies;
+
   let proxies = normalizeEgressProxyList(row.egressProxies);
   if (!proxies.length) {
     const legacy = normalizeEgressProxyUrl(row.egressProxyUrl ?? null);
@@ -120,7 +124,12 @@ export async function getAdminSiteSettings(): Promise<AdminSiteSettings> {
     });
     return mapAdmin(row);
   } catch {
-    return { ...DEFAULTS, egressProxyUrl: null, egressProxies: [] };
+    const mirror = readEgressProxyMirror();
+    return {
+      ...DEFAULTS,
+      egressProxyUrl: mirror.url,
+      egressProxies: mirror.proxies,
+    };
   }
 }
 
@@ -138,14 +147,12 @@ export async function updateSiteSettings(data: {
 
   if (data.egressProxies !== undefined) {
     proxies = normalizeEgressProxyList(data.egressProxies);
-    // Reject silently wiping when client sent garbage entries with text
     if (Array.isArray(data.egressProxies) && data.egressProxies.length > 0 && proxies.length === 0) {
       throw new Error(
         'Invalid proxy URL(s). Use http://host:port or http://user:pass@host:port (or host:port).'
       );
     }
   } else if (data.egressProxyUrl !== undefined) {
-    // Legacy single-field update → one-item list
     const url = normalizeEgressProxyUrl(data.egressProxyUrl);
     if (data.egressProxyUrl && String(data.egressProxyUrl).trim() && !url) {
       throw new Error(
@@ -157,43 +164,51 @@ export async function updateSiteSettings(data: {
 
   const active = proxies ? activeEgressProxyUrl(proxies) : undefined;
 
-  const row = await prisma.siteSettings.upsert({
-    where: { id: 'default' },
-    create: {
-      id: 'default',
-      siteName: data.siteName?.trim() || DEFAULTS.siteName,
-      logoUrl: data.logoUrl ?? null,
-      contactEmail: data.contactEmail?.trim() || DEFAULTS.contactEmail,
-      allowSignups: data.allowSignups ?? DEFAULTS.allowSignups,
-      ticketSystemEnabled: data.ticketSystemEnabled ?? DEFAULTS.ticketSystemEnabled,
-      contactPageEnabled: data.contactPageEnabled ?? DEFAULTS.contactPageEnabled,
-      egressProxyUrl: active ?? null,
-      egressProxies: proxies ?? [],
-    },
-    update: {
-      ...(data.siteName !== undefined ? { siteName: data.siteName.trim() || DEFAULTS.siteName } : {}),
-      ...(data.logoUrl !== undefined ? { logoUrl: data.logoUrl } : {}),
-      ...(data.contactEmail !== undefined
-        ? { contactEmail: data.contactEmail.trim() || DEFAULTS.contactEmail }
-        : {}),
-      ...(data.allowSignups !== undefined ? { allowSignups: Boolean(data.allowSignups) } : {}),
-      ...(data.ticketSystemEnabled !== undefined
-        ? { ticketSystemEnabled: Boolean(data.ticketSystemEnabled) }
-        : {}),
-      ...(data.contactPageEnabled !== undefined
-        ? { contactPageEnabled: Boolean(data.contactPageEnabled) }
-        : {}),
-      ...(proxies !== undefined
-        ? { egressProxies: proxies, egressProxyUrl: active }
-        : {}),
-    },
-  });
-
-  const admin = mapAdmin(row);
-  try {
-    writeEgressProxyMirror(admin.egressProxies);
-  } catch (e) {
-    console.warn('[site-settings] egress proxy mirror write failed:', e);
+  if (proxies !== undefined) {
+    writeEgressProxyMirror(proxies);
   }
-  return admin;
+
+  try {
+    const row = await prisma.siteSettings.upsert({
+      where: { id: 'default' },
+      create: {
+        id: 'default',
+        siteName: data.siteName?.trim() || DEFAULTS.siteName,
+        logoUrl: data.logoUrl ?? null,
+        contactEmail: data.contactEmail?.trim() || DEFAULTS.contactEmail,
+        allowSignups: data.allowSignups ?? DEFAULTS.allowSignups,
+        ticketSystemEnabled: data.ticketSystemEnabled ?? DEFAULTS.ticketSystemEnabled,
+        contactPageEnabled: data.contactPageEnabled ?? DEFAULTS.contactPageEnabled,
+        egressProxyUrl: active ?? null,
+        egressProxies: proxies ?? [],
+      },
+      update: {
+        ...(data.siteName !== undefined ? { siteName: data.siteName.trim() || DEFAULTS.siteName } : {}),
+        ...(data.logoUrl !== undefined ? { logoUrl: data.logoUrl } : {}),
+        ...(data.contactEmail !== undefined
+          ? { contactEmail: data.contactEmail.trim() || DEFAULTS.contactEmail }
+          : {}),
+        ...(data.allowSignups !== undefined ? { allowSignups: Boolean(data.allowSignups) } : {}),
+        ...(data.ticketSystemEnabled !== undefined
+          ? { ticketSystemEnabled: Boolean(data.ticketSystemEnabled) }
+          : {}),
+        ...(data.contactPageEnabled !== undefined
+          ? { contactPageEnabled: Boolean(data.contactPageEnabled) }
+          : {}),
+        ...(proxies !== undefined
+          ? { egressProxies: proxies, egressProxyUrl: active }
+          : {}),
+      },
+    });
+    return mapAdmin(row);
+  } catch (e) {
+    console.warn('[site-settings] DB update partial failure:', e);
+    const publicPart = await getSiteSettings().catch(() => ({ ...DEFAULTS }));
+    const mirror = readEgressProxyMirror();
+    return {
+      ...publicPart,
+      egressProxies: proxies ?? mirror.proxies,
+      egressProxyUrl: active ?? mirror.url,
+    };
+  }
 }

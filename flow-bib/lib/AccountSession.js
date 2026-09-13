@@ -67,6 +67,11 @@ class AccountSession {
     this.wasReady = false;
     this._labsTokenCache = null;
     this._bearerSniffInstalled = false;
+    this.egressProxyUrl = null;
+    this.egressIp = null;
+    this.egressCountry = null;
+    this.egressCountryCode = null;
+    this.egressError = null;
   }
 
   /** Safely update profileDir post-construction (e.g. re-launch with a new opts.profileDir). */
@@ -173,6 +178,7 @@ class AccountSession {
             proxyAuth = { username: parsed.username, password: parsed.password || '' };
           }
           console.log(`[${this.accountId}] egress proxy: ${parsed.server}`);
+          this.egressProxyUrl = proxyUrl;
         }
       } catch (e) {
         console.warn(`[${this.accountId}] egress proxy resolve failed:`, e.message);
@@ -206,6 +212,10 @@ class AccountSession {
         .goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 45000 })
         .catch((e) => console.warn(`[${this.accountId}] nav:`, e.message));
       await this.startScreencast();
+
+      await this.refreshEgressIp().catch((e) =>
+        console.warn(`[${this.accountId}] egress IP probe:`, e.message)
+      );
 
       const st = await this.refreshAuthStatus();
       this._startHealthLoop();
@@ -1053,7 +1063,81 @@ class AccountSession {
       email: this.email,
       lastError: this.lastError,
       running: !!this.browser,
+      egress: {
+        proxy: this.egressProxyUrl || null,
+        ip: this.egressIp || null,
+        country: this.egressCountry || null,
+        countryCode: this.egressCountryCode || null,
+        error: this.egressError || null,
+      },
     };
+  }
+
+  /**
+   * Probe exit IP/country through the Chrome page (uses --proxy-server if set).
+   */
+  async refreshEgressIp() {
+    if (!this.page) return null;
+    let proxyUrl = null;
+    try {
+      proxyUrl = await resolveEgressProxyUrl();
+    } catch {
+      proxyUrl = null;
+    }
+    this.egressProxyUrl = proxyUrl;
+    this.egressError = null;
+    try {
+      const info = await this.page.evaluate(async () => {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 15000);
+        try {
+          try {
+            const r = await fetch('https://ipapi.co/json/', {
+              signal: ctrl.signal,
+              headers: { Accept: 'application/json' },
+            });
+            const j = await r.json();
+            if (j && j.ip && !j.error) {
+              return {
+                ip: String(j.ip),
+                country: String(j.country_name || j.country || ''),
+                countryCode: String(j.country_code || ''),
+              };
+            }
+          } catch (_) {
+            /* fallback */
+          }
+          try {
+            const r2 = await fetch('https://api.ipify.org?format=json', { signal: ctrl.signal });
+            const j2 = await r2.json();
+            if (j2 && j2.ip) return { ip: String(j2.ip), country: '', countryCode: '' };
+          } catch (_) {
+            /* ignore */
+          }
+          return null;
+        } finally {
+          clearTimeout(t);
+        }
+      });
+      if (info && info.ip) {
+        this.egressIp = info.ip;
+        this.egressCountry = info.country || null;
+        this.egressCountryCode = info.countryCode || null;
+        this.broadcast({
+          type: 'egress',
+          ip: this.egressIp,
+          country: this.egressCountry,
+          countryCode: this.egressCountryCode,
+          proxy: !!this.egressProxyUrl,
+        });
+        return info;
+      }
+      this.egressError = 'Could not resolve exit IP';
+      return null;
+    } catch (e) {
+      this.egressError = e.message || String(e);
+      return null;
+    }
   }
 
   pickProjectId(preferred) {

@@ -1042,7 +1042,8 @@ export default function AdminAccountsPage() {
               <div>
                 <h3 className="text-sm font-bold text-[var(--ink)]">BiB Login — {bibViewer.label}</h3>
                 <p className="text-[11px] text-[var(--ink3)]">
-                  Sign into Google inside the stream, then click Ensure projects on the card.
+                  Exit IP and country show in the stream toolbar (top). Restart BiB after changing
+                  proxies so Chrome picks them up.
                 </p>
               </div>
               <div className="flex items-center gap-2">

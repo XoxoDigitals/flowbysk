@@ -31,6 +31,7 @@
   <span id="authPill" class="pill off">auth: —</span>
   <span id="labsPill" class="pill off">aisandbox: —</span>
   <span id="projPill" class="pill">projects: —</span>
+  <span id="proxyPill" class="pill">proxy: —</span>
 </div>
 <div class="navrow">
   <input id="navUrl" type="url" placeholder="Paste Flow project URL (https://flow.google.com/project/…)" spellcheck="false" />
@@ -76,6 +77,22 @@ async function pollStatus() {
     if (s.hasAccessToken || s.labsOk) {
       setPill('labsPill', 'aisandbox: token OK', true);
     }
+    const eg = s.egress || {};
+    if (eg.ip) {
+      const label =
+        'IP ' +
+        eg.ip +
+        (eg.country ? ' · ' + eg.country : '') +
+        (eg.countryCode ? ' (' + eg.countryCode + ')' : '') +
+        (eg.proxy ? '' : ' · direct');
+      setPill('proxyPill', label, !!eg.proxy);
+    } else if (eg.error) {
+      setPill('proxyPill', 'proxy: ' + String(eg.error).slice(0, 40), false);
+    } else if (eg.proxy) {
+      setPill('proxyPill', 'proxy: checking…', null);
+    } else {
+      setPill('proxyPill', 'proxy: direct', null);
+    }
   } catch (_) { /* ignore transient */ }
 }
 
@@ -103,6 +120,17 @@ function connect() {
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === 'frame') screen.src = 'data:image/jpeg;base64,' + m.data;
+    if (m.type === 'egress') {
+      if (m.ip) {
+        const label =
+          'IP ' +
+          m.ip +
+          (m.country ? ' · ' + m.country : '') +
+          (m.countryCode ? ' (' + m.countryCode + ')' : '') +
+          (m.proxy ? '' : ' · direct');
+        setPill('proxyPill', label, !!m.proxy);
+      }
+    }
   };
 }
 $('connectBtn').onclick = connect;
