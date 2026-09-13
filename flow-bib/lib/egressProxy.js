@@ -10,11 +10,32 @@ const INTERNAL_SECRET = process.env.INTERNAL_API_SECRET || process.env.JWT_SECRE
 let _cache = { url: null, at: 0 };
 
 /**
+ * Accept:
+ * - http(s)://user:pass@host:port
+ * - host:port
+ * - user:pass@host:port
+ * - host:port:user:pass
  * @returns {string|null}
  */
 function normalizeProxyUrl(raw) {
   let text = String(raw || '').trim();
   if (!text) return null;
+
+  const colonParts = text.split(':');
+  if (
+    !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(text) &&
+    !text.includes('@') &&
+    colonParts.length >= 4
+  ) {
+    const password = colonParts.pop();
+    const username = colonParts.pop();
+    const port = colonParts.pop();
+    const host = colonParts.join(':');
+    if (host && /^\d+$/.test(port) && username) {
+      text = `http://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${port}`;
+    }
+  }
+
   if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(text)) {
     text = `http://${text}`;
   }

@@ -77,10 +77,10 @@ export async function PUT(req: Request) {
         return NextResponse.json(
           {
             error:
-              'Invalid proxy URL(s). Use http://host:port or http://user:pass@host:port (or host:port).',
-          },
-          { status: 400 }
-        );
+              'Invalid proxy URL(s). Use host:port:user:pass or http://user:pass@host:port.',
+            },
+            { status: 400 }
+          );
       }
     }
     // Preserve geo fields from previous mirror when URL unchanged

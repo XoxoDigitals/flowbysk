@@ -21,6 +21,18 @@ def _normalize(url: Optional[str]) -> Optional[str]:
     text = (url or "").strip()
     if not text:
         return None
+    # host:port:user:pass
+    if "://" not in text and "@" not in text:
+        parts = text.split(":")
+        if len(parts) >= 4:
+            password = parts[-1]
+            username = parts[-2]
+            port = parts[-3]
+            host = ":".join(parts[:-3])
+            if host and port.isdigit() and username:
+                from urllib.parse import quote
+
+                text = f"http://{quote(username, safe='')}:{quote(password, safe='')}@{host}:{port}"
     if "://" not in text:
         text = f"http://{text}"
     try:

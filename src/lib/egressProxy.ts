@@ -18,12 +18,32 @@ export type EgressProxyEntry = {
 };
 
 /**
- * Accept http(s)://..., host:port, user:pass@host:port.
- * Returns canonical URL or null.
+ * Accept:
+ * - http(s)://user:pass@host:port
+ * - host:port
+ * - user:pass@host:port
+ * - host:port:user:pass  (common vendor format)
+ * Returns canonical http URL or null.
  */
 export function normalizeEgressProxyUrl(raw?: string | null): string | null {
   let text = String(raw ?? '').trim();
   if (!text) return null;
+
+  // host:port:user:pass  (IPv4 or hostname)
+  const colonParts = text.split(':');
+  if (
+    !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(text) &&
+    !text.includes('@') &&
+    colonParts.length >= 4
+  ) {
+    const password = colonParts.pop() as string;
+    const username = colonParts.pop() as string;
+    const port = colonParts.pop() as string;
+    const host = colonParts.join(':'); // IPv6-safe-ish if ever needed
+    if (host && /^\d+$/.test(port) && username) {
+      text = `http://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${port}`;
+    }
+  }
 
   if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(text)) {
     text = `http://${text}`;

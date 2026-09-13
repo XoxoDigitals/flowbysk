@@ -548,7 +548,7 @@ export default function AdminSettingsPage() {
           <input
             value={newProxyUrl}
             onChange={(e) => setNewProxyUrl(e.target.value)}
-            placeholder="http://user:pass@host:port or host:port"
+            placeholder="host:port:user:pass  or  http://user:pass@host:port"
             className={`${inputClass} flex-1`}
             autoComplete="off"
             spellCheck={false}

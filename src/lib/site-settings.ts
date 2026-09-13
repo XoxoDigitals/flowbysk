@@ -149,14 +149,14 @@ export async function updateSiteSettings(data: {
     proxies = normalizeEgressProxyList(data.egressProxies);
     if (Array.isArray(data.egressProxies) && data.egressProxies.length > 0 && proxies.length === 0) {
       throw new Error(
-        'Invalid proxy URL(s). Use http://host:port or http://user:pass@host:port (or host:port).'
+        'Invalid proxy URL(s). Use host:port:user:pass or http://user:pass@host:port.'
       );
     }
   } else if (data.egressProxyUrl !== undefined) {
     const url = normalizeEgressProxyUrl(data.egressProxyUrl);
     if (data.egressProxyUrl && String(data.egressProxyUrl).trim() && !url) {
       throw new Error(
-        'Invalid proxy URL. Use http://host:port or http://user:pass@host:port (or host:port).'
+        'Invalid proxy URL. Use host:port:user:pass or http://user:pass@host:port.'
       );
     }
     proxies = url ? [{ id: randomUUID(), url, enabled: true }] : [];
