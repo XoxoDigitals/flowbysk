@@ -338,6 +338,16 @@ app.get('/accounts', (_req, res) => {
   res.json({ accounts: [...pool.values()].map((s) => s.publicStatus()) });
 });
 
+app.post('/egress-proxy/clear-cache', requireInternalSecret, (_req, res) => {
+  try {
+    const { clearEgressProxyCache } = require('./lib/egressProxy');
+    clearEgressProxyCache();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/accounts/:id/launch', requireInternalSecret, async (req, res) => {
   try {
     const id = req.params.id;
@@ -1388,9 +1398,48 @@ app.post('/video-status', requireInternalSecret, async (req, res) => {
       imageUrl = extractImageUrl(at);
     }
 
-    // First+last / ReferenceImages submit via aisandbox — jwpduf often never sees them
+    // First+last / ReferenceImages — prefer no-mint GET before batchCheck POST
     if (!videoUrl && !imageUrl) {
+      const quietAisandbox =
+        /401|UNAUTHENTICATED|Execution context was destroyed|reCAPTCHA mint failed|navigation/i;
       try {
+        try {
+          const detail = await s.aisandboxGet(
+            `https://aisandbox-pa.googleapis.com/v1/flowMedia/${encodeURIComponent(mediaId)}`
+          );
+          const detailParsed = extractAisandboxVideoStatus(detail, mediaId);
+          if (detailParsed.status === 'FAILED') {
+            return res.json({
+              success: true,
+              status: 'FAILED',
+              error: detailParsed.error || 'Generation failed in Veo',
+              videoUrl: null,
+              imageUrl: null,
+              mediaId,
+              projectId,
+              accountId,
+              via: 'aisandbox_flowMedia',
+            });
+          }
+          if (detailParsed.videoUrl) {
+            return res.json({
+              success: true,
+              status: 'COMPLETED',
+              videoUrl: detailParsed.videoUrl,
+              imageUrl: null,
+              url: detailParsed.videoUrl,
+              mediaId,
+              projectId,
+              accountId,
+              via: 'aisandbox_flowMedia',
+            });
+          }
+        } catch (detailErr) {
+          if (!quietAisandbox.test(detailErr.message || '')) {
+            console.warn(`[${accountId}] flowMedia poll:`, detailErr.message);
+          }
+        }
+
         const check = await s.aisandboxPost(
           'https://aisandbox-pa.googleapis.com/v1/video:batchCheckAsyncVideoGenerationStatus',
           {
@@ -1425,43 +1474,10 @@ app.post('/video-status', requireInternalSecret, async (req, res) => {
             via: 'aisandbox_batchCheck',
           });
         }
-        // Detail lookup when status says success but URL missing in batch payload
-        try {
-          const detail = await s.aisandboxGet(
-            `https://aisandbox-pa.googleapis.com/v1/flowMedia/${encodeURIComponent(mediaId)}`
-          );
-          const detailParsed = extractAisandboxVideoStatus(detail, mediaId);
-          if (detailParsed.status === 'FAILED') {
-            return res.json({
-              success: true,
-              status: 'FAILED',
-              error: detailParsed.error || 'Generation failed in Veo',
-              videoUrl: null,
-              imageUrl: null,
-              mediaId,
-              projectId,
-              accountId,
-              via: 'aisandbox_flowMedia',
-            });
-          }
-          if (detailParsed.videoUrl) {
-            return res.json({
-              success: true,
-              status: 'COMPLETED',
-              videoUrl: detailParsed.videoUrl,
-              imageUrl: null,
-              url: detailParsed.videoUrl,
-              mediaId,
-              projectId,
-              accountId,
-              via: 'aisandbox_flowMedia',
-            });
-          }
-        } catch (detailErr) {
-          console.warn(`[${accountId}] flowMedia poll:`, detailErr.message);
-        }
       } catch (sandboxErr) {
-        console.warn(`[${accountId}] aisandbox status poll:`, sandboxErr.message);
+        if (!quietAisandbox.test(sandboxErr.message || '')) {
+          console.warn(`[${accountId}] aisandbox status poll:`, sandboxErr.message);
+        }
       }
     }
 

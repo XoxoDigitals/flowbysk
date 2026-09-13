@@ -6,7 +6,7 @@ import StudioShell from '@/components/studio/StudioShell';
 const WHISK_SRC = '/static/whisk.js?v=model-remap-1';
 const BULKT2V_SRC = '/static/bulkt2v.js?v=btv-8';
 const BULKT2I_SRC = '/static/bulkt2i.js?v=bti-7';
-const BULKI2V_SRC = '/static/bulki2v.js?v=biv-7';
+const BULKI2V_SRC = '/static/bulki2v.js?v=biv-8';
 // Bump when app.js display logic changes so browsers don't keep a stale Studio shell script.
 const APP_SRC = '/static/app.js?v=unusual-proxy-1';
 const STORYTELLER_SRC = '/static/storyteller.js?v=bvs-28';

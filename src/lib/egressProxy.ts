@@ -118,6 +118,40 @@ export function activeEgressProxyUrl(proxies: EgressProxyEntry[]): string | null
   return hit?.url || null;
 }
 
+/**
+ * Move active proxy to the next enabled entry (wrap). Keeps all entries enabled;
+ * reorders so the next one is first among enabled.
+ */
+export function rotateActiveEgressProxy(): {
+  ok: boolean;
+  from: string | null;
+  to: string | null;
+  proxies: EgressProxyEntry[];
+} {
+  const { proxies } = readEgressProxyMirror();
+  const enabled = proxies.filter((p) => p.enabled && p.url);
+  if (enabled.length < 2) {
+    return {
+      ok: false,
+      from: activeEgressProxyUrl(proxies),
+      to: activeEgressProxyUrl(proxies),
+      proxies,
+    };
+  }
+  const from = enabled[0].url;
+  // Rotate enabled order: [1,2,...,0] while preserving disabled entries in place after enabled block
+  const enabledRotated = [...enabled.slice(1), enabled[0]];
+  const disabled = proxies.filter((p) => !p.enabled || !p.url);
+  const next = [...enabledRotated, ...disabled];
+  writeEgressProxyMirror(next);
+  return {
+    ok: true,
+    from,
+    to: activeEgressProxyUrl(next),
+    proxies: next,
+  };
+}
+
 export function writeEgressProxyMirror(proxies: EgressProxyEntry[]): void {
   const dir = path.dirname(EGRESS_PROXY_MIRROR_PATH);
   fs.mkdirSync(dir, { recursive: true });

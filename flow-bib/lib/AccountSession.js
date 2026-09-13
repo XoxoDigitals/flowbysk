@@ -72,6 +72,7 @@ class AccountSession {
     this.egressCountry = null;
     this.egressCountryCode = null;
     this.egressError = null;
+    this._mintLock = null;
   }
 
   /** Safely update profileDir post-construction (e.g. re-launch with a new opts.profileDir). */
@@ -170,7 +171,7 @@ class AccountSession {
       ];
       let proxyAuth = null;
       try {
-        const proxyUrl = await resolveEgressProxyUrl();
+        const proxyUrl = await resolveEgressProxyUrl({ force: true });
         if (proxyUrl) {
           const parsed = parseProxyForChrome(proxyUrl);
           launchArgs.push(`--proxy-server=${parsed.server}`);
@@ -280,6 +281,15 @@ class AccountSession {
   async mintRecaptcha(action = 'IMAGE_GENERATION') {
     if (!this.page) throw new Error('Browser not launched');
 
+    // Serialize mints so status polls / generates don't race the same tab.
+    while (this._mintLock) {
+      await this._mintLock.catch(() => {});
+    }
+    let release;
+    this._mintLock = new Promise((r) => {
+      release = r;
+    });
+
     const ensureProjectPage = async () => {
       const ctx = await this.readContext();
       let pid = projectFromHref(ctx.href);
@@ -293,79 +303,97 @@ class AccountSession {
       return pid;
     };
 
-    for (let attempt = 1; attempt <= 4; attempt++) {
+    const waitForSettle = async () => {
       try {
-        await ensureProjectPage();
-        try {
-          await this.page.waitForFunction(
-            () =>
-              !!(
-                window.grecaptcha &&
-                window.grecaptcha.enterprise &&
-                typeof window.grecaptcha.enterprise.execute === 'function'
-              ),
-            { timeout: 10000 }
-          );
-        } catch {
-          // grecaptcha not ready — reload project page
-          const ctx = await this.readContext();
-          const pid = projectFromHref(ctx.href) || this.projectIds[0];
-          if (pid) {
-            await this.navigate(`https://flow.google.com/project/${pid}`);
-          } else {
-            await this.page.reload({ waitUntil: 'domcontentloaded' });
-          }
-          await sleep(1500);
-        }
+        await this.page.waitForFunction(() => document.readyState === 'complete', {
+          timeout: 8000,
+        });
+      } catch {
+        /* ignore */
+      }
+      await sleep(600);
+    };
 
-        const token = await this.page.evaluate(
-          async (key, act) => {
-            await new Promise((resolve) => {
-              try {
-                if (
+    try {
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        try {
+          await ensureProjectPage();
+          try {
+            await this.page.waitForFunction(
+              () =>
+                !!(
                   window.grecaptcha &&
                   window.grecaptcha.enterprise &&
-                  typeof window.grecaptcha.enterprise.ready === 'function'
-                ) {
-                  window.grecaptcha.enterprise.ready(resolve);
-                } else {
+                  typeof window.grecaptcha.enterprise.execute === 'function'
+                ),
+              { timeout: 10000 }
+            );
+          } catch {
+            const ctx = await this.readContext();
+            const pid = projectFromHref(ctx.href) || this.projectIds[0];
+            if (pid) {
+              await this.navigate(`https://flow.google.com/project/${pid}`);
+            } else {
+              await this.page.reload({ waitUntil: 'domcontentloaded' });
+            }
+            await sleep(1500);
+          }
+
+          const token = await this.page.evaluate(
+            async (key, act) => {
+              await new Promise((resolve) => {
+                try {
+                  if (
+                    window.grecaptcha &&
+                    window.grecaptcha.enterprise &&
+                    typeof window.grecaptcha.enterprise.ready === 'function'
+                  ) {
+                    window.grecaptcha.enterprise.ready(resolve);
+                  } else {
+                    resolve();
+                  }
+                } catch {
                   resolve();
                 }
-              } catch {
-                resolve();
-              }
-            });
-            if (!(window.grecaptcha && window.grecaptcha.enterprise)) return '';
-            try {
-              return await window.grecaptcha.enterprise.execute(key, { action: act });
-            } catch (e) {
+              });
+              if (!(window.grecaptcha && window.grecaptcha.enterprise)) return '';
               try {
-                // Some Flow builds accept the action without enterprise wrapper quirks on retry
                 return await window.grecaptcha.enterprise.execute(key, { action: act });
-              } catch {
-                return '';
+              } catch (e) {
+                try {
+                  return await window.grecaptcha.enterprise.execute(key, { action: act });
+                } catch {
+                  return '';
+                }
               }
-            }
-          },
-          SITE_KEY,
-          action
-        );
+            },
+            SITE_KEY,
+            action
+          );
 
-        if (token && String(token).length >= 50) {
-          if (attempt > 1) {
-            console.log(`[${this.accountId}] reCAPTCHA mint ok on attempt ${attempt} (${action})`);
+          if (token && String(token).length >= 50) {
+            if (attempt > 1) {
+              console.log(`[${this.accountId}] reCAPTCHA mint ok on attempt ${attempt} (${action})`);
+            }
+            return token;
           }
-          return token;
+          console.warn(
+            `[${this.accountId}] reCAPTCHA mint empty (attempt ${attempt}/4, action=${action})`
+          );
+        } catch (e) {
+          const msg = e && e.message ? e.message : String(e);
+          console.warn(`[${this.accountId}] reCAPTCHA mint error attempt ${attempt}:`, msg);
+          if (/Execution context was destroyed|navigation|Target closed/i.test(msg)) {
+            await waitForSettle();
+          }
         }
-        console.warn(
-          `[${this.accountId}] reCAPTCHA mint empty (attempt ${attempt}/4, action=${action})`
-        );
-      } catch (e) {
-        console.warn(`[${this.accountId}] reCAPTCHA mint error attempt ${attempt}:`, e.message);
+        await sleep(800 * attempt);
       }
-      await sleep(800 * attempt);
+      return '';
+    } finally {
+      this._mintLock = null;
+      if (typeof release === 'function') release();
     }
-    return '';
   }
 
   /**
@@ -773,28 +801,36 @@ class AccountSession {
       applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
     };
 
-    const result = await this.page.evaluate(
-      async (ep, bodyJson, bearer) => {
-        try {
-          const r = await fetch(ep, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'text/plain;charset=UTF-8',
-              Authorization: 'Bearer ' + bearer,
-            },
-            body: bodyJson,
-            credentials: 'include',
-          });
-          const text = await r.text();
-          return { status: r.status, text };
-        } catch (e) {
-          return { status: 0, text: e && e.message ? e.message : String(e) };
-        }
-      },
-      endpoint,
-      JSON.stringify(body),
-      accessToken
-    );
+    const runPost = async (bearer) =>
+      this.page.evaluate(
+        async (ep, bodyJson, tok) => {
+          try {
+            const r = await fetch(ep, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'text/plain;charset=UTF-8',
+                Authorization: 'Bearer ' + tok,
+              },
+              body: bodyJson,
+              credentials: 'include',
+            });
+            const text = await r.text();
+            return { status: r.status, text };
+          } catch (e) {
+            return { status: 0, text: e && e.message ? e.message : String(e) };
+          }
+        },
+        endpoint,
+        JSON.stringify(body),
+        bearer
+      );
+
+    let result = await runPost(accessToken);
+    if (result.status === 401) {
+      this._labsTokenCache = null;
+      accessToken = await this.fetchLabsAccessToken({ force: true });
+      if (accessToken) result = await runPost(accessToken);
+    }
 
     let data = null;
     try {
@@ -833,26 +869,34 @@ class AccountSession {
         'No aisandbox access_token — open BiB viewer, sign into flow.google.com, then Refresh aisandbox token'
       );
     }
-    const result = await this.page.evaluate(
-      async (ep, bearer) => {
-        try {
-          const r = await fetch(ep, {
-            method: 'GET',
-            headers: {
-              Authorization: 'Bearer ' + bearer,
-              Accept: 'application/json',
-            },
-            credentials: 'include',
-          });
-          const text = await r.text();
-          return { status: r.status, text };
-        } catch (e) {
-          return { status: 0, text: e && e.message ? e.message : String(e) };
-        }
-      },
-      endpoint,
-      accessToken
-    );
+    const runGet = async (bearer) =>
+      this.page.evaluate(
+        async (ep, tok) => {
+          try {
+            const r = await fetch(ep, {
+              method: 'GET',
+              headers: {
+                Authorization: 'Bearer ' + tok,
+                Accept: 'application/json',
+              },
+              credentials: 'include',
+            });
+            const text = await r.text();
+            return { status: r.status, text };
+          } catch (e) {
+            return { status: 0, text: e && e.message ? e.message : String(e) };
+          }
+        },
+        endpoint,
+        bearer
+      );
+
+    let result = await runGet(accessToken);
+    if (result.status === 401) {
+      this._labsTokenCache = null;
+      accessToken = await this.fetchLabsAccessToken({ force: true });
+      if (accessToken) result = await runGet(accessToken);
+    }
     let data = null;
     try {
       data = JSON.parse(result.text || '{}');
@@ -1241,15 +1285,66 @@ class AccountSession {
     throw new Error('New project click did not yield a new project id');
   }
 
+  /**
+   * Probe whether a project id still opens on Flow (not deleted / not redirected away).
+   */
+  async probeProjectAvailable(projectId) {
+    const id = String(projectId || '').trim();
+    if (!id || !this.page) return false;
+    try {
+      await this.navigate(`https://flow.google.com/project/${id}`);
+      await sleep(900);
+      const href = this.page.url() || '';
+      if (/accounts\.google\.com|\/signin|\/about\b/i.test(href)) return false;
+      const fromUrl = projectFromHref(href);
+      if (fromUrl && fromUrl.toLowerCase() === id.toLowerCase()) return true;
+      // Still on a project URL with this id in path
+      if (new RegExp(`/project/${id}`, 'i').test(href)) return true;
+      // Soft check: page shows project chrome rather than home grid only
+      const ok = await this.page.evaluate((pid) => {
+        const u = location.href || '';
+        if (new RegExp(pid, 'i').test(u)) return true;
+        const t = (document.body && document.body.innerText) || '';
+        if (/project not found|couldn't find|does not exist|404/i.test(t)) return false;
+        return /flow\.google\.com\/project\//i.test(u);
+      }, id);
+      return !!ok;
+    } catch {
+      return false;
+    }
+  }
+
   async ensureProjects(maxSlots) {
     const slots = Math.max(1, Number(maxSlots) || this.maxSlots || 5);
     this.maxSlots = slots;
 
-    // 1) Fetch existing projects from flow.google.com (preferred)
-    let ids = [...new Set([...(await this.scrapeProjects()), ...this.projectIds])];
-    console.log(`[${this.accountId}] ensure-projects: found ${ids.length}, need ${slots}`);
+    // 1) Live scrape from flow.google.com
+    const scraped = await this.scrapeProjects();
+    const scrapedSet = new Set(scraped.map((x) => String(x).toLowerCase()));
+    console.log(`[${this.accountId}] ensure-projects: scraped ${scraped.length}, stored ${this.projectIds.length}, need ${slots}`);
 
-    // 2) Only create extras via Flow UI if short — never labs.google TRPC
+    // 2) Re-check stored IDs missing from scrape (stale/deleted)
+    const stored = [...new Set((this.projectIds || []).map((x) => String(x).trim()).filter(Boolean))];
+    const missing = stored.filter((id) => !scrapedSet.has(id.toLowerCase()));
+    const stillAlive = [];
+    const probeCap = Math.min(20, missing.length);
+    for (let i = 0; i < probeCap; i++) {
+      const id = missing[i];
+      const ok = await this.probeProjectAvailable(id);
+      if (ok) stillAlive.push(id);
+      else console.log(`[${this.accountId}] ensure-projects: dropped unavailable ${id}`);
+    }
+    // IDs beyond probe cap that weren't scraped are treated as dead when scrape returned a solid set
+    if (missing.length > probeCap && scraped.length >= 3) {
+      console.log(
+        `[${this.accountId}] ensure-projects: skipping probe for ${missing.length - probeCap} extra stored id(s); scrape trusted`
+      );
+    }
+
+    let ids = [...new Set([...scraped, ...stillAlive])];
+    console.log(`[${this.accountId}] ensure-projects: alive ${ids.length} after validate`);
+
+    // 3) Only create extras via Flow UI if short — never labs.google TRPC
     let guard = 0;
     while (ids.length < slots && guard < Math.min(5, slots - ids.length + 1)) {
       guard += 1;
@@ -1258,10 +1353,10 @@ class AccountSession {
         if (created && !ids.includes(created)) ids.push(created);
       } catch (e) {
         console.warn(`[${this.accountId}] create via UI failed:`, e.message);
-        break; // keep whatever we scraped
+        break;
       }
-      const scraped = await this.scrapeProjects();
-      ids = [...new Set([...ids, ...scraped])];
+      const again = await this.scrapeProjects();
+      ids = [...new Set([...ids, ...again])];
     }
 
     if (!ids.length) {
@@ -1270,9 +1365,7 @@ class AccountSession {
       );
     }
 
-    // Use all scraped projects (up to a generous cap); prefer filling slots
     this.projectIds = ids.slice(0, Math.max(slots, ids.length));
-    // Park on first project so reCAPTCHA can mint
     if (this.projectIds[0]) {
       await this.navigate(`https://flow.google.com/project/${this.projectIds[0]}`);
       await sleep(1500);

@@ -20,6 +20,10 @@ import {
   resolveEffectiveParallel,
 } from '@/lib/customDeals';
 import { toUserFacingQueueMessage, toUserFacingError } from '@/lib/userMessages';
+import {
+  noteUnusualActivityFailure,
+  resetUnusualActivityStreak,
+} from '@/lib/unusualActivityProxyRotate';
 
 const PYTHON_WORKER_URL = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
 
@@ -512,6 +516,8 @@ export async function handleJobSuccess(jobId: string, outputUrl: string, metadat
     },
   });
 
+  resetUnusualActivityStreak();
+
   // Persist into prisma.asset so media gallery and projects find it in DB
   const isVideo = job.modelKey.includes('veo') || job.modelKey.includes('omni');
   const isJpg = outputUrl.includes('.jpg') || outputUrl.includes('.jpeg');
@@ -628,6 +634,10 @@ export async function handleJobFailure(jobId: string, errorMessage: string) {
   });
 
   console.error(`[jobFailure ${jobId}]`, errorMessage);
+
+  noteUnusualActivityFailure(errorMessage).catch((e) =>
+    console.warn('[proxy-rotate]', e)
+  );
 
   // Release customer reserved credits
   await releaseCredits(job.userId, job.walletType, job.creditCost, job.id, errorMessage);

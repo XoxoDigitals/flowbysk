@@ -986,14 +986,16 @@ export default function StudioShell() {
               </label>
 
               <label className="biv-field">
-                <span className="biv-field-label biv-noselect">Upload images</span>
-                <span className="biv-field-hint biv-noselect">Filename sequence: 1.jpg, Scene2, Sc03…</span>
+                <span className="biv-field-label biv-noselect">1. Upload images</span>
+                <span className="biv-field-hint biv-noselect">
+                  Upload first. Filename sequence: 1.jpg, Scene2, Sc03…
+                </span>
                 <input id="biv-image-input" className="biv-input" type="file" accept="image/*" multiple />
                 <button type="button" className="biv-btn-secondary" id="biv-clear-images-btn" style={{marginTop: 8}}>Clear images</button>
               </label>
 
               <label className="biv-field biv-field-grow">
-                <span className="biv-field-label biv-noselect">Prompt script</span>
+                <span className="biv-field-label biv-noselect">2. Prompt script</span>
                 <span className="biv-field-hint biv-noselect">One prompt per image (Scene / Prompt markers)</span>
                 <textarea
                   id="biv-script-editor"
@@ -1006,9 +1008,12 @@ export default function StudioShell() {
               <p className="biv-field-hint" id="biv-mapping-status">0 image(s) • 0 prompt(s)</p>
 
               <div className="biv-actions">
-                <button type="button" className="biv-btn-primary" id="biv-generate-all-btn" disabled>
+                <button type="button" className="biv-btn-secondary" id="biv-queue-btn" disabled>
+                  <span>3. Queue</span>
+                </button>
+                <button type="button" className="biv-btn-primary" id="biv-start-btn" disabled>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>
-                  <span>Generate All</span>
+                  <span>4. Start</span>
                 </button>
                 <button type="button" className="biv-btn-stop" id="biv-stop-btn" disabled>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>

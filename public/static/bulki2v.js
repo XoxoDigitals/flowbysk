@@ -473,7 +473,8 @@
     const m = mappingCounts();
     let msg = `${m.images} image(s) • ${m.prompts} prompt(s)`;
     if (m.images && m.prompts && !m.equal) msg += ' — counts must match';
-    else if (canGenerateMapping()) msg += ' — ready to generate';
+    else if (canGenerateMapping()) msg += ' — click Queue, then Start';
+    else if (m.images === 0) msg += ' — upload images first';
     else if (m.images && !m.prompts) msg += ' — paste prompts';
     if (el) el.textContent = msg;
   }
@@ -595,12 +596,13 @@
         };
       }
       const keepReady = prev && prev.status === 'ready' && prev.url && !force;
+      const keepPrepared = prev && prev.status === 'prepared' && !force;
       return {
         id: (prev && prev.id) || uuid(),
         index: img.seq,
         title: `Scene ${img.seq} :`,
         prompt: promptText,
-        status: keepReady ? 'ready' : 'idle',
+        status: keepReady ? 'ready' : keepPrepared ? 'prepared' : 'idle',
         url: keepReady ? prev.url : '',
         mediaId: keepReady ? prev.mediaId : null,
         error: keepReady ? '' : '',
@@ -743,7 +745,8 @@
       script: document.getElementById('biv-script-editor'),
       imageInput: document.getElementById('biv-image-input'),
       clearImagesBtn: document.getElementById('biv-clear-images-btn'),
-      genBtn: document.getElementById('biv-generate-all-btn'),
+      genBtn: document.getElementById('biv-start-btn') || document.getElementById('biv-generate-all-btn'),
+      queueBtn: document.getElementById('biv-queue-btn'),
       clearBtn: document.getElementById('biv-clear-grid-btn'),
       stopBtn: document.getElementById('biv-stop-btn'),
       dlAllBtn: document.getElementById('biv-download-all-btn'),
@@ -1194,7 +1197,7 @@
 
   function updateStatus(opts = {}) {
     const skipDomHeal = !!(opts && opts.skipDomHeal);
-    const { status, empty, grid, dlAllBtn, genBtn, stopBtn } = els();
+    const { status, empty, grid, dlAllBtn, genBtn, queueBtn, stopBtn } = els();
 
     // Ghost in-flight after Stop: clear so counts/buttons match the grid.
     // Must key off userStopped too — retry/races can leave runActive true while stopped.
@@ -1236,18 +1239,20 @@
     const ready = biv.scenes.filter((s) => s.status === 'ready').length;
     const generating = biv.scenes.filter((s) => s.status === 'generating').length;
     const queued = biv.scenes.filter((s) => s.status === 'queued').length;
+    const prepared = biv.scenes.filter((s) => s.status === 'prepared').length;
     const idle = biv.scenes.filter((s) => s.status === 'idle').length;
     const busy = generating > 0 || queued > 0;
 
-    // Stuck runActive with nothing in flight → unlock Generate All (never while userStopped)
-    if (biv.runActive && !biv.userStopped && !busy && idle === 0) {
+    // Stuck runActive with nothing in flight → unlock Start
+    if (biv.runActive && !biv.userStopped && !busy && idle === 0 && prepared === 0) {
       biv.runActive = false;
       saveState();
     }
 
     const parts = [`${biv.scenes.length} scenes identified`, `${ready} ready`];
+    if (prepared) parts.push(`${prepared} queued`);
     if (generating) parts.push(`${generating} generating`);
-    if (queued) parts.push(`${queued} queue`);
+    if (queued) parts.push(`${queued} in flight`);
     const planHint = biv.scenes.some(
       (s) => s && s.status === 'queued' && /plan parallel|parallel limit|Waiting in queue/i.test(String(s.queueMessage || ''))
     );
@@ -1261,17 +1266,18 @@
     if (grid) grid.classList.toggle('hidden', !has);
     if (dlAllBtn) dlAllBtn.disabled = ready === 0;
 
-    // Generate: require matching image↔prompt counts; lock while a run is busy
-    if (genBtn) {
-      const m = mappingCounts();
-      const canGen =
-        m.equal &&
-        m.allPromptsFilled &&
-        biv.scenes.length > 0 &&
-        !(biv.runActive && busy && !biv.userStopped);
-      genBtn.disabled = !canGen;
+    const m = mappingCounts();
+    const mappingOk = m.equal && m.allPromptsFilled && biv.scenes.length > 0 && m.images > 0;
+    const runBusy = biv.runActive && busy && !biv.userStopped;
+    if (queueBtn) {
+      queueBtn.disabled = !mappingOk || runBusy;
     }
-    // Stop: only when there is something to cancel
+    if (genBtn) {
+      const canStart =
+        prepared > 0 &&
+        !(runBusy);
+      genBtn.disabled = !canStart;
+    }
     if (stopBtn) stopBtn.disabled = !((biv.runActive && !biv.userStopped) || busy);
     updateMappingStatus();
     syncMobileToolLayout();
@@ -1303,12 +1309,15 @@
         : `<div class="biv-gen-anim is-queued"><div class="biv-queue-dots" aria-hidden="true"><span></span><span></span><span></span></div><span>Queue</span></div>`;
     }
     if (scene.previewUrl) {
-      return `<img class="biv-scene-still" alt="" src="${escapeHtml(scene.previewUrl)}"/><div class="biv-queue-label">Queue</div>`;
+      return `<img class="biv-scene-still" alt="" src="${escapeHtml(scene.previewUrl)}"/><div class="biv-queue-label">${scene.status === 'prepared' ? 'Queued' : 'Ready'}</div>`;
     }
     if (scene.status === 'failed') {
-      return `<div class="biv-queue-label">Queue</div>`;
+      return `<div class="biv-queue-label">Ready</div>`;
     }
-    return `<div class="biv-queue-label">Queue</div>`;
+    if (scene.status === 'prepared') {
+      return `<div class="biv-queue-label">Queued</div>`;
+    }
+    return `<div class="biv-queue-label">Ready</div>`;
   }
 
   function bindSceneMedia(card, scene) {
@@ -1369,13 +1378,14 @@
     biv.scenes.forEach((scene) => {
       const isGenerating = scene.status === 'generating';
       const isQueued = scene.status === 'queued';
+      const isPrepared = scene.status === 'prepared';
       const busy = isGenerating || isQueued;
       const card = document.createElement('article');
-      card.className = `biv-scene-card${isGenerating ? ' is-generating' : ''}${isQueued ? ' is-queued' : ''}`;
+      card.className = `biv-scene-card${isGenerating ? ' is-generating' : ''}${isQueued ? ' is-queued' : ''}${isPrepared ? ' is-prepared' : ''}`;
       card.dataset.sceneId = scene.id;
 
       let statusClass = '';
-      let statusText = 'Queue';
+      let statusText = 'Ready';
       if (scene.status === 'ready') {
         statusClass = 'is-ready';
         statusText = 'Ready';
@@ -1390,10 +1400,13 @@
         statusText = 'Generating…';
       } else if (isQueued) {
         statusClass = 'is-queue';
-        statusText = 'Queue';
+        statusText = 'In flight';
+      } else if (isPrepared) {
+        statusClass = 'is-prepared';
+        statusText = 'Queued';
       } else {
         statusClass = '';
-        statusText = 'Queue';
+        statusText = 'Ready';
       }
 
       card.innerHTML = `
@@ -2144,12 +2157,12 @@
     backgroundTick();
   }
 
-  async function generateAll() {
+  function queueScenes() {
     readFormIntoState();
     syncPreviewFromInputs({ force: true });
     const m = mappingCounts();
-    if (!m.equal || !m.allPromptsFilled || !biv.scenes.length) {
-      toast('Need matching image count and non-empty prompts', 'warning');
+    if (!m.equal || !m.allPromptsFilled || !biv.scenes.length || m.images === 0) {
+      toast('Upload images first, then match prompts 1:1', 'warning');
       return;
     }
     const missingFile = biv.scenes.some((s) => {
@@ -2163,17 +2176,46 @@
       toast('Re-upload images (missing staged files on server)', 'warning');
       return;
     }
+    biv.scenes.forEach((s) => {
+      if (s.status === 'ready' || s.status === 'generating' || s.status === 'queued') return;
+      s.status = 'prepared';
+      s.error = '';
+      s.queueMessage = '';
+    });
+    biv._scenesFp = '';
+    saveState();
+    renderScenes({ force: true });
+    toast(`${biv.scenes.filter((s) => s.status === 'prepared').length} scene(s) queued — click Start`, 'info');
+  }
 
-    // Wipe leftover BulkI2V queue only (leave Studio / other tools alone).
-    armUserStop(); // kill any prior run races first
+  async function generateAll() {
+    readFormIntoState();
+    const prepared = biv.scenes.filter((s) => s.status === 'prepared');
+    if (!prepared.length) {
+      toast('Click Queue first to prepare scenes', 'warning');
+      return;
+    }
+    const missingFile = prepared.some((s) => {
+      if (s.stagedId) return false;
+      if (s.file) return false;
+      const img = biv.images.find((x) => x.seq === s.imageSeq);
+      if (img && (img.file || img.stagedId)) return false;
+      return true;
+    });
+    if (missingFile) {
+      toast('Re-upload images (missing staged files on server)', 'warning');
+      return;
+    }
+
+    armUserStop();
     const cleared = await cancelBulkI2VPendingJobs(
       biv.scenes.map((s) => s.jobId).filter(Boolean)
     );
     if (cleared) toast(`Cleared ${cleared} leftover Bulk I2V job(s)`, 'info');
     biv.sessionJobIds = [];
 
-    // Always start fresh jobs — do not keep prior ready URLs when reusing the same script.
     biv.scenes.forEach((s) => {
+      if (s.status !== 'prepared') return;
       s.status = 'idle';
       s.error = '';
       s.jobId = null;
@@ -2182,8 +2224,7 @@
       s.mediaId = null;
       s.queueMessage = '';
       s.submitPrompt = '';
-      s.stagedId = null;
-      // Keep localAssetId tracking separate; new stage creates new ids
+      // keep stagedId / file for submit
     });
 
     biv.userStopped = false;
@@ -2353,7 +2394,7 @@
 
   function bindUi() {
     if (biv.bound) return;
-    const { script, genBtn, clearBtn, stopBtn, dlAllBtn, model, aspect, duration, imageInput, clearImagesBtn } = els();
+    const { script, genBtn, queueBtn, clearBtn, stopBtn, dlAllBtn, model, aspect, duration, imageInput, clearImagesBtn } = els();
     if (!script || !genBtn) return;
     biv.bound = true;
 
@@ -2394,6 +2435,7 @@
       window.addEventListener('resize', () => syncMobileToolLayout());
     }
     genBtn.addEventListener('click', () => generateAll());
+    if (queueBtn) queueBtn.addEventListener('click', () => queueScenes());
     if (stopBtn) stopBtn.addEventListener('click', () => stopGeneration());
     if (clearBtn) clearBtn.addEventListener('click', () => clearAll());
     if (dlAllBtn) dlAllBtn.addEventListener('click', () => downloadAll());

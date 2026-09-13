@@ -79,14 +79,19 @@ function readMirror() {
   }
 }
 
+function clearEgressProxyCache() {
+  _cache = { url: null, at: 0 };
+}
+
 /**
  * Resolve egress proxy: EGRESS_PROXY_URL env → mirror file → Next internal API.
  * Cached for 30s.
  * @returns {Promise<string|null>}
  */
-async function resolveEgressProxyUrl() {
+async function resolveEgressProxyUrl(opts = {}) {
+  const force = !!(opts && opts.force);
   const now = Date.now();
-  if (now - _cache.at < 30000 && _cache.url !== undefined) {
+  if (!force && now - _cache.at < 30000 && _cache.url !== undefined) {
     return _cache.url;
   }
 
@@ -140,4 +145,5 @@ module.exports = {
   parseProxyForChrome,
   normalizeProxyUrl,
   readMirror,
+  clearEgressProxyCache,
 };
