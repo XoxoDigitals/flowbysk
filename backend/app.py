@@ -449,23 +449,11 @@ def get_session_diagnostics() -> Dict[str, Any]:
 
 @app.post("/api/auth/sync-chrome-cookies")
 def sync_chrome_cookies() -> Dict[str, Any]:
-    """Import Google session cookies from an already-running Chrome (never launches one)."""
-    try:
-        imported = flow_service.sync_google_cookies_from_chrome()
-    except Exception as e:
-        logger.error(f"Chrome cookie sync failed: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-    diagnostics = flow_service.session_diagnostics()
-    return {
-        "success": bool(imported),
-        "imported": imported,
-        "diagnostics": diagnostics,
-        "message": (
-            f"Imported {len(imported)} cookie(s) from Chrome: {', '.join(imported)}"
-            if imported
-            else diagnostics["remedy"]
-        ),
-    }
+    """DISABLED — BiB manages the live browser session. Cookie sync via Chrome is no longer supported."""
+    raise HTTPException(
+        status_code=410,
+        detail="sync-chrome-cookies is disabled. Use BiB (Browser-in-Browser) login from the Admin panel instead.",
+    )
 
 
 @app.post("/api/auth/cookies")
@@ -532,17 +520,11 @@ def toggle_simulation_mode(req: SimulationRequest) -> Dict[str, Any]:
 
 @app.post("/api/auth/browser-login")
 def trigger_browser_login() -> Dict[str, Any]:
-    """Launch Chrome CDP to allow interactive sign-in and automatic cookie extraction."""
-    try:
-        import gflow.auth.browser_auth
-        auth = gflow.auth.browser_auth.BrowserAuth(debug=True)._login_with_browser(profile=None)
-        if auth and auth.cookies:
-            status = flow_service.set_cookies(auth.cookies)
-            return {"success": True, "status": status}
-        raise RuntimeError("Browser login did not capture valid cookies")
-    except Exception as e:
-        logger.error(f"Browser login failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """DISABLED — BiB manages the live browser session. Browser login via CDP is no longer supported."""
+    raise HTTPException(
+        status_code=410,
+        detail="browser-login is disabled. Use BiB (Browser-in-Browser) login from the Admin panel instead.",
+    )
 
 
 @app.post("/api/auth/disconnect")
@@ -857,26 +839,15 @@ def upscale_video_endpoint(
     request: Request,
     req: VideoUpscaleRequest = Body(default_factory=VideoUpscaleRequest),
 ) -> Dict[str, Any]:
-    """Upscale a video clip to 1K / 1080p resolution."""
+    """Cloud 1080p upsample is BiB-only — Python CDP/ffmpeg path is disabled."""
     _bind_studio_identity(request, getattr(req, "run_id", None))
-    try:
-        append_log("info", f"Upscaling video {asset_id[:12]}… to 1080p", source="generate")
-        res = flow_service.upscale_video(
-            asset_id,
-            video_url=req.url,
-            aspect_ratio=req.aspect_ratio,
-            media_id=req.media_id,
-            workflow_id=req.workflow_id,
-        )
-        method = res.get("method", "studio_hd")
-        method_label = "Google Flow native cloud" if method == "native_cloud" else "Studio 1080p High-Definition"
-        append_log("info", f"Video {asset_id[:12]}… upscaled to 1080p successfully via {method_label}", source="generate")
-        return res
-    except Exception as e:
-        logger.error(f"Video upscale failed: {e}")
-        detail = _format_error(e)
-        append_log("error", f"Video upscale failed: {detail}", source="generate")
-        raise HTTPException(status_code=500, detail=detail)
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Python video upscale is disabled. "
+            "Use Studio Upscale via BiB Google Flow cloud API (native_cloud_bib)."
+        ),
+    )
 
 
 @app.get("/api/video/download/{asset_id}")

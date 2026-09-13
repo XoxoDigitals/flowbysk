@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
+import { requireAccountsPageAccess } from '@/lib/accountsAccess';
 import { prisma } from '@/lib/prisma';
 import { ProviderStatus, CreditClassification, JobStatus } from '@prisma/client';
-import { getAccountsAllocationStats, MAX_USERS_PER_ACCOUNT } from '@/lib/routing';
-import { detectGoogleFlowAccount } from '@/lib/provider-detect';
+import { getAccountsAllocationStats } from '@/lib/routing';
 import { releaseIdleOfflineAllocations } from '@/lib/allocation';
 import {
   flowProjectIdFromJobParameters,
@@ -18,13 +18,14 @@ function extractProjectDetails(input?: string | null): { projectId: string; proj
   const str = input.trim();
   const match = str.match(/project\/([a-zA-Z0-9_-]+)/);
   const id = match ? match[1] : (str.startsWith('http') ? str.split('/').filter(Boolean).pop() || str : str);
-  const url = str.startsWith('http') ? str : `https://labs.google/fx/tools/flow/project/${id}`;
+  const url = str.startsWith('http') ? str : `https://flow.google.com/project/${id}`;
   return { projectId: id, projectUrl: url };
 }
 
 export async function GET(req: Request) {
   try {
-    await requireAdmin(req);
+    const session = await requireAdmin(req);
+    await requireAccountsPageAccess(session);
 
     // Opportunistic cleanup of offline idle allocations
     releaseIdleOfflineAllocations().catch(() => 0);
@@ -150,6 +151,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const admin = await requireAdmin(req);
+    await requireAccountsPageAccess(admin);
     const body = await req.json();
     const {
       label,
@@ -160,98 +162,39 @@ export async function POST(req: Request) {
       projectUrl,
     } = body;
 
-    if (!cookies || !cookies.trim()) {
-      // BiB path: create shell account without cookies; Launch + login later
-      const finalEmail = (accountEmail && accountEmail.trim()) || 'pending@google.com';
-      const finalPlan = (planTier && planTier.trim()) || 'Google AI Ultra';
-      const finalLabel = (label && label.trim()) || `${finalPlan} (BiB)`;
-      const limit =
-        typeof maxParallelLimit === 'number' && maxParallelLimit > 0 ? maxParallelLimit : 5;
-
-      const account = await prisma.providerAccount.create({
-        data: {
-          label: finalLabel,
-          accountEmail: finalEmail,
-          cookies: '',
-          status: ProviderStatus.UNAVAILABLE,
-          creditClassification: CreditClassification.UNKNOWN,
-          googleCreditsBalance: 0,
-          maxParallelLimit: limit,
-          planTier: finalPlan,
-          browserStatus: 'STOPPED' as any,
-        },
-      });
-
-      return NextResponse.json({ success: true, account, bib: true });
+    // BiB-only: reject cookie paste
+    if (cookies && cookies.trim()) {
+      return NextResponse.json(
+        { error: 'Cookie paste is disabled. Use BiB (Browser-in-Browser) login to connect accounts.' },
+        { status: 400 }
+      );
     }
 
-    // Always pull live plan/credits/expiry from Google via cookies
-    const detected = await detectGoogleFlowAccount(cookies.trim());
+    // BiB path: create shell account without cookies; Launch + login later
+    const finalEmail = (accountEmail && accountEmail.trim()) || 'pending@google.com';
+    const finalPlan = (planTier && planTier.trim()) || 'Google AI Ultra';
+    const finalLabel = (label && label.trim()) || `${finalPlan} (BiB)`;
+    const limit =
+      typeof maxParallelLimit === 'number' && maxParallelLimit > 0 ? maxParallelLimit : 5;
 
-    const finalEmail = (accountEmail && accountEmail.trim()) || detected.email || 'operator@google.com';
-    const finalPlan = (planTier && planTier.trim()) || detected.planName || 'Google AI Ultra';
-    const finalLabel = (label && label.trim()) || `${finalPlan} (${finalEmail.split('@')[0]})`;
-    const finalCredits =
-      typeof detected.credits === 'number'
-        ? detected.credits
-        : finalPlan.includes('Ultra')
-          ? 5000
-          : finalPlan.includes('Pro')
-            ? 1000
-            : 0;
-    const finalClassification = finalCredits > 0
-      ? CreditClassification.CREDITS_AVAILABLE
-      : CreditClassification.CREDITS_EXHAUSTED;
-
-    // Resolve or auto-create project
-    let projDetails = extractProjectDetails(projectUrl || detected.activeProjectUrl || detected.activeProjectId);
-    if (!projDetails.projectId && detected.isValidSession) {
-      // Auto-create project via Python execution engine if running
-      try {
-        const createRes = await fetch('http://127.0.0.1:8000/api/projects/create', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: `Studio (${finalEmail.split('@')[0]})` }),
-          signal: AbortSignal.timeout(4000),
-        });
-        if (createRes.ok) {
-          const cData = await createRes.json();
-          const pid = cData.project_id || cData.id;
-          if (pid) {
-            projDetails = {
-              projectId: pid,
-              projectUrl: cData.project_url || `https://labs.google/fx/tools/flow/project/${pid}`,
-            };
-          }
-        }
-      } catch (err: any) {
-        console.warn('Auto project creation notice:', err.message);
-      }
-    }
-
-    const finalLimit = Number(maxParallelLimit) && Number(maxParallelLimit) > 0 ? Number(maxParallelLimit) : 5;
+    // Resolve optional single seed project URL
+    const projDetails = projectUrl ? extractProjectDetails(projectUrl) : { projectId: '', projectUrl: '' };
 
     const account = await prisma.providerAccount.create({
       data: {
         label: finalLabel,
         accountEmail: finalEmail,
-        cookies: cookies.trim(),
-        status: detected.isValidSession ? ProviderStatus.HEALTHY : ProviderStatus.CREDENTIALS_EXPIRED,
-        creditClassification: finalClassification,
-        googleCreditsBalance: finalCredits,
-        googleCreditsReserved: 0.0,
-        maxParallelLimit: finalLimit,
+        cookies: '',
+        status: ProviderStatus.UNAVAILABLE,
+        creditClassification: CreditClassification.UNKNOWN,
+        googleCreditsBalance: 0,
+        maxParallelLimit: limit,
         planTier: finalPlan,
-        projectUrl: projDetails.projectUrl || null,
-        activeProjectId: projDetails.projectId || null,
-        supportedModels: {
-          planName: finalPlan,
-          paygateTier: detected.paygateTier,
-          serviceTier: detected.serviceTier,
-          sku: detected.sku,
-        },
-        cookieExpiresAt: detected.cookieExpiresAt,
-        lastHealthCheck: new Date(),
+        browserStatus: 'STOPPED' as any,
+        ...(projDetails.projectId ? {
+          activeProjectId: projDetails.projectId,
+          projectUrl: projDetails.projectUrl,
+        } : {}),
       },
     });
 
@@ -261,27 +204,11 @@ export async function POST(req: Request) {
         action: 'PROVIDER_ACCOUNT_CREATED',
         targetType: 'PROVIDER_ACCOUNT',
         targetId: account.id,
-        details: { label: finalLabel, accountEmail: finalEmail, detectedPlan: finalPlan, projectUrl: projDetails.projectUrl },
+        details: { label: finalLabel, accountEmail: finalEmail, bib: true },
       },
     });
 
-    return NextResponse.json({
-      success: true,
-      message: `Provider account added: ${finalPlan} (${finalEmail})`,
-      account: {
-        id: account.id,
-        label: account.label,
-        accountEmail: account.accountEmail,
-        status: account.status,
-        planName: finalPlan,
-        planTier: finalPlan,
-        projectUrl: account.projectUrl,
-        activeProjectId: account.activeProjectId,
-        googleCreditsBalance: account.googleCreditsBalance,
-        maxUsersLimit: account.maxParallelLimit,
-        cookieExpiresAt: account.cookieExpiresAt,
-      },
-    });
+    return NextResponse.json({ success: true, account, bib: true });
   } catch (error: any) {
     return NextResponse.json(
       { error: error.message || 'Operation failed' },
@@ -293,11 +220,20 @@ export async function POST(req: Request) {
 export async function PATCH(req: Request) {
   try {
     const admin = await requireAdmin(req);
+    await requireAccountsPageAccess(admin);
     const body = await req.json();
     const { id, cookies, status, action, planTier, projectUrl, maxParallelLimit } = body;
 
     if (!id) {
       return NextResponse.json({ error: 'Account ID required' }, { status: 400 });
+    }
+
+    // BiB-only: reject cookie paste updates
+    if (cookies !== undefined && cookies && cookies.trim()) {
+      return NextResponse.json(
+        { error: 'Cookie paste updates are disabled. Use BiB login — credentials are synced automatically.' },
+        { status: 400 }
+      );
     }
 
     const existing = await prisma.providerAccount.findUnique({ where: { id } });
@@ -307,38 +243,36 @@ export async function PATCH(req: Request) {
 
     const updateData: any = {};
 
-    // Live Project Creation Action on Google Flow
+    // Live Project Creation Action on Google Flow (via BiB or fallback)
     if (action === 'create_project') {
       try {
         let newPid = '';
         let newPUrl = '';
 
+        // Try BiB first for project creation
         try {
-          const createRes = await fetch('http://127.0.0.1:8000/api/projects/create', {
+          const { bibFetch } = await import('@/lib/bib');
+          const bibRes = await bibFetch(`/accounts/${encodeURIComponent(id)}/ensure-projects`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              name: `Studio (${existing.accountEmail ? existing.accountEmail.split('@')[0] : 'Flow'} - ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})`,
-              cookies: existing.cookies,
-            }),
-            signal: AbortSignal.timeout(10000),
+            body: JSON.stringify({ maxSlots: existing.maxParallelLimit || 5 }),
           });
-          if (createRes.ok) {
-            const cData = await createRes.json();
-            newPid = cData.project_id || cData.id || cData.projectId || (cData.project && cData.project.id);
-            if (newPid) {
-              newPUrl = cData.project_url || `https://labs.google/fx/tools/flow/project/${newPid}`;
+          if (bibRes.ok) {
+            const bibData = await bibRes.json().catch(() => ({}));
+            const ids: string[] = Array.isArray(bibData.projectIds) ? bibData.projectIds : [];
+            if (ids.length > 0) {
+              newPid = ids[0];
+              newPUrl = `https://flow.google.com/project/${newPid}`;
             }
           }
-        } catch (fetchErr: any) {
-          console.warn('Worker project creation error:', fetchErr.message);
+        } catch (bibErr: any) {
+          console.warn('BiB project creation error:', bibErr.message);
         }
 
-        // If remote creation was not returned, generate a unique project UUID
+        // If BiB didn't return an id, generate a placeholder UUID
         if (!newPid) {
           const crypto = await import('crypto');
           newPid = crypto.randomUUID();
-          newPUrl = `https://labs.google/fx/tools/flow/project/${newPid}`;
+          newPUrl = `https://flow.google.com/project/${newPid}`;
         }
 
         const updated = await prisma.providerAccount.update({
@@ -369,13 +303,8 @@ export async function PATCH(req: Request) {
       }
     }
 
-    // Live Detection / Refresh Action
+    // Live Detection / Refresh Action — BiB status only, no labs cookie probe
     if (action === 'refresh' || action === 'detect') {
-      const cookieStrToTest = (cookies && cookies.trim()) || existing.cookies;
-      const detected = await detectGoogleFlowAccount(cookieStrToTest);
-
-      // BiB Chrome session is the source of truth for BiB accounts.
-      // labs.google cookie probes often fail (no next-auth / expired OAuth) even when Flow works.
       let bibReady = existing.browserStatus === 'READY';
       try {
         const { bibAccountStatus } = await import('@/lib/bib');
@@ -389,38 +318,27 @@ export async function PATCH(req: Request) {
           if (live.email) updateData.accountEmail = live.email;
           updateData.bibLastError = null;
           updateData.bibLastSeenAt = new Date();
+          // BiB READY → account is healthy
+          updateData.status = ProviderStatus.HEALTHY;
+          updateData.lastHealthCheck = new Date();
+        } else if (live?.status === 'NEEDS_LOGIN') {
+          updateData.browserStatus = 'NEEDS_LOGIN' as any;
+          updateData.bibLastError = live.lastError || 'BiB needs Google login';
+          updateData.bibLastSeenAt = new Date();
         }
       } catch {
-        /* BiB unreachable — fall back to cookie probe */
+        /* BiB unreachable */
       }
 
-      updateData.accountEmail = updateData.accountEmail || detected.email || existing.accountEmail;
-      if (typeof detected.credits === 'number' && detected.credits > 0) {
-        updateData.googleCreditsBalance = detected.credits;
-        updateData.creditClassification = CreditClassification.CREDITS_AVAILABLE;
-      } else if (typeof detected.credits === 'number' && !bibReady) {
-        updateData.googleCreditsBalance = detected.credits;
-        updateData.creditClassification = CreditClassification.CREDITS_EXHAUSTED;
+      if (!bibReady) {
+        // Keep existing status unchanged if BiB is not reachable
+        updateData.status = existing.status;
+        updateData.lastHealthCheck = new Date();
       }
-      updateData.cookieExpiresAt = detected.cookieExpiresAt;
-      updateData.status =
-        bibReady || detected.isValidSession
-          ? ProviderStatus.HEALTHY
-          : ProviderStatus.CREDENTIALS_EXPIRED;
-      updateData.lastHealthCheck = new Date();
-      if (detected.planName && detected.planName !== 'Free Tier') {
-        updateData.planTier = detected.planName;
+
+      if (planTier && planTier.trim()) {
+        updateData.planTier = planTier.trim();
       }
-      if (detected.activeProjectId) {
-        updateData.activeProjectId = detected.activeProjectId;
-        updateData.projectUrl = detected.activeProjectUrl || `https://labs.google/fx/tools/flow/project/${detected.activeProjectId}`;
-      }
-      updateData.supportedModels = {
-        planName: updateData.planTier || existing.planTier || detected.planName,
-        paygateTier: detected.paygateTier,
-        serviceTier: detected.serviceTier,
-        sku: detected.sku,
-      };
 
       const updated = await prisma.providerAccount.update({
         where: { id },
@@ -430,70 +348,11 @@ export async function PATCH(req: Request) {
       return NextResponse.json({
         success: true,
         message: bibReady
-          ? `Account healthy via BiB (READY)${detected.isValidSession ? '' : ' — labs cookie probe skipped/stale'}`
-          : `Account refreshed: ${updated.planTier || detected.planName} (${updated.googleCreditsBalance} cr)`,
+          ? `Account healthy via BiB (READY)`
+          : `BiB not READY — status unchanged (${existing.status})`,
         account: updated,
-        detected: { ...detected, bibReady },
+        bibReady,
       });
-    }
-
-    if (cookies !== undefined && cookies.trim()) {
-      updateData.cookies = cookies.trim();
-      const detected = await detectGoogleFlowAccount(cookies.trim());
-      updateData.cookieExpiresAt = detected.cookieExpiresAt;
-      // Prefer BiB READY over labs cookie probe for status
-      const bibStillReady = existing.browserStatus === 'READY';
-      updateData.status =
-        bibStillReady || detected.isValidSession
-          ? ProviderStatus.HEALTHY
-          : ProviderStatus.CREDENTIALS_EXPIRED;
-      updateData.lastHealthCheck = new Date();
-      if (detected.planName && detected.planName !== 'Free Tier') {
-        updateData.planTier = detected.planName;
-      }
-      if (typeof detected.credits === 'number') {
-        updateData.googleCreditsBalance = detected.credits;
-        updateData.creditClassification =
-          detected.credits > 0 || bibStillReady
-            ? detected.credits > 0
-              ? CreditClassification.CREDITS_AVAILABLE
-              : existing.creditClassification
-            : CreditClassification.CREDITS_EXHAUSTED;
-      }
-      if (detected.email) {
-        updateData.accountEmail = detected.email;
-      }
-      // User requirement: Every time cookies are updated, create a new project for this account
-      if (projectUrl === undefined || !projectUrl.trim()) {
-        try {
-          const createProjRes = await fetch('http://127.0.0.1:8000/api/projects/create', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              name: `Studio (${detected.email ? detected.email.split('@')[0] : 'Flow'} - ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})`,
-              cookies: cookies.trim(),
-            }),
-            signal: AbortSignal.timeout(6000),
-          });
-          if (createProjRes.ok) {
-            const pData = await createProjRes.json();
-            const pid = pData.project_id || pData.id;
-            if (pid) {
-              updateData.activeProjectId = pid;
-              updateData.projectUrl = pData.project_url || `https://labs.google/fx/tools/flow/project/${pid}`;
-            }
-          } else if (detected.activeProjectId) {
-            updateData.activeProjectId = detected.activeProjectId;
-            updateData.projectUrl = detected.activeProjectUrl || `https://labs.google/fx/tools/flow/project/${detected.activeProjectId}`;
-          }
-        } catch (projErr) {
-          console.warn('Auto project creation on cookie update failed:', projErr);
-          if (detected.activeProjectId) {
-            updateData.activeProjectId = detected.activeProjectId;
-            updateData.projectUrl = detected.activeProjectUrl || `https://labs.google/fx/tools/flow/project/${detected.activeProjectId}`;
-          }
-        }
-      }
     }
 
     if (projectUrl !== undefined) {
@@ -541,6 +400,7 @@ export async function PATCH(req: Request) {
 export async function DELETE(req: Request) {
   try {
     const admin = await requireAdmin(req);
+    await requireAccountsPageAccess(admin);
     const { searchParams } = new URL(req.url);
     const id = searchParams.get('id');
 
@@ -578,4 +438,3 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ error: error.message || 'Failed to delete account' }, { status: 400 });
   }
 }
-

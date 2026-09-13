@@ -157,6 +157,7 @@ export async function POST(req: Request) {
 
       const frameId =
         (await refreshFlowMediaId({
+          accountId: provider.id,
           mediaId: stagedId,
           cookies: liveCookies,
           projectId: targetProjectId,

@@ -5029,6 +5029,31 @@ body.theme-flow-dark {
   display: block;
 }
 
+.card-media-wrapper video.is-painting {
+  opacity: 0;
+}
+
+.card-media-wrapper video.is-frame-ready {
+  opacity: 1;
+  transition: opacity 0.2s ease;
+}
+
+.flow-media-card.is-skeleton {
+  pointer-events: none;
+  border-color: transparent;
+}
+
+.flow-media-card.is-skeleton .card-media-wrapper {
+  background: linear-gradient(90deg, #141820 25%, #1c2430 50%, #141820 75%);
+  background-size: 200% 100%;
+  animation: studioGallerySkel 1.2s ease-in-out infinite;
+}
+
+@keyframes studioGallerySkel {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 .card-expired-placeholder {
   position: absolute;
   inset: 0;

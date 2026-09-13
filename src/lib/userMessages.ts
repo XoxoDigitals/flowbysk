@@ -35,6 +35,12 @@ export function toUserFacingQueueMessage(internal?: string | null): string {
 export function toUserFacingError(internal?: string | null, fallback = 'Something went wrong. Please try again.'): string {
   if (!internal) return fallback;
   const msg = String(internal);
+  if (/PROMINENT_PEOPLE|PUBLIC_ERROR_PROMINENT_PEOPLE/i.test(msg)) {
+    return 'Google blocked this video because a reference looks like a recognizable person. Try different images or a more generic look.';
+  }
+  if (/UNSAFE_GENERATION|PUBLIC_ERROR_UNSAFE/i.test(msg)) {
+    return 'Google blocked this generation for safety policy reasons. Try a different prompt or reference.';
+  }
   if (/provider|BiB|aisandbox|puppeteer|chrome|admin must|Google account|cookie|oauth|CDP/i.test(msg)) {
     return fallback;
   }

@@ -33,10 +33,7 @@ const nextConfig: NextConfig = {
         source: '/api/auth/session-diagnostics',
         destination: 'http://127.0.0.1:8000/api/auth/session-diagnostics',
       },
-      {
-        source: '/api/auth/cookies',
-        destination: 'http://127.0.0.1:8000/api/auth/cookies',
-      },
+      // /api/auth/cookies — removed; BiB handles cookie management natively
       {
         source: '/api/auth/tier',
         destination: 'http://127.0.0.1:8000/api/auth/tier',
@@ -45,10 +42,7 @@ const nextConfig: NextConfig = {
         source: '/api/auth/refresh',
         destination: 'http://127.0.0.1:8000/api/auth/refresh',
       },
-      {
-        source: '/api/auth/sync-chrome-cookies',
-        destination: 'http://127.0.0.1:8000/api/auth/sync-chrome-cookies',
-      },
+      // /api/auth/sync-chrome-cookies — removed; BiB handles session natively
       {
         source: '/api/auth/sync-local',
         destination: 'http://127.0.0.1:8000/api/auth/sync-local',
@@ -65,11 +59,8 @@ const nextConfig: NextConfig = {
         source: '/api/auth/disconnect',
         destination: 'http://127.0.0.1:8000/api/auth/disconnect',
       },
-      {
-        source: '/api/video/download/:path*',
-        destination: 'http://127.0.0.1:8000/api/video/download/:path*',
-      },
-      // /api/video/upscale/[id] — Next (BiB native upsample + Python ffmpeg fallback)
+      // /api/video/download/[id] — Next (cloud URL redirect; no Python local file)
+      // /api/video/upscale/[id] — Next (BiB p0UkFb cloud upsample)
       // /api/video/extend — Next (BiB I2V)
       // /api/prompt/enhance — Next
       // /api/whisk/compose — Next (BiB)

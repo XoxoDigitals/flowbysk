@@ -5,6 +5,7 @@ import { checkAndDispatchNextJobs } from '@/lib/queue';
 import { JobStatus } from '@prisma/client';
 import { createStudioLog } from '@/lib/studioLogs';
 import { bibVideoStatus } from '@/lib/bib';
+import { toUserFacingError } from '@/lib/userMessages';
 
 const PYTHON_WORKER_URL = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
 
@@ -145,21 +146,28 @@ export async function GET(
       });
     }
 
-    // 2. If status is GENERATING or PREPARING, poll BiB (preferred) or Python worker
+    // 2. If status is GENERATING / PREPARING / CHECKING_STATUS, poll BiB (preferred) or Python
     const metadata = (job.outputMetadata as Record<string, any>) || {};
+    const jobParams = (job.parameters as Record<string, any>) || {};
     const workerTaskId = metadata.workerTaskId || job.id;
 
     // Prefer BiB poll whenever we have a provider account + Flow media UUID.
-    // Ingredients / I2V / Python-async jobs often only store workerTaskId — without
-    // bibMediaId — and Python OAuth is frequently stale, so BiB is the reliable path.
+    // Queue BiB path stores bibMediaId on parameters; some routes also put it on outputMetadata.
     const flowMediaId = String(
-      metadata.bibMediaId || metadata.workerTaskId || metadata.primary_media_id || ''
+      metadata.bibMediaId ||
+        jobParams.bibMediaId ||
+        metadata.workerTaskId ||
+        metadata.primary_media_id ||
+        jobParams.primary_media_id ||
+        ''
     ).trim();
     const looksLikeFlowUuid = /^[a-f0-9-]{36}$/i.test(flowMediaId);
-    const providerAccountId = metadata.bibAccountId || job.providerAccountId || null;
+    const providerAccountId =
+      metadata.bibAccountId || jobParams.bibAccountId || job.providerAccountId || null;
     const flowProjectId =
       metadata.bibProjectId ||
-      (job.parameters as any)?.flowProjectId ||
+      jobParams.bibProjectId ||
+      jobParams.flowProjectId ||
       undefined;
 
     if (
@@ -176,6 +184,51 @@ export async function GET(
           projectId: flowProjectId || undefined,
         });
         const mediaUrl = bib.videoUrl || bib.imageUrl || bib.url;
+        if (bib.status === 'FAILED') {
+          const failMsg = String(bib.error || 'Generation failed in Veo').slice(0, 300);
+          const userMsg = toUserFacingError(failMsg, failMsg);
+          const updateRes = await prisma.generationJob.updateMany({
+            where: {
+              id: job.id,
+              status: {
+                in: [
+                  JobStatus.GENERATING,
+                  JobStatus.PREPARING,
+                  JobStatus.CHECKING_STATUS,
+                  JobStatus.RETRYING,
+                ],
+              },
+            },
+            data: {
+              status: JobStatus.FAILED,
+              progress: 0,
+              errorMessage: userMsg,
+              completedAt: new Date(),
+            },
+          });
+          if (updateRes.count > 0) {
+            await releaseCredits(
+              job.userId,
+              job.walletType,
+              job.creditCost,
+              job.id,
+              failMsg
+            );
+            checkAndDispatchNextJobs(job.userId).catch(console.error);
+            await logJobTerminal(job, 'failed', failMsg);
+          }
+          return NextResponse.json({
+            success: false,
+            asset: {
+              id: job.id,
+              status: 'FAILED',
+              progress: 0,
+              url: '',
+              error: userMsg,
+              prompt: job.prompt,
+            },
+          });
+        }
         if (bib.status === 'COMPLETED' && mediaUrl) {
           const isImage =
             /\/image\//i.test(mediaUrl) ||

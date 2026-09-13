@@ -14,6 +14,7 @@
   const MAX_CHARS = 6;
   const STORAGE_KEY = 'gflow_biv_state_v1';
   const STATE_TTL_MS = 24 * 60 * 60 * 1000;
+  const DRAFT_API = '/api/studio/drafts/bulki2v';
 
   const biv = {
     characters: [],
@@ -37,14 +38,224 @@
     scriptText: '',
     pollTimer: null,
     _fillTimer: null,
+    _draftSaveTimer: null,
+    _serverHydrated: false,
   };
 
   /** Match Studio plan parallel slots (Pro default). Do not POST every idle scene at once. */
   const MAX_PARALLEL = 5;
 
-  function toast(msg, type) {
-    if (typeof window.showToast === 'function') window.showToast(msg, type || 'info');
-    else console.log('[BulkI2V]', type || 'info', msg);
+  function getActiveProjectId() {
+    try {
+      if (typeof window !== 'undefined' && window.__GFLOW_STATE__ && window.__GFLOW_STATE__.activeProjectId) {
+        return window.__GFLOW_STATE__.activeProjectId;
+      }
+    } catch (_) {}
+    try {
+      const st = typeof window !== 'undefined' ? window.state : null;
+      if (st && st.activeProjectId) return st.activeProjectId;
+    } catch (_) {}
+    return null;
+  }
+
+  function buildDraftPayload() {
+    if (biv._formHydrated) readFormIntoState();
+    return {
+      savedAt: Date.now(),
+      expiresAt: Date.now() + STATE_TTL_MS,
+      runActive: !!biv.runActive,
+      userStopped: !!biv.userStopped,
+      chain: !!biv.chain,
+      model: biv.model,
+      aspect: biv.aspect,
+      duration: biv.duration || 8,
+      globalPrompt: biv.globalPrompt,
+      scriptText: biv.scriptText,
+      stagedLocalIds: Array.isArray(biv.stagedLocalIds) ? biv.stagedLocalIds : [],
+      images: (biv.images || []).map((img) => ({
+        id: img.id,
+        assetId: img.assetId || null,
+        stagedId: img.stagedId || null,
+        name: img.name,
+        seq: img.seq,
+        previewUrl:
+          img.previewUrl && !String(img.previewUrl).startsWith('blob:')
+            ? img.previewUrl
+            : '',
+      })),
+      characters: biv.characters,
+      scenes: (biv.scenes || []).map((s) => {
+        if (!s) return s;
+        const copy = { ...s };
+        delete copy.file;
+        if (copy.previewUrl && String(copy.previewUrl).startsWith('blob:')) delete copy.previewUrl;
+        if (copy.url && mediaUrlExpired(copy.url)) {
+          copy.url = '';
+          if (copy.status === 'ready') {
+            copy.status = 'failed';
+            copy.error = 'Media expired';
+          }
+        }
+        return copy;
+      }),
+    };
+  }
+
+  function scheduleServerDraftSave() {
+    if (biv._draftSaveTimer) clearTimeout(biv._draftSaveTimer);
+    biv._draftSaveTimer = setTimeout(() => {
+      biv._draftSaveTimer = null;
+      pushServerDraft().catch(() => {});
+    }, 600);
+  }
+
+  async function pushServerDraft() {
+    const payload = buildDraftPayload();
+    const body = { payload };
+    const pid = getActiveProjectId();
+    if (pid) body.projectId = pid;
+    const res = await fetch(DRAFT_API, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Draft save failed (${res.status})`);
+    }
+    return res.json().catch(() => ({}));
+  }
+
+  async function fetchServerDraft() {
+    const pid = getActiveProjectId();
+    const q = pid ? `?projectId=${encodeURIComponent(pid)}` : '';
+    const res = await fetch(`${DRAFT_API}${q}`, { credentials: 'include' });
+    if (res.status === 401 || res.status === 403) return null;
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => ({}));
+    return data.draft || null;
+  }
+
+  async function deleteServerDraft() {
+    const pid = getActiveProjectId();
+    const q = pid ? `?projectId=${encodeURIComponent(pid)}` : '';
+    try {
+      await fetch(`${DRAFT_API}${q}`, { method: 'DELETE', credentials: 'include' });
+    } catch (_) {}
+  }
+
+  function applyDraftPayload(raw, { keepLiveFiles = false } = {}) {
+    if (!raw || typeof raw !== 'object') return false;
+    biv.runActive = !!raw.runActive;
+    biv.userStopped = !!raw.userStopped;
+    biv.chain = false;
+    biv.duration = Number(raw.duration) || 8;
+    biv.model = raw.model || 'VEO_3_1_LITE';
+    biv.aspect = raw.aspect === '1:1' ? '16:9' : raw.aspect || '16:9';
+    biv.globalPrompt = '';
+    biv.scriptText = raw.scriptText || '';
+    biv.stagedLocalIds = Array.isArray(raw.stagedLocalIds)
+      ? raw.stagedLocalIds.filter(Boolean)
+      : [];
+    biv.characters = Array.isArray(raw.characters) ? raw.characters : [];
+
+    const liveBySeq = new Map();
+    if (keepLiveFiles) {
+      (biv.images || []).forEach((img) => {
+        if (img && img.file && Number.isFinite(Number(img.seq))) {
+          liveBySeq.set(Number(img.seq), img);
+        }
+      });
+    }
+
+    const rawImages = Array.isArray(raw.images) ? raw.images : null;
+    if (keepLiveFiles && liveBySeq.size && (!rawImages || !rawImages.length)) {
+      // Keep in-memory uploads; empty draft metadata must not wipe them
+    } else if (rawImages) {
+      biv.images = rawImages
+        .map((img) => {
+          const seq = Number(img.seq);
+          const live = liveBySeq.get(seq);
+          if (live) {
+            return {
+              ...live,
+              id: img.id || live.id,
+              assetId: img.assetId || live.assetId || null,
+              stagedId: img.stagedId || live.stagedId || null,
+              name: img.name || live.name,
+              seq,
+              previewUrl:
+                live.previewUrl ||
+                (img.previewUrl && !String(img.previewUrl).startsWith('blob:')
+                  ? img.previewUrl
+                  : '') ||
+                '',
+            };
+          }
+          return {
+            id: img.id || uuid(),
+            assetId: img.assetId || null,
+            stagedId: img.stagedId || null,
+            name: img.name || '',
+            seq,
+            file: null,
+            previewUrl:
+              img.previewUrl && !String(img.previewUrl).startsWith('blob:')
+                ? img.previewUrl
+                : '',
+          };
+        })
+        .filter((img) => Number.isFinite(img.seq));
+    } else if (!keepLiveFiles) {
+      biv.images = [];
+    }
+
+    biv.scenes = Array.isArray(raw.scenes) ? raw.scenes : [];
+    biv.scenes.forEach((s, i) => {
+      if (!s) return;
+      s.index = Number(s.index) || i + 1;
+      s.title = normalizeSceneTitle(s, i + 1);
+      if (!keepLiveFiles) s.file = null;
+      if (s.previewUrl && String(s.previewUrl).startsWith('blob:')) s.previewUrl = '';
+      if (s.url && mediaUrlExpired(s.url)) {
+        s.url = '';
+        if (s.status === 'ready') {
+          s.status = 'failed';
+          s.error = 'Media expired';
+        }
+      }
+      // Reattach server preview from image when missing
+      if (!s.previewUrl && s.imageSeq != null) {
+        const img = biv.images.find((x) => x.seq === s.imageSeq);
+        if (img && img.previewUrl) s.previewUrl = img.previewUrl;
+      }
+      if (!s.stagedId && s.imageSeq != null) {
+        const img = biv.images.find((x) => x.seq === s.imageSeq);
+        if (img && img.stagedId) s.stagedId = img.stagedId;
+        if (img && img.assetId) s.localAssetId = img.assetId;
+      }
+    });
+    return true;
+  }
+
+  async function stageUploadedFile(file) {
+    const form = new FormData();
+    form.append('file', file, file.name || 'frame.jpg');
+    const pid = getActiveProjectId();
+    if (pid) form.append('projectId', pid);
+    const res = await fetch(`${API_BASE}/api/assets/stage`, {
+      method: 'POST',
+      body: form,
+      credentials: 'include',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || data.error || 'Staging failed');
+    const stagedId = data.staged_id || (data.asset && data.asset.staged_id) || null;
+    const assetId = (data.asset && data.asset.id) || null;
+    const url = (data.asset && data.asset.url) || '';
+    if (!stagedId) throw new Error('Staging returned no staged-* id');
+    return { stagedId, assetId, url };
   }
 
   function toUserFacingGenerationError(raw) {
@@ -272,8 +483,13 @@
     if (!biv.runActive) {
       biv.scenes = [];
       renderScenes({ force: true });
-      saveState();
     }
+    clearPersistedState();
+    if (biv._draftSaveTimer) {
+      clearTimeout(biv._draftSaveTimer);
+      biv._draftSaveTimer = null;
+    }
+    deleteServerDraft().catch(() => {});
     updateMappingStatus();
     updateStatus();
     toast('Images cleared', 'info');
@@ -286,6 +502,8 @@
       return;
     }
     let skipped = 0;
+    let loaded = 0;
+    let stageFailed = 0;
     for (const file of files) {
       const seq = parseSequenceFromFilename(file.name);
       if (seq == null || !Number.isFinite(seq)) {
@@ -293,23 +511,45 @@
         continue;
       }
       const existing = biv.images.findIndex((x) => x.seq === seq);
+      const blobUrl = URL.createObjectURL(file);
       const entry = {
         id: uuid(),
         name: file.name,
         seq,
         file,
-        previewUrl: URL.createObjectURL(file),
+        previewUrl: blobUrl,
+        assetId: null,
+        stagedId: null,
       };
+      try {
+        const staged = await stageUploadedFile(file);
+        entry.assetId = staged.assetId;
+        entry.stagedId = staged.stagedId;
+        if (staged.url) {
+          revokeImagePreview(entry);
+          entry.previewUrl = staged.url;
+        }
+        if (staged.assetId) trackStagedLocal(staged.assetId);
+      } catch (err) {
+        stageFailed += 1;
+        console.warn('[BulkI2V] stage on upload failed', err);
+      }
       if (existing >= 0) {
         revokeImagePreview(biv.images[existing]);
         biv.images[existing] = entry;
       } else {
         biv.images.push(entry);
       }
+      loaded += 1;
     }
     if (skipped) toast(`Skipped ${skipped} file(s) without a sequence number`, 'warning');
-    else toast(`Loaded ${files.length - skipped} image(s)`, 'success');
+    if (stageFailed) {
+      toast(`Loaded ${loaded} image(s) — ${stageFailed} not saved to server yet`, 'warning');
+    } else if (loaded) {
+      toast(`Loaded ${loaded} image(s)`, 'success');
+    }
     syncPreviewFromInputs({ force: true });
+    scheduleServerDraftSave();
   }
 
   /** Live preview: one card per uploaded image; prompts attach by order as you paste. */
@@ -339,6 +579,8 @@
           imageSeq: img.seq,
           previewUrl: img.previewUrl || prev.previewUrl || '',
           file: img.file || prev.file || null,
+          stagedId: img.stagedId || prev.stagedId || null,
+          localAssetId: img.assetId || prev.localAssetId || null,
         };
       }
       const keepReady = prev && prev.status === 'ready' && prev.url && !force;
@@ -359,8 +601,8 @@
         imageSeq: img.seq,
         previewUrl: img.previewUrl || (prev && prev.previewUrl) || '',
         file: img.file || (prev && prev.file) || null,
-        stagedId: null,
-        localAssetId: null,
+        stagedId: img.stagedId || (prev && prev.stagedId) || null,
+        localAssetId: img.assetId || (prev && prev.localAssetId) || null,
       };
     });
 
@@ -396,31 +638,56 @@
   }
 
   async function maybeCleanupStagedAfterRun() {
+    // Keep staged draft images until Clear — only drop orphans not in biv.images
     const active = biv.scenes.some(
       (s) => s && (s.status === 'idle' || s.status === 'queued' || s.status === 'generating')
     );
     if (active || biv.runActive) return;
-    if (!(biv.stagedLocalIds || []).length) return;
-    await cleanupStagedLocals();
+    const keep = new Set(
+      (biv.images || []).map((img) => img && (img.assetId || img.id)).filter(Boolean)
+    );
+    const orphans = (biv.stagedLocalIds || []).filter((id) => id && !keep.has(id));
+    if (!orphans.length) return;
+    for (const id of orphans) {
+      try {
+        await fetch(`${API_BASE}/api/assets?id=${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          credentials: 'include',
+        });
+      } catch (_) {}
+    }
+    biv.stagedLocalIds = (biv.stagedLocalIds || []).filter((id) => keep.has(id));
     saveState();
   }
 
   async function stageSceneFile(scene) {
     if (scene.stagedId) return scene.stagedId;
+    if (scene.imageSeq != null) {
+      const img = biv.images.find((x) => x.seq === scene.imageSeq);
+      if (img && img.stagedId) {
+        scene.stagedId = img.stagedId;
+        scene.localAssetId = img.assetId || scene.localAssetId || null;
+        return img.stagedId;
+      }
+    }
     const file = scene.file;
     if (!file) throw new Error('Re-upload images — file missing from browser memory');
-    const form = new FormData();
-    form.append('file', file, file.name || scene.imageName || 'frame.jpg');
-    const res = await fetch(`${API_BASE}/api/assets/stage`, { method: 'POST', body: form, credentials: 'include' });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || data.error || 'Staging failed');
-    const stagedId = data.staged_id || (data.asset && data.asset.staged_id) || null;
-    const localId = (data.asset && data.asset.id) || null;
-    if (!stagedId) throw new Error('Staging returned no staged-* id');
-    scene.stagedId = stagedId;
-    scene.localAssetId = localId;
-    trackStagedLocal(localId);
-    return stagedId;
+    const staged = await stageUploadedFile(file);
+    scene.stagedId = staged.stagedId;
+    scene.localAssetId = staged.assetId;
+    trackStagedLocal(staged.assetId);
+    if (scene.imageSeq != null) {
+      const img = biv.images.find((x) => x.seq === scene.imageSeq);
+      if (img) {
+        img.stagedId = staged.stagedId;
+        img.assetId = staged.assetId || img.assetId;
+        if (staged.url && (!img.previewUrl || String(img.previewUrl).startsWith('blob:'))) {
+          revokeImagePreview(img);
+          img.previewUrl = staged.url;
+        }
+      }
+    }
+    return staged.stagedId;
   }
 
   function matchCharactersForScene(prompt, characters) {
@@ -540,45 +807,8 @@
   }
 
   function saveState() {
-    if (biv._formHydrated) readFormIntoState();
-    const payload = {
-      savedAt: Date.now(),
-      expiresAt: Date.now() + STATE_TTL_MS,
-      runActive: !!biv.runActive,
-      userStopped: !!biv.userStopped,
-      chain: !!biv.chain,
-      model: biv.model,
-      aspect: biv.aspect,
-      duration: biv.duration || 8,
-      globalPrompt: biv.globalPrompt,
-      scriptText: biv.scriptText,
-      stagedLocalIds: Array.isArray(biv.stagedLocalIds) ? biv.stagedLocalIds : [],
-      images: (biv.images || []).map((img) => ({
-        id: img.id,
-        name: img.name,
-        seq: img.seq,
-      })),
-      characters: biv.characters,
-      scenes: biv.scenes,
-    };
+    const payload = buildDraftPayload();
     try {
-      // Drop blob previews from scenes before persist
-      if (Array.isArray(payload.scenes)) {
-        payload.scenes = payload.scenes.map((s) => {
-          if (!s) return s;
-          const copy = { ...s };
-          delete copy.file;
-          if (copy.previewUrl && String(copy.previewUrl).startsWith('blob:')) delete copy.previewUrl;
-          if (copy.url && mediaUrlExpired(copy.url)) {
-            copy.url = '';
-            if (copy.status === 'ready') {
-              copy.status = 'failed';
-              copy.error = 'Media expired';
-            }
-          }
-          return copy;
-        });
-      }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     } catch (_) {
       try {
@@ -591,6 +821,7 @@
         localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
       } catch (__) {}
     }
+    scheduleServerDraftSave();
   }
 
   function clearPersistedState() {
@@ -603,44 +834,8 @@
     try {
       const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
       if (!raw) return false;
-      // Soft expiry: never wipe whole tool on logout/TTL — only drop CDN-expired media urls below.
-      biv.runActive = !!raw.runActive;
-      biv.userStopped = !!raw.userStopped;
-      biv.chain = false;
-      biv.duration = Number(raw.duration) || 8;
-      biv.model = raw.model || 'VEO_3_1_LITE';
-      biv.aspect = raw.aspect === '1:1' ? '16:9' : (raw.aspect || '16:9');
-      biv.globalPrompt = '';
-      biv.scriptText = raw.scriptText || '';
-      biv.stagedLocalIds = Array.isArray(raw.stagedLocalIds) ? raw.stagedLocalIds.filter(Boolean) : [];
-      // File handles cannot survive refresh — keep metadata only
-      biv.images = Array.isArray(raw.images)
-        ? raw.images.map((img) => ({
-            id: img.id || uuid(),
-            name: img.name || '',
-            seq: Number(img.seq),
-            file: null,
-            previewUrl: '',
-          })).filter((img) => Number.isFinite(img.seq))
-        : [];
-      biv.characters = Array.isArray(raw.characters) ? raw.characters : [];
-      biv.scenes = Array.isArray(raw.scenes) ? raw.scenes : [];
-      biv.scenes.forEach((s, i) => {
-        if (s) {
-          s.index = Number(s.index) || i + 1;
-          s.title = normalizeSceneTitle(s, i + 1);
-          s.file = null;
-          if (s.previewUrl && String(s.previewUrl).startsWith('blob:')) s.previewUrl = '';
-
-          if (s.url && mediaUrlExpired(s.url)) {
-            s.url = '';
-            if (s.status === 'ready') {
-              s.status = 'failed';
-              s.error = 'Media expired';
-            }
-          }
-        }
-      });
+      const ok = applyDraftPayload(raw, { keepLiveFiles: true });
+      if (!ok) return false;
       // Never resume a dead run (Stop left only failed/ready cards)
       if (biv.runActive || biv.userStopped) {
         const canWork = biv.scenes.some(
@@ -1042,6 +1237,10 @@
     const parts = [`${biv.scenes.length} scenes identified`, `${ready} ready`];
     if (generating) parts.push(`${generating} generating`);
     if (queued) parts.push(`${queued} queue`);
+    const planHint = biv.scenes.some(
+      (s) => s && s.status === 'queued' && /plan parallel|parallel limit|Waiting in queue/i.test(String(s.queueMessage || ''))
+    );
+    if (planHint) parts.push('plan limit');
     const nextText = parts.join(' • ');
     if (status && status.textContent !== nextText) {
       status.textContent = nextText;
@@ -1072,6 +1271,9 @@
       return `
         <div class="biv-queue-label" data-ph>Queue</div>
         <video class="biv-scene-video" muted loop playsinline preload="metadata"></video>
+        <button type="button" class="card-play-badge biv-play-badge" data-act="play" title="Play video" aria-label="Play video">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+        </button>
       `;
     }
     if (scene.status === 'failed' && isUserStopError(scene.error)) {
@@ -1102,6 +1304,7 @@
     if (!(scene.status === 'ready' && scene.url)) return;
     const vid = card.querySelector('video.biv-scene-video');
     const ph = card.querySelector('[data-ph]');
+    const media = card.querySelector('.biv-scene-media');
     if (!vid) return;
     vid.src = scene.url;
     vid.classList.add('is-ready');
@@ -1113,6 +1316,33 @@
       }
       vid.remove();
     });
+
+    const openPlayer = (e) => {
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      if (typeof window.openMediaViewerModal === 'function') {
+        window.openMediaViewerModal({
+          type: 'video',
+          url: scene.url,
+          prompt: scene.prompt || scene.submitPrompt || '',
+          name: scene.title || `Scene ${scene.index || ''}`,
+          id: scene.jobId || scene.id,
+        });
+      } else {
+        window.open(scene.url, '_blank', 'noopener');
+      }
+    };
+    const playBtn = card.querySelector('[data-act="play"]');
+    if (playBtn) playBtn.addEventListener('click', openPlayer);
+    if (media) {
+      media.style.cursor = 'pointer';
+      media.addEventListener('click', (e) => {
+        if (e.target.closest('[data-act="dl"], [data-act="retry"]')) return;
+        openPlayer(e);
+      });
+    }
   }
 
   function renderScenes({ force = false } = {}) {
@@ -1599,8 +1829,75 @@
     }
   }
 
+  async function pollPendingJobStatuses() {
+    if (!biv.runActive || biv.userStopped) return;
+    const pending = biv.scenes.filter(
+      (s) =>
+        s &&
+        s.jobId &&
+        !s.url &&
+        (s.status === 'generating' || s.status === 'queued' || s.status === 'PROCESSING')
+    );
+    if (!pending.length) return;
+
+    let changed = false;
+    await Promise.all(
+      pending.map(async (scene) => {
+        if (!biv.runActive || biv.userStopped) return;
+        try {
+          const res = await fetch(
+            `${API_BASE}/api/video/status/${encodeURIComponent(scene.jobId)}`,
+            { credentials: 'include' }
+          );
+          if (!res.ok) return;
+          const data = await res.json().catch(() => ({}));
+          const asset = data.asset || data;
+          const status = String(asset.status || '').toUpperCase();
+          if ((status === 'COMPLETED' || status === 'READY') && asset.url) {
+            applyCompletedAssetToScene(scene, {
+              id: scene.jobId,
+              url: asset.url,
+              status: 'COMPLETED',
+              upstreamAssetId: asset.upstreamAssetId || asset.mediaId,
+            });
+            changed = true;
+          } else if (status === 'FAILED' || status === 'CANCELLED') {
+            const err = asset.error || asset.errorMessage || 'Generation failed';
+            if (status === 'CANCELLED' || isUserStopError(err)) {
+              markSceneCancelled(scene);
+            } else {
+              scene.status = 'failed';
+              scene.error = err;
+            }
+            changed = true;
+          } else if (status === 'IN_QUEUE') {
+            if (scene.status !== 'queued') {
+              scene.status = 'queued';
+              scene.queueMessage = asset.queueMessage || asset.error || '';
+              changed = true;
+            }
+          } else if (status === 'PROCESSING' || status === 'GENERATING' || status === 'PREPARING') {
+            if (scene.status !== 'generating') {
+              scene.status = 'generating';
+              changed = true;
+            }
+          }
+        } catch (_) {}
+      })
+    );
+
+    if (changed && biv.runActive && !biv.userStopped) {
+      saveState();
+      renderScenes({ force: true });
+      await refreshCredits();
+    }
+  }
+
   async function reconcileJobsFromServer() {
     // After Stop, never revive cards into generating/queued from server status
+    if (!biv.runActive || biv.userStopped) return;
+
+    await pollPendingJobStatuses();
     if (!biv.runActive || biv.userStopped) return;
 
     const pending = biv.scenes.filter(
@@ -1845,12 +2142,14 @@
       return;
     }
     const missingFile = biv.scenes.some((s) => {
+      if (s.stagedId) return false;
       if (s.file) return false;
       const img = biv.images.find((x) => x.seq === s.imageSeq);
-      return !(img && img.file);
+      if (img && (img.file || img.stagedId)) return false;
+      return true;
     });
     if (missingFile) {
-      toast('Re-upload images (browser lost file handles after refresh)', 'warning');
+      toast('Re-upload images (missing staged files on server)', 'warning');
       return;
     }
 
@@ -2017,6 +2316,7 @@
     setMobileToolLayout('config');
     const n = await cancelBulkI2VPendingJobs(biv.scenes.map((s) => s.jobId).filter(Boolean));
     biv.sessionJobIds = [];
+    await deleteServerDraft();
     await cleanupStagedLocals();
     (biv.images || []).forEach(revokeImagePreview);
     biv.images = [];
@@ -2024,6 +2324,10 @@
     biv.scriptText = '';
     const input = document.getElementById('biv-image-input');
     if (input) input.value = '';
+    if (biv._draftSaveTimer) {
+      clearTimeout(biv._draftSaveTimer);
+      biv._draftSaveTimer = null;
+    }
     clearPersistedState();
     writeFormFromState();
     renderScenes({ force: true });
@@ -2105,13 +2409,28 @@
     });
   }
 
-  function initBulkI2V() {
-    const restored = loadState();
+  async function initBulkI2V() {
+    const hadLiveFiles = (biv.images || []).some((img) => img && (img.file || img.stagedId || img.previewUrl));
+    // Avoid clobbering warmer in-memory state with empty localStorage on tool switch
+    const restoredLocal = hadLiveFiles ? true : loadState();
+    try {
+      const draft = await fetchServerDraft();
+      if (draft && draft.payload) {
+        applyDraftPayload(draft.payload, { keepLiveFiles: hadLiveFiles });
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(buildDraftPayload()));
+        } catch (_) {}
+        biv._serverHydrated = true;
+      }
+    } catch (e) {
+      console.warn('[BulkI2V] server draft load failed', e);
+    }
+
     bindUi();
     writeFormFromState();
     biv._formHydrated = true;
+    const restored = restoredLocal || biv._serverHydrated || biv.images.length > 0 || biv.scenes.length > 0;
     if (restored) {
-      // Rebuild live preview from restored images metadata + script (files need re-upload)
       if (biv.images.length || biv.scriptText) {
         syncPreviewFromInputs({ force: !biv.runActive });
       } else {

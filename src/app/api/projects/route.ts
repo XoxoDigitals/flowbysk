@@ -43,7 +43,7 @@ export async function GET(req: Request) {
       success: true,
       projects: userProjects,
       active_project_id: activeProj?.id || null,
-      active_project_url: activeProj ? `https://labs.google/fx/tools/flow/project/${activeProj.id}` : null,
+      active_project_url: activeProj ? `https://flow.google.com/project/${activeProj.id}` : null,
     });
   } catch (error: any) {
     return NextResponse.json(

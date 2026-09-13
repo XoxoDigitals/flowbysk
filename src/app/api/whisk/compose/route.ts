@@ -85,6 +85,7 @@ export async function POST(req: Request) {
       const raw = ing.mediaId || ing.stagedId;
       if (!raw) continue;
       const mid = await refreshFlowMediaId({
+        accountId: provider.id,
         mediaId: String(raw),
         cookies: liveCookies,
         projectId: targetProjectId,

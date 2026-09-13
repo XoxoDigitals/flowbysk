@@ -320,6 +320,48 @@ function payloadI2V(projectId, prompt, imageId, model, aspect, recaptcha, charac
   return [[reqBlock], cctx, [uid(), 1]];
 }
 
+/**
+ * Flow UI 1080p upsample — batchexecute rpcid p0UkFb (NOT aisandbox UpsampleVideo).
+ * Captured from live Flow BiB network sniff (veo_3_1_upsampler_1080p).
+ */
+function payloadUpsample1080p(projectId, mediaId, aspect, recaptcha) {
+  const aspectNum =
+    aspect === 1 || aspect === '9:16'
+      ? 1
+      : aspect === 3 || aspect === '1:1'
+        ? 3
+        : 2;
+  const mid = String(mediaId || '').replace(/_upsampled$/i, '').trim();
+  const pad = Array(24).fill(null);
+  const reqBlock = [
+    [null, mid],
+    null,
+    aspectNum,
+    null,
+    [null, uid(), null, null, uid()],
+    null,
+    2,
+    ...pad,
+    'veo_3_1_upsampler_1080p',
+  ];
+  // Capture uses [recaptcha] without trailing 1 (unlike T2V)
+  const cctx = [null, 22, null, null, null, projectId, null, null, null, null, [recaptcha]];
+  return [[reqBlock], cctx];
+}
+
+function extractUpsampledMediaId(text, sourceMediaId) {
+  if (!text) return null;
+  const src = String(sourceMediaId || '')
+    .replace(/_upsampled$/i, '')
+    .trim();
+  if (src) {
+    const expected = `${src}_upsampled`;
+    if (text.includes(expected)) return expected;
+  }
+  const m = String(text).match(/([a-f0-9-]{36}_upsampled)/i);
+  return m ? m[1] : null;
+}
+
 function aspectToSandboxEnum(aspectRatio) {
   if (aspectRatio === '9:16' || aspectRatio === 1) return 'VIDEO_ASPECT_RATIO_PORTRAIT';
   if (aspectRatio === '1:1' || aspectRatio === 3) return 'VIDEO_ASPECT_RATIO_SQUARE';
@@ -404,6 +446,95 @@ function extractSandboxMediaId(data) {
   return null;
 }
 
+/**
+ * Parse aisandbox batchCheck / flowMedia responses into a poll result.
+ * ReferenceImages / StartImage jobs often never appear in jwpduf/as29s.
+ */
+function extractAisandboxVideoStatus(data, mediaId) {
+  if (!data || typeof data !== 'object') {
+    return { status: 'PROCESSING', videoUrl: null, error: null };
+  }
+
+  const pickUrl = (m) => {
+    if (!m || typeof m !== 'object') return null;
+    const gen =
+      (m.video && (m.video.generatedVideo || m.video)) ||
+      m.generatedVideo ||
+      {};
+    const url =
+      gen.fifeUrl ||
+      m.fifeUrl ||
+      (m.video && m.video.fifeUrl) ||
+      null;
+    if (url && /flow-content\.google\/video\//i.test(String(url))) return String(url);
+    const blob = JSON.stringify(m);
+    const matched = blob.match(/https:\/\/flow-content\.google\/video\/[^"\\\s]+/);
+    return matched ? matched[0].replace(/\\u0026/gi, '&') : null;
+  };
+
+  const statusOf = (m) => {
+    const ms = (m && m.mediaMetadata && m.mediaMetadata.mediaStatus) || {};
+    return String(
+      ms.mediaGenerationStatus || ms.status || (m && m.status) || ''
+    ).toUpperCase();
+  };
+
+  const mediaList = Array.isArray(data.media)
+    ? data.media
+    : data.name || data.mediaMetadata
+      ? [data]
+      : [];
+
+  for (const m of mediaList) {
+    const name = String(m.name || m.mediaId || '').trim();
+    if (mediaId && name && name !== mediaId && !name.startsWith(mediaId)) continue;
+    const st = statusOf(m);
+    const videoUrl = pickUrl(m);
+    if (videoUrl && /SUCCESS|COMPLETE/i.test(st || 'SUCCESS')) {
+      return { status: 'COMPLETED', videoUrl, error: null };
+    }
+    if (videoUrl) return { status: 'COMPLETED', videoUrl, error: null };
+    if (/TIMEOUT|EXPIRE/i.test(st)) {
+      return { status: 'FAILED', videoUrl: null, error: 'Generation timed out in Veo' };
+    }
+    if (/FAIL|ERROR|CANCEL/i.test(st)) {
+      const ms = (m.mediaMetadata && m.mediaMetadata.mediaStatus) || {};
+      const errObj = ms.error || {};
+      const reasons = ms.failureReasons || [];
+      const error =
+        (typeof errObj === 'object' ? errObj.message : errObj) ||
+        (Array.isArray(reasons) && reasons[0]) ||
+        ms.failureReason ||
+        ms.errorMessage ||
+        ms.message ||
+        m.error ||
+        'Generation failed in Veo';
+      return { status: 'FAILED', videoUrl: null, error: String(error) };
+    }
+  }
+
+  const ops = Array.isArray(data.operations) ? data.operations : [];
+  if (ops[0]) {
+    const op = ops[0];
+    if (op.error) {
+      return {
+        status: 'FAILED',
+        videoUrl: null,
+        error: op.error.message || op.error.status || 'Generation failed in Veo',
+      };
+    }
+    if (op.done) {
+      const videoUrl = pickUrl(op.response || op.result || {}) || pickUrl(data);
+      if (videoUrl) return { status: 'COMPLETED', videoUrl, error: null };
+    }
+  }
+
+  const directUrl = pickUrl(data);
+  if (directUrl) return { status: 'COMPLETED', videoUrl: directUrl, error: null };
+
+  return { status: 'PROCESSING', videoUrl: null, error: null };
+}
+
 function ogiHeaders(ctx, cookie) {
   return {
     'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
@@ -464,6 +595,74 @@ function extractCharacterEntityId(text, projectId) {
   return null;
 }
 
+/**
+ * Build maseQ image-upload batchexecute payload (mirrors Python build_maseq_payload).
+ * @param {object} ctx  - { at, bl, sid, origin }
+ * @param {string} projectId
+ * @param {string} recaptcha  - reCAPTCHA token from mintRecaptcha('IMAGE_GENERATION')
+ * @param {string} imageB64   - base64-encoded image bytes
+ * @param {string} mimeType   - e.g. 'image/jpeg'
+ * @param {string} filename   - e.g. 'upload.jpg'
+ */
+function buildMaseqPayload(ctx, projectId, recaptcha, imageB64, mimeType, filename) {
+  const u1 = uid();
+  const u2 = uid();
+  const clientCtx = [null, 22, null, null, null, projectId, null, null, null, null, [recaptcha, 1]];
+  return [
+    clientCtx,
+    imageB64,
+    mimeType || 'image/jpeg',
+    1,
+    null,
+    null,
+    null,
+    null,
+    filename || 'upload.jpg',
+    null,
+    u1,
+    u2,
+  ];
+}
+
+/**
+ * Extract media_id and optional url from a maseQ batchexecute response text.
+ */
+function extractMaseqResult(text) {
+  const out = { mediaId: null, workflowId: null };
+  for (const line of String(text).split('\n')) {
+    let s = line.trim();
+    if (!s || /^\d+$/.test(s)) continue;
+    if (/^\d+\s*\[/.test(s)) s = s.replace(/^\d+\s*/, '');
+    if (!s.includes('maseQ') && !s.includes('wrb.fr')) continue;
+    try {
+      const outer = JSON.parse(s);
+      const row = Array.isArray(outer) ? outer[0] : null;
+      if (!Array.isArray(row) || row[0] !== 'wrb.fr') continue;
+      if (row[1] !== 'maseQ') continue;
+      if (row[2] == null) continue;
+      const payload = typeof row[2] === 'string' ? JSON.parse(row[2]) : row[2];
+      const block = Array.isArray(payload) && Array.isArray(payload[0]) ? payload[0] : null;
+      if (block && typeof block[0] === 'string' && block[0].length > 10) {
+        out.mediaId = block[0];
+      }
+      if (block && typeof block[2] === 'string') {
+        out.workflowId = block[2];
+      } else if (Array.isArray(payload[1]) && typeof payload[1][0] === 'string') {
+        out.workflowId = payload[1][0];
+      }
+    } catch {
+      /* keep scanning */
+    }
+  }
+  // Fallback: first UUID that looks like a media id
+  if (!out.mediaId) {
+    const uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+    const ids = String(text).match(uuidRe) || [];
+    out.mediaId = ids[0] || null;
+  }
+  return out;
+}
+
 module.exports = {
   SITE_KEY,
   START_URL,
@@ -488,9 +687,14 @@ module.exports = {
   payloadC4BZMd,
   payloadT2V,
   payloadI2V,
+  payloadUpsample1080p,
+  extractUpsampledMediaId,
   buildReferenceImagesPayload,
   buildStartImagePayload,
   extractSandboxMediaId,
+  extractAisandboxVideoStatus,
   aspectToSandboxEnum,
   ogiHeaders,
+  buildMaseqPayload,
+  extractMaseqResult,
 };

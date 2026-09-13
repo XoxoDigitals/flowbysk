@@ -205,6 +205,7 @@ export async function POST(req: Request) {
       const freshIds: string[] = [];
       for (const mid of resolvedIds) {
         const refreshed = await refreshFlowMediaId({
+          accountId: provider.id,
           mediaId: mid,
           cookies: liveCookies,
           projectId: targetProjectId,
@@ -231,6 +232,7 @@ export async function POST(req: Request) {
         const mid = c.image_media_id;
         if (!mid) continue;
         const refreshed = await refreshFlowMediaId({
+          accountId: provider.id,
           mediaId: mid,
           cookies: liveCookies,
           projectId: targetProjectId,

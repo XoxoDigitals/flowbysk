@@ -126,6 +126,7 @@ export async function POST(req: Request) {
 
       if (imageMediaId || imageUrl) {
         const refreshed = await refreshFlowMediaId({
+          accountId: provider.id,
           mediaId: imageMediaId || imageUrl,
           cookies: sessionPrep.cookies,
           projectId: projectId || undefined,

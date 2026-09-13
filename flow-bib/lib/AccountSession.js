@@ -339,21 +339,62 @@ class AccountSession {
   }
 
   /**
-   * Sniff Authorization Bearer from Flow → aisandbox-pa traffic.
-   * labs.google/fx/tools/flow permanently redirects to flow.google.com — never warm via that UI.
+   * Sniff Authorization Bearer + full aisandbox request/response bodies from Flow traffic.
+   * Captures UpsampleVideo / video generate payloads so we can match Studio to real UI.
    */
   async _installBearerSniff() {
     if (!this.cdp || this._bearerSniffInstalled) return;
     this._bearerSniffInstalled = true;
+    this._networkCaptures = this._networkCaptures || [];
+    this._pendingCaptureByRequestId = this._pendingCaptureByRequestId || new Map();
     try {
-      await this.cdp.send('Network.enable');
+      await this.cdp.send('Network.enable', {
+        maxPostDataSize: 2_000_000,
+      });
     } catch {
       /* ignore */
     }
-    this.cdp.on('Network.requestWillBeSent', (ev) => {
+
+    const interesting = (url) =>
+      /aisandbox-pa\.googleapis\.com/i.test(url) ||
+      (/batchexecute/i.test(url) && /flow\.google|google\.com/i.test(url));
+
+    const pushCapture = (entry) => {
+      try {
+        this._networkCaptures.push(entry);
+        if (this._networkCaptures.length > 80) this._networkCaptures.shift();
+        const fs = require('fs');
+        const pathMod = require('path');
+        const dir = pathMod.join(
+          pathMod.dirname(this.profileDir),
+          '..',
+          'bib-captures',
+          this.accountId
+        );
+        fs.mkdirSync(dir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const kind = String(entry.url || '')
+          .split('?')[0]
+          .split('/')
+          .pop()
+          .replace(/[^\w.-]+/g, '_')
+          .slice(0, 80);
+        const file = pathMod.join(dir, `${stamp}_${entry.phase || 'req'}_${kind}.json`);
+        fs.writeFileSync(file, JSON.stringify(entry, null, 2));
+        if (/Upsample|upsample|batchAsyncGenerateVideo/i.test(entry.url || '')) {
+          console.log(
+            `[${this.accountId}] CAPTURE ${entry.phase} ${entry.method || ''} ${entry.url} status=${entry.status || '-'}`
+          );
+        }
+      } catch (e) {
+        console.warn(`[${this.accountId}] capture write:`, e.message);
+      }
+    };
+
+    this.cdp.on('Network.requestWillBeSent', async (ev) => {
       try {
         const url = ev?.request?.url || '';
-        if (!/aisandbox-pa\.googleapis\.com/i.test(url)) return;
+        if (!interesting(url)) return;
         const headers = ev.request.headers || {};
         const auth =
           headers.Authorization ||
@@ -368,10 +409,110 @@ class AccountSession {
             source: 'sniff',
           };
         }
+
+        let postData = ev.request.postData || '';
+        if (!postData && ev.requestId) {
+          try {
+            const got = await this.cdp.send('Network.getRequestPostData', {
+              requestId: ev.requestId,
+            });
+            postData = got?.postData || '';
+          } catch {
+            /* no body */
+          }
+        }
+
+        let bodyPreview = postData;
+        let bodyJson = null;
+        if (postData) {
+          try {
+            bodyJson = JSON.parse(postData);
+            bodyPreview = JSON.stringify(bodyJson).slice(0, 8000);
+          } catch {
+            bodyPreview = String(postData).slice(0, 8000);
+          }
+        }
+
+        const entry = {
+          ts: new Date().toISOString(),
+          phase: 'request',
+          requestId: ev.requestId,
+          method: ev.request.method,
+          url,
+          hasBearer: !!m,
+          contentType: headers['Content-Type'] || headers['content-type'] || '',
+          bodyJson,
+          bodyPreview,
+        };
+        this._pendingCaptureByRequestId.set(ev.requestId, entry);
+        pushCapture(entry);
       } catch {
         /* ignore */
       }
     });
+
+    this.cdp.on('Network.responseReceived', (ev) => {
+      try {
+        const url = ev?.response?.url || '';
+        if (!interesting(url)) return;
+        const prev = this._pendingCaptureByRequestId.get(ev.requestId) || {
+          requestId: ev.requestId,
+          url,
+        };
+        prev.responseMeta = {
+          status: ev.response.status,
+          mimeType: ev.response.mimeType,
+        };
+        this._pendingCaptureByRequestId.set(ev.requestId, prev);
+      } catch {
+        /* ignore */
+      }
+    });
+
+    this.cdp.on('Network.loadingFinished', async (ev) => {
+      try {
+        const prev = this._pendingCaptureByRequestId.get(ev.requestId);
+        if (!prev) return;
+        let bodyText = '';
+        try {
+          const got = await this.cdp.send('Network.getResponseBody', {
+            requestId: ev.requestId,
+          });
+          bodyText = got?.body || '';
+          if (got?.base64Encoded) {
+            bodyText = Buffer.from(bodyText, 'base64').toString('utf8');
+          }
+        } catch {
+          /* ignore */
+        }
+        let bodyJson = null;
+        try {
+          bodyJson = JSON.parse(bodyText);
+        } catch {
+          /* not json */
+        }
+        const entry = {
+          ts: new Date().toISOString(),
+          phase: 'response',
+          requestId: ev.requestId,
+          method: prev.method,
+          url: prev.url,
+          status: prev.responseMeta?.status,
+          requestBodyJson: prev.bodyJson || null,
+          responseJson: bodyJson,
+          responsePreview: String(bodyText || '').slice(0, 12000),
+        };
+        pushCapture(entry);
+        this._pendingCaptureByRequestId.delete(ev.requestId);
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+
+  getNetworkCaptures(limit = 40) {
+    const list = Array.isArray(this._networkCaptures) ? this._networkCaptures : [];
+    return list.slice(-Math.max(1, Math.min(100, Number(limit) || 40)));
   }
 
   _cachedAccessToken(force = false) {
@@ -633,10 +774,74 @@ class AccountSession {
     }
     if (!result.status || result.status >= 400) {
       if (result.status === 401) this._labsTokenCache = null;
-      const msg =
+      let msg =
         (data && (data.error || data.message || data.status)) ||
         String(result.text || '').slice(0, 240);
+      if (msg && typeof msg === 'object') {
+        try {
+          msg = JSON.stringify(msg);
+        } catch {
+          msg = String(msg);
+        }
+      }
       throw new Error(`aisandbox ${result.status}: ${msg}`);
+    }
+    return data;
+  }
+
+  /**
+   * GET aisandbox (flowMedia detail) with Bearer — no reCAPTCHA.
+   */
+  async aisandboxGet(endpoint) {
+    if (!this.page) throw new Error('no page');
+    let accessToken = await this.fetchLabsAccessToken({ force: false });
+    if (!accessToken) {
+      accessToken = await this.fetchLabsAccessToken({ force: true });
+    }
+    if (!accessToken) {
+      throw new Error(
+        'No aisandbox access_token — open BiB viewer, sign into flow.google.com, then Refresh aisandbox token'
+      );
+    }
+    const result = await this.page.evaluate(
+      async (ep, bearer) => {
+        try {
+          const r = await fetch(ep, {
+            method: 'GET',
+            headers: {
+              Authorization: 'Bearer ' + bearer,
+              Accept: 'application/json',
+            },
+            credentials: 'include',
+          });
+          const text = await r.text();
+          return { status: r.status, text };
+        } catch (e) {
+          return { status: 0, text: e && e.message ? e.message : String(e) };
+        }
+      },
+      endpoint,
+      accessToken
+    );
+    let data = null;
+    try {
+      data = JSON.parse(result.text || '{}');
+    } catch {
+      data = { raw: String(result.text || '').slice(0, 400) };
+    }
+    if (!result.status || result.status >= 400) {
+      if (result.status === 401) this._labsTokenCache = null;
+      let msg =
+        (data && (data.error || data.message || data.status)) ||
+        String(result.text || '').slice(0, 240);
+      if (msg && typeof msg === 'object') {
+        try {
+          msg = JSON.stringify(msg);
+        } catch {
+          msg = String(msg);
+        }
+      }
+      throw new Error(`aisandbox GET ${result.status}: ${msg}`);
     }
     return data;
   }

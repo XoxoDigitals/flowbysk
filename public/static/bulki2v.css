@@ -705,6 +705,35 @@
   opacity: 1;
 }
 
+.biv-scene-media .biv-play-badge,
+.biv-scene-media .card-play-badge {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+  pointer-events: auto;
+  opacity: 0.92;
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease;
+}
+
+.biv-scene-media:hover .biv-play-badge,
+.biv-scene-media:hover .card-play-badge {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.72);
+  transform: translate(-50%, -50%) scale(1.05);
+}
+
 .biv-queue-label {
   color: #64748b;
   font-size: 13px;

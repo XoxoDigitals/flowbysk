@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getOrCreateStudioUser } from '@/lib/auth';
+import { canAccessProviderAccounts } from '@/lib/accountsAccess';
 import { prisma } from '@/lib/prisma';
 import { BrowserStatus, ProviderStatus, UserRole } from '@prisma/client';
 import {
@@ -8,23 +9,25 @@ import {
   bibScrapeProjects,
   bibLaunchAccount,
   bibAccountStatus,
+  bibNavigate,
   bibViewerUrl,
   getBibWorkerUrl,
 } from '@/lib/bib';
 import path from 'path';
 
-async function requireAdmin(req: Request) {
+async function requireAccountsAdmin(req: Request) {
   const session = await getOrCreateStudioUser(req);
   if (session.role !== UserRole.ADMIN && session.role !== UserRole.SUPER_ADMIN) {
     return null;
   }
+  if (!(await canAccessProviderAccounts(session))) return null;
   return session;
 }
 
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function GET(req: Request, ctx: Ctx) {
-  if (!(await requireAdmin(req))) {
+  if (!(await requireAccountsAdmin(req))) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
   const { id } = await ctx.params;
@@ -55,7 +58,7 @@ export async function GET(req: Request, ctx: Ctx) {
 }
 
 export async function POST(req: Request, ctx: Ctx) {
-  if (!(await requireAdmin(req))) {
+  if (!(await requireAccountsAdmin(req))) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
   const { id } = await ctx.params;
@@ -229,6 +232,64 @@ export async function POST(req: Request, ctx: Ctx) {
         account: await prisma.providerAccount.findUnique({ where: { id } }),
         live,
         viewerUrl: bibViewerUrl(id),
+      });
+    }
+
+    if (action === 'open_project' || action === 'navigate') {
+      const projectId = String(body.projectId || '')
+        .trim()
+        .replace(/^.*\/project\//, '')
+        .split(/[?#]/)[0];
+      const projectUrl = String(body.url || '').trim();
+      const targetUrl =
+        projectUrl ||
+        (projectId ? `https://flow.google.com/project/${projectId}` : '');
+      if (!targetUrl || !targetUrl.includes('flow.google.com')) {
+        return NextResponse.json(
+          { error: 'projectId or flow.google.com project url required' },
+          { status: 400 }
+        );
+      }
+
+      // Ensure browser is up, then navigate to the project and open login stream
+      let live = await bibAccountStatus(id).catch(() => null);
+      if (!live?.running && live?.status !== 'READY' && live?.status !== 'NEEDS_LOGIN') {
+        live = await bibLaunchAccount(id, {
+          maxSlots: account.maxParallelLimit,
+          projectIds: Array.isArray(account.flowProjectIds)
+            ? (account.flowProjectIds as string[])
+            : undefined,
+          profileDir: account.profileDir,
+        });
+      }
+
+      await bibNavigate(id, targetUrl);
+
+      const browserStatus =
+        live?.status === 'READY'
+          ? BrowserStatus.READY
+          : live?.status === 'NEEDS_LOGIN'
+            ? BrowserStatus.NEEDS_LOGIN
+            : BrowserStatus.STARTING;
+
+      await prisma.providerAccount.update({
+        where: { id },
+        data: {
+          browserStatus,
+          activeProjectId: projectId || account.activeProjectId,
+          projectUrl: targetUrl,
+          bibLastSeenAt: new Date(),
+          bibLastError: null,
+        },
+      });
+
+      return NextResponse.json({
+        success: true,
+        action: 'open_project',
+        projectId: projectId || null,
+        url: targetUrl,
+        viewerUrl: bibViewerUrl(id, { url: targetUrl }),
+        live,
       });
     }
 

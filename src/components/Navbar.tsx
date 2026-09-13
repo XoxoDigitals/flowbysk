@@ -6,9 +6,11 @@ import { useEffect, useState } from 'react';
 import { Menu, X } from 'lucide-react';
 import SiteBrand from './SiteBrand';
 import ThemeToggle from './ThemeToggle';
+import { useSiteSettings } from './SiteSettingsProvider';
 
 export default function Navbar() {
   const pathname = usePathname();
+  const { contactPageEnabled } = useSiteSettings();
   const [user, setUser] = useState<{ email: string; role: string } | null>(null);
   const [open, setOpen] = useState(false);
 
@@ -47,7 +49,7 @@ export default function Navbar() {
       {link('/features', 'Features', () => setOpen(false))}
       {link('/pricing', 'Pricing', () => setOpen(false))}
       {link('/about', 'About', () => setOpen(false))}
-      {link('/contact', 'Contact', () => setOpen(false))}
+      {contactPageEnabled !== false && link('/contact', 'Contact', () => setOpen(false))}
     </>
   );
 

@@ -6,9 +6,9 @@ import StudioShell from '@/components/studio/StudioShell';
 const WHISK_SRC = '/static/whisk.js?v=model-remap-1';
 const BULKT2V_SRC = '/static/bulkt2v.js?v=btv-7';
 const BULKT2I_SRC = '/static/bulkt2i.js?v=bti-6';
-const BULKI2V_SRC = '/static/bulki2v.js?v=biv-5';
+const BULKI2V_SRC = '/static/bulki2v.js?v=biv-6';
 // Bump when app.js display logic changes so browsers don't keep a stale Studio shell script.
-const APP_SRC = '/static/app.js?v=char-refs-4';
+const APP_SRC = '/static/app.js?v=studio-skel-1';
 const STORYTELLER_SRC = '/static/storyteller.js?v=bvs-27';
 
 function waitForStudioShell(timeoutMs = 5000): Promise<boolean> {
@@ -90,8 +90,22 @@ export default function StudioPage() {
         await loadScriptOnce(BULKI2V_SRC);
         if (cancelled) return;
         await loadScriptOnce(APP_SRC);
+        // Failsafe: reveal shell even if app.js init stalls
+        window.setTimeout(() => {
+          try {
+            if (document.documentElement.classList.contains('studio-booting')) {
+              document.documentElement.classList.remove('studio-booting');
+              document.documentElement.classList.add('studio-ready');
+              document.body.classList.add('theme-flow-dark');
+            }
+          } catch (_) {}
+        }, 2500);
       } catch (e) {
         console.error('[Studio] Script load failed', e);
+        try {
+          document.documentElement.classList.remove('studio-booting');
+          document.documentElement.classList.add('studio-ready');
+        } catch (_) {}
       }
     })();
 
@@ -113,7 +127,27 @@ export default function StudioPage() {
   }, []);
 
   return (
-    <div className="h-full w-full overflow-hidden bg-[#090b10]">
+    <div className="h-full w-full overflow-hidden bg-[#090b10] relative">
+      <div id="studio-boot-skeleton" aria-hidden="true">
+        <div className="studio-skel-header" />
+        <div className="studio-skel-body">
+          <div className="studio-skel-side" />
+          <div className="studio-skel-main">
+            <div className="studio-skel-grid">
+              <div className="studio-skel-card" />
+              <div className="studio-skel-card" />
+              <div className="studio-skel-card" />
+              <div className="studio-skel-card" />
+              <div className="studio-skel-card" />
+              <div className="studio-skel-card" />
+              <div className="studio-skel-card" />
+              <div className="studio-skel-card" />
+            </div>
+            <div className="studio-skel-footer" />
+          </div>
+        </div>
+        <div className="studio-skel-label">Loading Studio…</div>
+      </div>
       <StudioShell />
     </div>
   );

@@ -35,12 +35,14 @@ async function repairFlowRefs(opts: {
   refs: string[];
   cookies?: string;
   projectId?: string;
+  accountId?: string;
   forceReupload?: boolean;
 }) {
   const out: string[] = [];
   for (const mid of opts.refs) {
     const next =
       (await refreshFlowMediaId({
+        accountId: opts.accountId,
         mediaId: mid,
         cookies: opts.cookies,
         projectId: opts.projectId,
@@ -208,6 +210,7 @@ export async function POST(req: Request) {
         // Includes staged-* → Flow UUID via HTTP upload (not CDP generation)
         return (
           (await refreshFlowMediaId({
+            accountId: provider.id,
             mediaId: resolved,
             cookies: liveCookies,
             projectId: targetProjectId,
@@ -383,6 +386,7 @@ export async function POST(req: Request) {
           refs: flowRefs,
           cookies: liveCookies,
           projectId: targetProjectId,
+          accountId: provider.id,
           forceReupload,
         });
         if (requestedRefCount > 0 && repaired.filter(isFlowUuid).length < Math.min(requestedRefCount, flowRefs.length)) {

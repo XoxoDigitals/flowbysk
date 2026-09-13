@@ -3,6 +3,7 @@ import { Poppins, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import { SiteSettingsProvider } from '@/components/SiteSettingsProvider';
+import { getSiteSettings } from '@/lib/site-settings';
 
 const body = Poppins({
   subsets: ['latin'],
@@ -16,11 +17,23 @@ const mono = JetBrains_Mono({
   weight: ['400', '500'],
 });
 
-export const metadata: Metadata = {
-  title: 'Flowbysk — Cinema, on demand',
-  description:
-    'Direct API access to generative video and image models in a Flow-like studio — no extension, no logouts.',
-};
+export async function generateMetadata(): Promise<Metadata> {
+  try {
+    const settings = await getSiteSettings();
+    const name = settings.siteName?.trim() || 'Flowbysk';
+    return {
+      title: `${name} — Cinema, on demand`,
+      description:
+        'Direct API access to generative video and image models in a Flow-like studio — no extension, no logouts.',
+    };
+  } catch {
+    return {
+      title: 'Flowbysk — Cinema, on demand',
+      description:
+        'Direct API access to generative video and image models in a Flow-like studio — no extension, no logouts.',
+    };
+  }
+}
 
 export const viewport: Viewport = {
   width: 'device-width',

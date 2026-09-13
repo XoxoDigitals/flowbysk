@@ -23,13 +23,18 @@ const {
   payloadC4BZMd,
   payloadT2V,
   payloadI2V,
+  payloadUpsample1080p,
+  extractUpsampledMediaId,
   normalizeCharacters,
   buildReferenceImagesPayload,
   buildStartImagePayload,
   extractSandboxMediaId,
+  extractAisandboxVideoStatus,
   ogiHeaders,
   sleep,
   uid,
+  buildMaseqPayload,
+  extractMaseqResult,
 } = require('./lib/helpers');
 
 /**
@@ -357,6 +362,7 @@ async function disconnectHandler(req, res) {
       return res.json({ success: true, status: 'STOPPED' });
     }
     const st = await s.disconnect({ clearProfile: !!req.body?.clearProfile });
+    pool.delete(req.params.id);
     forgetAccount(req.params.id);
     writeAutolaunchState();
     res.json({ success: true, ...st });
@@ -448,14 +454,16 @@ app.get('/accounts/:id/export-cookies', requireInternalSecret, async (req, res) 
     }
     const ctx = await s.readContext();
     const { cookie, names } = await s.cookieHeaderFor(ctx.origin || 'https://flow.google.com');
+    const authenticated = !!ctx.at && cookie.length > 40;
     res.json({
       origin: ctx.origin,
-      authenticated: !!ctx.at,
+      authenticated,
       cookieLength: cookie.length,
       cookie,
       at: ctx.at || '',
       bl: ctx.bl || '',
       sid: ctx.sid || '',
+      cookieNames: Array.from(names),
       hasLabsSession:
         names.has('__Secure-next-auth.session-token') || names.has('next-auth.session-token'),
     });
@@ -593,6 +601,29 @@ app.post('/accounts/:id/ensure-labs', async (req, res) => {
     });
   } catch (e) {
     console.error('ensure-labs', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Dump recent aisandbox/batchexecute network captures (for matching Flow UI upscale). */
+app.get('/accounts/:id/network-captures', requireInternalSecret, (req, res) => {
+  try {
+    const s = pool.get(req.params.id);
+    if (!s) return res.status(404).json({ error: 'account not in pool' });
+    const limit = Number(req.query.limit || 40);
+    const captures = typeof s.getNetworkCaptures === 'function' ? s.getNetworkCaptures(limit) : [];
+    const upsample = captures.filter((c) =>
+      /Upsample|upsample|batchAsyncGenerateVideo/i.test(String(c.url || ''))
+    );
+    res.json({
+      success: true,
+      accountId: req.params.id,
+      count: captures.length,
+      upsampleCount: upsample.length,
+      captures,
+      upsample,
+    });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
@@ -1020,7 +1051,7 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
       });
     }
 
-    const pollsAllowed = waitForCompletion ? Math.max(maxPolls, 45) : maxPolls;
+    const pollsAllowed = waitForCompletion ? Math.max(maxPolls, 45) : 0;
     let polls = 0;
     for (; polls < pollsAllowed && !videoUrl && mediaId; polls++) {
       await sleep(pollMs);
@@ -1040,6 +1071,44 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
       const ar = await fetch(a.url, { method: 'POST', headers: hdr, body: a.body });
       const at = await ar.text();
       videoUrl = extractVideoUrl(at);
+      if (videoUrl) break;
+      // aisandbox ReferenceImages / StartImage never show up in jwpduf reliably
+      if (needsSandbox) {
+        try {
+          const check = await s.aisandboxPost(
+            'https://aisandbox-pa.googleapis.com/v1/video:batchCheckAsyncVideoGenerationStatus',
+            { media: [{ name: mediaId, projectId }] },
+            'VIDEO_GENERATION'
+          );
+          const parsed = extractAisandboxVideoStatus(check, mediaId);
+          if (parsed.status === 'FAILED') {
+            return res.status(502).json({
+              success: false,
+              status: 'FAILED',
+              error: parsed.error || 'Generation failed in Veo',
+              mediaId,
+              stages,
+              ms: Date.now() - t0,
+              projectId,
+              accountId,
+            });
+          }
+          if (parsed.videoUrl) {
+            videoUrl = parsed.videoUrl;
+            break;
+          }
+          const detail = await s.aisandboxGet(
+            `https://aisandbox-pa.googleapis.com/v1/flowMedia/${encodeURIComponent(mediaId)}`
+          );
+          const detailParsed = extractAisandboxVideoStatus(detail, mediaId);
+          if (detailParsed.videoUrl) {
+            videoUrl = detailParsed.videoUrl;
+            break;
+          }
+        } catch (sandboxPollErr) {
+          console.warn(`[${accountId}] aisandbox poll:`, sandboxPollErr.message);
+        }
+      }
     }
 
     if (videoUrl) {
@@ -1083,7 +1152,104 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
   }
 });
 
-/** Native Flow 1080p upsample via aisandbox (BiB page mint — no Python CDP). */
+/** Native Flow image upload via live BiB WIZ session (maseQ batchexecute — no CDP). */
+app.post('/accounts/:id/upload-image', requireInternalSecret, async (req, res) => {
+  const t0 = Date.now();
+  try {
+    const accountId = req.params.id;
+    const {
+      projectId: preferredProject,
+      imageBase64,
+      imageUrl: imageUrlInput,
+      mimeType = 'image/jpeg',
+      filename = 'upload.jpg',
+    } = req.body || {};
+
+    if (!accountId) return res.status(400).json({ error: 'accountId required' });
+
+    const s = pool.get(accountId);
+    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    if (s.status !== 'READY') {
+      const auth = await s.refreshAuthStatus();
+      if (!auth.authenticated) return res.status(401).json({ error: 'Account not logged in' });
+    }
+
+    let ctx = await s.readContext();
+    if (!ctx.at) return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
+    const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
+    if (!projectId) return res.status(400).json({ error: 'No projectId available' });
+
+    // Navigate to project page if needed for reCAPTCHA mint
+    if (!projectFromHref(ctx.href) || projectFromHref(ctx.href) !== projectId) {
+      await s.navigate(`https://flow.google.com/project/${projectId}`);
+      await sleep(800);
+      ctx = await s.readContext();
+      if (!ctx.at) return res.status(401).json({ error: 'No WIZ at after project navigate' });
+    }
+
+    // Resolve image bytes → base64
+    let imgB64 = imageBase64 ? String(imageBase64).replace(/^data:[^;]+;base64,/, '') : null;
+    let resolvedMime = mimeType;
+
+    if (!imgB64 && imageUrlInput) {
+      // Fetch remote image
+      const { cookie } = await s.cookieHeaderFor(ctx.origin);
+      const imgRes = await fetch(imageUrlInput, {
+        headers: { Cookie: cookie, 'User-Agent': 'Mozilla/5.0' },
+      });
+      if (!imgRes.ok) {
+        return res.status(502).json({ error: `Failed to fetch image: ${imgRes.status}` });
+      }
+      const buf = Buffer.from(await imgRes.arrayBuffer());
+      imgB64 = buf.toString('base64');
+      resolvedMime = imgRes.headers.get('content-type')?.split(';')[0] || mimeType;
+    }
+
+    if (!imgB64) return res.status(400).json({ error: 'imageBase64 or imageUrl required' });
+
+    // Mint reCAPTCHA on live Flow project page
+    const recaptcha = await s.mintRecaptcha('IMAGE_GENERATION');
+    if (!recaptcha || recaptcha.length < 50) {
+      return res.status(502).json({ error: 'reCAPTCHA mint failed' });
+    }
+    const freshCtx = await s.readContext();
+    const { cookie } = await s.cookieHeaderFor(freshCtx.origin);
+
+    // Build maseQ batchexecute payload
+    const innerPayload = buildMaseqPayload(freshCtx, projectId, recaptcha, imgB64, resolvedMime, filename);
+    const { url: batchUrl, body: batchBody } = buildBatch(freshCtx, projectId, 'maseQ', innerPayload);
+
+    const uploadRes = await fetch(batchUrl, {
+      method: 'POST',
+      headers: {
+        ...ogiHeaders(freshCtx, cookie),
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: batchBody,
+    });
+    const text = await uploadRes.text();
+    const { mediaId } = extractMaseqResult(text);
+
+    if (!mediaId) {
+      console.warn(`[${accountId}] upload-image: no mediaId in response`, text.slice(0, 400));
+      return res.status(502).json({ error: 'Upload submitted but mediaId could not be parsed', raw: text.slice(0, 400) });
+    }
+
+    const imageUrl = `https://flow.google.com/project/${projectId}/image/${mediaId}`;
+    console.log(`[${accountId}] upload-image OK mediaId=${mediaId.slice(0, 8)} ms=${Date.now() - t0}`);
+    res.json({
+      success: true,
+      mediaId,
+      imageUrl,
+      projectId,
+      ms: Date.now() - t0,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message, ms: Date.now() - t0 });
+  }
+});
+
+/** Native Flow 1080p upsample via batchexecute p0UkFb (matches Flow UI — no aisandbox/CDP). */
 app.post('/upsample-video', requireInternalSecret, async (req, res) => {
   const t0 = Date.now();
   try {
@@ -1092,7 +1258,6 @@ app.post('/upsample-video', requireInternalSecret, async (req, res) => {
       mediaId,
       projectId: preferredProject,
       aspectRatio = '16:9',
-      videoModel,
     } = req.body || {};
     if (!accountId || !mediaId) {
       return res.status(400).json({ error: 'accountId and mediaId required' });
@@ -1107,73 +1272,76 @@ app.post('/upsample-video', requireInternalSecret, async (req, res) => {
     if (!projectFromHref(ctx.href) || projectFromHref(ctx.href) !== projectId) {
       await s.navigate(`https://flow.google.com/project/${projectId}`);
       await sleep(800);
-    }
-
-    const aspectEnum =
-      aspectRatio === '9:16'
-        ? 'VIDEO_ASPECT_RATIO_PORTRAIT'
-        : aspectRatio === '1:1'
-          ? 'VIDEO_ASPECT_RATIO_SQUARE'
-          : 'VIDEO_ASPECT_RATIO_LANDSCAPE';
-    const reqItem = {
-      videoInput: { mediaId },
-      resolution: 'VIDEO_RESOLUTION_1080P',
-      aspectRatio: aspectEnum,
-      seed: Math.floor(Math.random() * 900000) + 10000,
-      metadata: { sceneId: uid() },
-    };
-    if (videoModel) reqItem.videoModelKey = videoModel;
-    const payload = {
-      mediaGenerationContext: { batchId: `bib-upsample-${Date.now()}` },
-      clientContext: {
-        projectId,
-        tool: 'PINHOLE',
-        recaptchaContext: {
-          token: '',
-          applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
-        },
-      },
-      requests: [reqItem],
-      useV2ModelConfig: true,
-    };
-
-    const data = await s.aisandboxPost(
-      'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoUpsampleVideo',
-      payload,
-      'VIDEO_GENERATION'
-    );
-    let outMediaId = extractSandboxMediaId(data);
-    if (!outMediaId && Array.isArray(data.media) && data.media[0]) {
-      outMediaId = data.media[0].name || data.media[0].mediaId;
-    }
-
-    let videoUrl = null;
-    if (outMediaId) {
       ctx = await s.readContext();
-      const { cookie } = await s.cookieHeaderFor(ctx.origin);
-      const hdr = ogiHeaders(ctx, cookie);
-      for (let i = 0; i < 12 && !videoUrl; i++) {
-        await sleep(2500);
-        const p = buildBatch(ctx, projectId, 'jwpduf', [null, null, [[outMediaId]]]);
-        const pr = await fetch(p.url, { method: 'POST', headers: hdr, body: p.body });
-        videoUrl = extractVideoUrl(await pr.text());
-        if (videoUrl) break;
-        const a = buildBatch(ctx, projectId, 'as29s', [outMediaId]);
-        const ar = await fetch(a.url, { method: 'POST', headers: hdr, body: a.body });
-        videoUrl = extractVideoUrl(await ar.text());
-      }
+      if (!ctx.at) return res.status(401).json({ error: 'No WIZ at after project navigate' });
     }
 
+    const sourceMediaId = String(mediaId).replace(/_upsampled$/i, '').trim();
+    const recaptcha = await s.mintRecaptcha('VIDEO_GENERATION');
+    if (!recaptcha || recaptcha.length < 50) {
+      return res.status(502).json({ error: 'reCAPTCHA mint failed (upsample)' });
+    }
+
+    ctx = await s.readContext();
+    let { cookie } = await s.cookieHeaderFor(ctx.origin);
+    let hdr = ogiHeaders(ctx, cookie);
+
+    const payload = payloadUpsample1080p(projectId, sourceMediaId, aspectRatio, recaptcha);
+    const sub = buildBatch(ctx, projectId, 'p0UkFb', payload);
+    const sr = await fetch(sub.url, {
+      method: 'POST',
+      headers: { ...hdr, 'content-type': 'application/x-www-form-urlencoded' },
+      body: sub.body,
+    });
+    const stext = await sr.text();
+    let outMediaId =
+      extractUpsampledMediaId(stext, sourceMediaId) || extractPollId(stext, projectId);
+    let videoUrl = extractVideoUrl(stext);
+
+    if (!outMediaId && !videoUrl) {
+      console.warn(`[${accountId}] p0UkFb upsample: no mediaId`, stext.slice(0, 500));
+      return res.status(502).json({
+        error: 'Upsample submitted but mediaId could not be parsed',
+        httpStatus: sr.status,
+        raw: stext.slice(0, 500),
+        ms: Date.now() - t0,
+      });
+    }
+
+    // Prefer *_upsampled id for polling (Flow UI does this)
+    if (!outMediaId && sourceMediaId) outMediaId = `${sourceMediaId}_upsampled`;
+
+    for (let i = 0; i < 36 && !videoUrl && outMediaId; i++) {
+      await sleep(2500);
+      if (i > 0 && i % 5 === 0) {
+        ctx = await s.readContext();
+        ({ cookie } = await s.cookieHeaderFor(ctx.origin));
+        hdr = ogiHeaders(ctx, cookie);
+      }
+      const p = buildBatch(ctx, projectId, 'jwpduf', [null, null, [[outMediaId]]]);
+      const pr = await fetch(p.url, { method: 'POST', headers: hdr, body: p.body });
+      videoUrl = extractVideoUrl(await pr.text());
+      if (videoUrl) break;
+      const a = buildBatch(ctx, projectId, 'as29s', [outMediaId]);
+      const ar = await fetch(a.url, { method: 'POST', headers: hdr, body: a.body });
+      videoUrl = extractVideoUrl(await ar.text());
+    }
+
+    console.log(
+      `[${accountId}] upsample p0UkFb media=${String(outMediaId).slice(0, 20)} url=${!!videoUrl} ms=${Date.now() - t0}`
+    );
     res.json({
       success: true,
       status: videoUrl ? 'COMPLETED' : 'PROCESSING',
+      method: 'p0UkFb',
+      model: 'veo_3_1_upsampler_1080p',
       mediaId: outMediaId,
+      sourceMediaId,
       videoUrl,
       url: videoUrl,
       projectId,
       accountId,
       ms: Date.now() - t0,
-      raw: videoUrl ? undefined : data,
     });
   } catch (e) {
     console.error('upsample', e);
@@ -1181,7 +1349,7 @@ app.post('/upsample-video', requireInternalSecret, async (req, res) => {
   }
 });
 
-/** One-shot poll for a submitted video mediaId (jwpduf + as29s). */
+/** One-shot poll for a submitted video mediaId (jwpduf + as29s + aisandbox). */
 app.post('/video-status', requireInternalSecret, async (req, res) => {
   try {
     const { accountId, mediaId, projectId: preferredProject } = req.body || {};
@@ -1190,7 +1358,14 @@ app.post('/video-status', requireInternalSecret, async (req, res) => {
     }
     const s = pool.get(accountId);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
-    const ctx = await s.readContext();
+    let ctx;
+    try {
+      ctx = await s.readContext();
+    } catch (navErr) {
+      // Mid-navigation races during Launch/Open — retry once
+      await sleep(800);
+      ctx = await s.readContext();
+    }
     if (!ctx.at) return res.status(401).json({ error: 'not logged in' });
     const projectId =
       preferredProject || s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
@@ -1203,12 +1378,91 @@ app.post('/video-status', requireInternalSecret, async (req, res) => {
     const pt = await pr.text();
     let videoUrl = extractVideoUrl(pt);
     let imageUrl = extractImageUrl(pt);
+    const wizFailed =
+      /MEDIA_GENERATION_STATUS_FAILED|GENERATION_STATUS_FAILED/i.test(pt) && !videoUrl;
     if (!videoUrl && !imageUrl) {
       const a = buildBatch(ctx, projectId, 'as29s', [mediaId]);
       const ar = await fetch(a.url, { method: 'POST', headers: hdr, body: a.body });
       const at = await ar.text();
       videoUrl = extractVideoUrl(at);
       imageUrl = extractImageUrl(at);
+    }
+
+    // First+last / ReferenceImages submit via aisandbox — jwpduf often never sees them
+    if (!videoUrl && !imageUrl) {
+      try {
+        const check = await s.aisandboxPost(
+          'https://aisandbox-pa.googleapis.com/v1/video:batchCheckAsyncVideoGenerationStatus',
+          {
+            media: [{ name: mediaId, projectId }],
+          },
+          'VIDEO_GENERATION'
+        );
+        const parsed = extractAisandboxVideoStatus(check, mediaId);
+        if (parsed.status === 'FAILED') {
+          return res.json({
+            success: true,
+            status: 'FAILED',
+            error: parsed.error || 'Generation failed in Veo',
+            videoUrl: null,
+            imageUrl: null,
+            mediaId,
+            projectId,
+            accountId,
+            via: 'aisandbox_batchCheck',
+          });
+        }
+        if (parsed.videoUrl) {
+          return res.json({
+            success: true,
+            status: 'COMPLETED',
+            videoUrl: parsed.videoUrl,
+            imageUrl: null,
+            url: parsed.videoUrl,
+            mediaId,
+            projectId,
+            accountId,
+            via: 'aisandbox_batchCheck',
+          });
+        }
+        // Detail lookup when status says success but URL missing in batch payload
+        try {
+          const detail = await s.aisandboxGet(
+            `https://aisandbox-pa.googleapis.com/v1/flowMedia/${encodeURIComponent(mediaId)}`
+          );
+          const detailParsed = extractAisandboxVideoStatus(detail, mediaId);
+          if (detailParsed.status === 'FAILED') {
+            return res.json({
+              success: true,
+              status: 'FAILED',
+              error: detailParsed.error || 'Generation failed in Veo',
+              videoUrl: null,
+              imageUrl: null,
+              mediaId,
+              projectId,
+              accountId,
+              via: 'aisandbox_flowMedia',
+            });
+          }
+          if (detailParsed.videoUrl) {
+            return res.json({
+              success: true,
+              status: 'COMPLETED',
+              videoUrl: detailParsed.videoUrl,
+              imageUrl: null,
+              url: detailParsed.videoUrl,
+              mediaId,
+              projectId,
+              accountId,
+              via: 'aisandbox_flowMedia',
+            });
+          }
+        } catch (detailErr) {
+          console.warn(`[${accountId}] flowMedia poll:`, detailErr.message);
+        }
+      } catch (sandboxErr) {
+        console.warn(`[${accountId}] aisandbox status poll:`, sandboxErr.message);
+      }
     }
 
     const mediaUrl = videoUrl || imageUrl;
@@ -1219,6 +1473,18 @@ app.post('/video-status', requireInternalSecret, async (req, res) => {
         videoUrl: videoUrl || null,
         imageUrl: imageUrl || null,
         url: mediaUrl,
+        mediaId,
+        projectId,
+        accountId,
+      });
+    }
+    if (wizFailed) {
+      return res.json({
+        success: true,
+        status: 'FAILED',
+        error: 'Generation failed in Flow',
+        videoUrl: null,
+        imageUrl: null,
         mediaId,
         projectId,
         accountId,

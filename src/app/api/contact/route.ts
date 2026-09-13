@@ -4,6 +4,11 @@ import { getSiteSettings } from '@/lib/site-settings';
 
 export async function POST(req: Request) {
   try {
+    const settings = await getSiteSettings();
+    if (settings.contactPageEnabled === false) {
+      return NextResponse.json({ error: 'Contact form is currently disabled' }, { status: 403 });
+    }
+
     const body = await req.json();
     const name = String(body.name || '').trim();
     const email = String(body.email || '').trim();
@@ -23,8 +28,6 @@ export async function POST(req: Request) {
     await prisma.contactMessage.create({
       data: { name, email, subject, message },
     });
-
-    const settings = await getSiteSettings();
 
     return NextResponse.json({
       success: true,

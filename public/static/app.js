@@ -170,6 +170,8 @@
     },
     galleryFilter: 'all',
     assets: [],
+    galleryLoading: false,
+    galleryLoadedOnce: false,
     hiddenExpiredIds: new Set(),
     storyboardClips: [],
     activeProjectId: '',
@@ -196,7 +198,7 @@
 
   // API Base URL - all requests route to Next.js API endpoints for user/project isolation
   const API_BASE = '';
-  const LABS_FLOW_BASE = 'https://labs.google/fx/tools/flow';
+  const LABS_FLOW_BASE = 'https://flow.google.com/project';
 
   /** Map backend plan_name / paygate tier → UI badge (Ultra must not fall through to Pro). */
   function resolvePlanBadge(planName, paygateTier) {
@@ -232,7 +234,7 @@
 
   function projectUrl(projectId) {
     const id = String(projectId || '').split('?')[0].split('&')[0].split('#')[0].trim();
-    return id ? `${LABS_FLOW_BASE}/project/${id}` : LABS_FLOW_BASE;
+    return id ? `https://flow.google.com/project/${id}` : 'https://flow.google.com/project/';
   }
 
   // DOM Elements — bound in bindEls() after StudioShell is mounted (Next page)
@@ -527,11 +529,116 @@
     });
   }
 
+  function markStudioShellReady() {
+    try {
+      document.documentElement.classList.remove('studio-booting');
+      document.documentElement.classList.add('studio-ready');
+      document.documentElement.classList.add('theme-flow-dark');
+      document.body.classList.add('theme-flow-dark');
+      const skel = document.getElementById('studio-boot-skeleton');
+      if (skel) skel.setAttribute('aria-hidden', 'true');
+    } catch (_) {}
+  }
+
+  /** Prefer Flow image CDN twin as poster when video URL is known. */
+  function videoPosterFromItem(item) {
+    if (!item) return '';
+    const thumb = item.thumbnail_url || item.thumbnailUrl || item.poster || '';
+    if (thumb && /^https?:\/\//i.test(thumb)) return thumb;
+    const url = String(item.url || item.upscaled_url || '');
+    if (/flow-content\.google\/video\//i.test(url)) {
+      return url.replace(/\/video\//i, '/image/');
+    }
+    return '';
+  }
+
+  function videoSrcWithFrameHint(url) {
+    const raw = String(url || '').trim();
+    if (!raw) return '';
+    if (/#t=/i.test(raw)) return raw;
+    return `${raw}#t=0.1`;
+  }
+
+  /** Paint first frame without requiring hover (mobile + desktop). */
+  function ensureVideoPosterFrame(vid) {
+    if (!vid || vid.dataset.frameBound === '1') return;
+    vid.dataset.frameBound = '1';
+    vid.classList.add('is-painting');
+    vid.muted = true;
+    vid.playsInline = true;
+    vid.setAttribute('playsinline', '');
+    vid.setAttribute('webkit-playsinline', '');
+
+    const reveal = () => {
+      vid.classList.remove('is-painting');
+      vid.classList.add('is-frame-ready');
+    };
+
+    const seekPaint = () => {
+      try {
+        if (!Number.isFinite(vid.currentTime) || vid.currentTime < 0.05) {
+          const t = Math.min(0.12, (vid.duration && Number.isFinite(vid.duration) ? vid.duration * 0.02 : 0.12) || 0.12);
+          vid.currentTime = t > 0 ? t : 0.1;
+        }
+      } catch (_) {}
+    };
+
+    const onReady = () => {
+      seekPaint();
+      try {
+        vid.pause();
+      } catch (_) {}
+      reveal();
+    };
+
+    vid.addEventListener('loadeddata', onReady, { once: true });
+    vid.addEventListener('seeked', reveal, { once: true });
+    vid.addEventListener(
+      'loadedmetadata',
+      () => {
+        seekPaint();
+      },
+      { once: true }
+    );
+
+    // Kick decode on mobile Safari / Chrome where metadata alone won't paint
+    const p = vid.play();
+    if (p && typeof p.then === 'function') {
+      p.then(() => {
+        try {
+          vid.pause();
+        } catch (_) {}
+        seekPaint();
+        reveal();
+      }).catch(() => {
+        // Autoplay blocked — still try seek after metadata
+        if (vid.readyState >= 1) seekPaint();
+        setTimeout(reveal, 400);
+      });
+    } else {
+      setTimeout(reveal, 500);
+    }
+  }
+
+  function renderGallerySkeleton(count = 8) {
+    if (!els.galleryGrid) return;
+    const n = Math.max(4, Math.min(12, count));
+    els.galleryGrid.innerHTML = Array.from({ length: n })
+      .map(
+        () => `
+      <article class="flow-media-card is-skeleton aspect-16-9" aria-hidden="true">
+        <div class="card-media-wrapper"></div>
+      </article>`
+      )
+      .join('');
+  }
+
   async function init() {
     const shellReady = await waitForShellDom(40, 50);
     if (!shellReady || !bindEls()) {
       console.error('[Studio] DOM bind failed — Generate UI not wired');
       if (typeof window !== 'undefined') window.__GFLOW_STUDIO_INIT__ = false;
+      markStudioShellReady();
       return;
     }
     if (typeof window !== 'undefined') {
@@ -577,6 +684,7 @@
 
     // Restore Studio page from URL (refresh keeps storyteller/whisk/etc.)
     restoreStudioViewFromUrl({ replaceUrl: true });
+    markStudioShellReady();
     if (!window.__GFLOW_STUDIO_POPSTATE__) {
       window.__GFLOW_STUDIO_POPSTATE__ = true;
       window.addEventListener('popstate', () => {
@@ -1151,7 +1259,7 @@
 
     // Stage drawer open flow button
     if (els.stageOpenFlowBtn) {
-      const targetUrl = (state.activeItem && state.activeItem.project_url) || state.activeProjectUrl || LABS_FLOW_BASE;
+      const targetUrl = (state.activeItem && state.activeItem.project_url) || state.activeProjectUrl || 'https://flow.google.com/project/';
       els.stageOpenFlowBtn.href = targetUrl;
     }
 
@@ -2276,31 +2384,16 @@
       els.sessionHealthTitle.textContent = 'Video generation & Characters unavailable';
       els.sessionHealthDetail.textContent = diag.remedy;
       els.sessionHealthMissing.textContent = `Missing root cookies: ${missing.join(', ')}`;
-      els.syncChromeCookiesBtn.disabled = !diag.cdp.alive;
+      // BiB-only: syncChromeCookiesBtn removed; no-op the disabled toggle
+      if (els.syncChromeCookiesBtn) els.syncChromeCookiesBtn.disabled = !diag.cdp.alive;
     } catch (e) {
       console.warn('Could not fetch session diagnostics:', e);
     }
   }
 
+  // BiB-only: sync-chrome-cookies is disabled; show informational toast
   async function handleSyncChromeCookies() {
-    els.syncChromeCookiesBtn.disabled = true;
-    const label = els.syncChromeCookiesBtn.querySelector('span');
-    const original = label.textContent;
-    label.textContent = 'Reading Chrome cookies...';
-    try {
-      const res = await fetch(`${API_BASE}/api/auth/sync-chrome-cookies`, { method: 'POST' });
-      const data = await res.json();
-      showToast(data.message || 'No cookies imported', data.success ? 'success' : 'error');
-      if (data.success) {
-        await fetchAuthStatus();
-      }
-      await refreshSessionHealth();
-    } catch (e) {
-      showToast(`Chrome cookie sync failed: ${e.message}`, 'error');
-    } finally {
-      els.syncChromeCookiesBtn.disabled = false;
-      label.textContent = original;
-    }
+    showToast('Use Admin BiB login — cookies are managed automatically via Browser-in-Browser.', 'error');
   }
 
   function closeAuthModal() {
@@ -2308,54 +2401,9 @@
     els.authModal.classList.add('hidden');
   }
 
+  // BiB-only: cookie paste is disabled; show informational toast
   async function handleSaveCookies() {
-    const raw = els.cookieTextarea.value.trim();
-    if (!raw) {
-      showToast('Please paste valid session cookies first', 'error');
-      return;
-    }
-
-    els.saveCookiesBtn.disabled = true;
-    els.saveCookiesBtn.querySelector('span').textContent = 'Validating...';
-
-    try {
-      const res = await fetch(`${API_BASE}/api/auth/cookies`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cookies: raw }),
-      });
-
-      const data = await res.json();
-      if (data.success) {
-        const bind = data.status?.project_bind;
-        const projErr = data.status?.project_error;
-        const warn = data.status?.warning;
-        if (projErr) {
-          showToast(`Connected, but project setup failed: ${projErr}`, 'error');
-        } else if (bind?.created) {
-          showToast(`Connected — created new Flow project for this account (${bind.project_id?.slice(0, 8)}…)`, 'success');
-        } else if (bind?.project_id) {
-          showToast(`Connected — using this account's Flow project (${bind.count || 1} found)`, 'success');
-        } else {
-          showToast('Connected to Google Flow successfully! Refreshed session, tokens, and projects.', 'success');
-        }
-        if (warn && !projErr) showToast(warn, 'error');
-        els.cookieTextarea.value = '';
-        closeAuthModal();
-        await fetchAuthStatus();
-        await refreshSessionHealth();
-        await fetchProjects();
-        await loadAssets();
-        handleSyncFlowMedia().catch(() => {});
-      } else {
-        showToast(data.status?.error || data.status?.project_error || 'Validation failed. Check your cookies.', 'error');
-      }
-    } catch (e) {
-      showToast(`Error saving cookies: ${e.message}`, 'error');
-    } finally {
-      els.saveCookiesBtn.disabled = false;
-      els.saveCookiesBtn.querySelector('span').textContent = 'Save & Test Connection';
-    }
+    showToast('Cookie paste is disabled. Use the Admin panel → BiB login to connect accounts.', 'error');
   }
 
   async function handleSyncLocalAuth() {
@@ -5604,6 +5652,11 @@
 
   async function loadAssets(opts) {
     const silent = !!(opts && opts.silent);
+    const showSkeleton = !silent && !state.galleryLoadedOnce;
+    if (showSkeleton) {
+      state.galleryLoading = true;
+      renderGallerySkeleton(8);
+    }
     try {
       const projParam = state.activeProjectId ? `&projectId=${encodeURIComponent(state.activeProjectId)}` : '';
       const res = await fetch(`${API_BASE}/api/assets?type=all${projParam}`);
@@ -5772,8 +5825,14 @@
       } else {
         renderGallery();
       }
+      state.galleryLoadedOnce = true;
     } catch (e) {
       console.warn('Could not load assets:', e);
+      if (showSkeleton && els.galleryGrid && !state.galleryLoadedOnce) {
+        renderGallery();
+      }
+    } finally {
+      state.galleryLoading = false;
     }
   }
 
@@ -6102,7 +6161,17 @@
                 <span class="card-upscale-badge">Upscaling 1080p...</span>
               </div>
             ` : ''}
-            <video src="${item.url}" muted loop playsinline preload="metadata" data-original-src="${escapeHtml(item.url || '')}"></video>
+            <video
+              src="${escapeHtml(videoSrcWithFrameHint(item.url))}"
+              muted
+              loop
+              playsinline
+              webkit-playsinline
+              preload="auto"
+              ${videoPosterFromItem(item) ? `poster="${escapeHtml(videoPosterFromItem(item))}"` : ''}
+              data-original-src="${escapeHtml(item.url || '')}"
+              class="is-painting"
+            ></video>
           ` : `
             <img src="${item.url}" alt="" loading="lazy"/>
           `}
@@ -6136,7 +6205,7 @@
         </div>
       `;
 
-      // Hover playback for video: ONLY plays on hover, sound if soundOnHover is on, otherwise paused
+      // Hover playback for video; always paint a first frame on load (mobile has no hover)
       if (isVid) {
         const vid = card.querySelector('video');
         if (vid) {
@@ -6145,11 +6214,13 @@
             const original = item.url || vid.getAttribute('data-original-src') || '';
             const current = vid.getAttribute('src') || vid.src || '';
             if (original && current && !current.includes(original.split('?')[0]) && original !== current) {
-              vid.src = original;
+              vid.src = videoSrcWithFrameHint(original);
+              ensureVideoPosterFrame(vid);
               return;
             }
             removeExpiredGalleryCard(item, card);
           });
+          ensureVideoPosterFrame(vid);
         }
         card.addEventListener('mouseenter', () => {
           if (vid && vid.src && !card.classList.contains('is-expired')) {
@@ -6160,7 +6231,11 @@
         card.addEventListener('mouseleave', () => {
           if (vid && vid.src) {
             vid.pause();
-            vid.currentTime = 0;
+            try {
+              // Keep a visible still (don't reset to 0 which blanks some browsers)
+              const t = Math.min(0.12, Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration * 0.02 : 0.12);
+              vid.currentTime = t > 0 ? t : 0.1;
+            } catch (_) {}
           }
         });
       } else {
@@ -6234,16 +6309,25 @@
     const isVid = item.type === 'video';
     const ext = isVid ? 'mp4' : 'png';
     const filename = `google-flow-${item.id || 'media'}${upscaled ? '-1080p' : ''}.${ext}`;
-    
+
     let url = item.url;
-    if (isVid) {
-      url = `${API_BASE}/api/video/download/${item.id}?upscaled=${upscaled ? 'true' : 'false'}`;
+    if (isVid && upscaled) {
+      const hd = [item.upscaled_download_url, item.upscaled_url].find((u) =>
+        /^https?:\/\//i.test(String(u || ''))
+      );
+      url = hd || `${API_BASE}/api/video/download/${encodeURIComponent(item.id)}?upscaled=true`;
+    } else if (isVid) {
+      const orig = /^https?:\/\//i.test(String(item.url || ''))
+        ? item.url
+        : `${API_BASE}/api/video/download/${encodeURIComponent(item.id)}?upscaled=false`;
+      url = orig;
     }
-    
+
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
     a.target = '_blank';
+    a.rel = 'noopener';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -8705,6 +8789,8 @@
   window.isSystemGenerationError = isSystemGenerationError;
   window.withSystemErrorRetry = withSystemErrorRetry;
   window.openRefPickerModal = openRefPickerModal;
+  window.openMediaViewerModal = openMediaViewerModal;
+  window.closeMediaViewerModal = closeMediaViewerModal;
 
   // Start app
   init();

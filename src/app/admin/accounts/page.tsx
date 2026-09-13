@@ -79,27 +79,12 @@ export default function AdminAccountsPage() {
   // Add form state
   const [label, setLabel] = useState('');
   const [accountEmail, setAccountEmail] = useState('');
-  const [cookies, setCookies] = useState('');
   const [planTier, setPlanTier] = useState('Google AI Ultra');
   const [projectUrl, setProjectUrl] = useState('');
   const [maxParallelLimit, setMaxParallelLimit] = useState(5);
   const [submitting, setSubmitting] = useState(false);
   const [bibBusyId, setBibBusyId] = useState<string | null>(null);
   const [bibViewer, setBibViewer] = useState<{ id: string; url: string; label: string } | null>(null);
-  const [showLegacyCookies, setShowLegacyCookies] = useState(false);
-
-  // Live Auto-Detection State
-  const [probing, setProbing] = useState(false);
-  const [probeResult, setProbeResult] = useState<{
-    email: string;
-    planName: string;
-    credits: number;
-    cookieExpiresAt: string;
-    isValidSession: boolean;
-    activeProjectId?: string;
-    activeProjectUrl?: string;
-    error?: string;
-  } | null>(null);
 
   // Refreshing specific card
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
@@ -107,7 +92,6 @@ export default function AdminAccountsPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // Edit form state
-  const [editCookies, setEditCookies] = useState('');
   const [editPlanTier, setEditPlanTier] = useState('Google AI Ultra');
   const [editProjectUrl, setEditProjectUrl] = useState('');
   const [editMaxParallelLimit, setEditMaxParallelLimit] = useState(5);
@@ -136,62 +120,6 @@ export default function AdminAccountsPage() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  // Probe cookies live against Google Flow
-  const handleProbeCookies = async () => {
-    if (!cookies.trim()) {
-      alert('Please paste cookies first to detect account plan and credits.');
-      return;
-    }
-    setProbing(true);
-    setProbeResult(null);
-
-    try {
-      const res = await fetch('/api/admin/accounts/probe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cookies: cookies.trim() }),
-      });
-
-      const data = await res.json();
-      if (res.ok && data.details) {
-        const d = data.details;
-        setProbeResult({
-          email: d.email,
-          planName: d.planName,
-          credits: d.credits,
-          cookieExpiresAt: d.cookieExpiresAt,
-          isValidSession: d.isValidSession,
-          activeProjectId: d.activeProjectId,
-          activeProjectUrl: d.activeProjectUrl,
-          error: d.error,
-        });
-
-        // Auto-fill form values
-        if (d.email && (!accountEmail || accountEmail === 'operator@google.com')) {
-          setAccountEmail(d.email);
-        }
-        if (!label.trim()) {
-          setLabel(`${d.planName} (${d.email ? d.email.split('@')[0] : 'Cluster'})`);
-        }
-        if (d.planName) {
-          setPlanTier(d.planName);
-        }
-        if (d.activeProjectUrl && !projectUrl) {
-          setProjectUrl(d.activeProjectUrl);
-        }
-        if (d.planName === 'Google AI Ultra') {
-          setMaxParallelLimit(10);
-        }
-      } else {
-        alert(data.error || 'Failed to detect account details.');
-      }
-    } catch (err: any) {
-      alert(err.message || 'Error connecting to detection service.');
-    } finally {
-      setProbing(false);
-    }
-  };
-
   const handleAddAccount = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -203,7 +131,6 @@ export default function AdminAccountsPage() {
         body: JSON.stringify({
           label: label.trim() || undefined,
           accountEmail: accountEmail.trim() || undefined,
-          cookies: cookies.trim() || '',
           planTier,
           projectUrl: projectUrl.trim() || undefined,
           maxParallelLimit,
@@ -215,17 +142,14 @@ export default function AdminAccountsPage() {
         const newId = data.account?.id as string | undefined;
         setShowAddModal(false);
         setLabel('');
-        setCookies('');
         setAccountEmail('');
         setProjectUrl('');
         setPlanTier('Google AI Ultra');
         setMaxParallelLimit(5);
-        setProbeResult(null);
-        setShowLegacyCookies(false);
         await fetchAccounts();
 
         // BiB path: launch browser + open login stream right away
-        if (newId && !cookies.trim()) {
+        if (newId) {
           const launchData = await handleBibAction(newId, 'launch');
           if (launchData?.viewerUrl) {
             setBibViewer({
@@ -324,7 +248,7 @@ export default function AdminAccountsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'BiB action failed');
-      if (action === 'launch' && data.viewerUrl) {
+      if ((action === 'launch' || action === 'open_project' || action === 'navigate') && data.viewerUrl) {
         const acc = accounts.find((a) => a.id === accountId);
         setBibViewer({ id: accountId, url: data.viewerUrl, label: acc?.label || accountId });
       }
@@ -342,7 +266,6 @@ export default function AdminAccountsPage() {
     setEditPlanTier(acc.planTier || acc.planName || 'Google AI Ultra');
     setEditProjectUrl(acc.projectUrl || '');
     setEditMaxParallelLimit(acc.maxUsersLimit || acc.maxParallelLimit || 5);
-    setEditCookies('');
     setShowEditModal(true);
   };
 
@@ -357,9 +280,6 @@ export default function AdminAccountsPage() {
         projectUrl: editProjectUrl.trim() || undefined,
         maxParallelLimit: editMaxParallelLimit,
       };
-      if (editCookies.trim()) {
-        payload.cookies = editCookies.trim();
-      }
       const res = await fetch('/api/admin/accounts', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -405,7 +325,6 @@ export default function AdminAccountsPage() {
 
         <button
           onClick={() => {
-            setProbeResult(null);
             setShowAddModal(true);
           }}
           className="btn-primary !px-4 !py-2.5 !text-xs"
@@ -711,6 +630,21 @@ export default function AdminAccountsPage() {
                                 )}
                                 <button
                                   type="button"
+                                  onClick={() =>
+                                    handleBibAction(acc.id, 'open_project', {
+                                      projectId: proj.id,
+                                      url: proj.url || `https://flow.google.com/project/${proj.id}`,
+                                    })
+                                  }
+                                  disabled={bibBusyId === acc.id}
+                                  className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-600 flex items-center gap-1 border border-emerald-500/30 disabled:opacity-50"
+                                  title="Open BiB login stream on this Flow project"
+                                >
+                                  <Play className="w-2.5 h-2.5" />
+                                  <span>{bibBusyId === acc.id ? '…' : 'Launch'}</span>
+                                </button>
+                                <button
+                                  type="button"
                                   onClick={() => handleCopyProjectUrl(acc.id + ':' + proj.id, proj.url)}
                                   className="text-[10px] px-2 py-0.5 rounded bg-[var(--bg2)] hover:bg-[var(--bg2)] text-[var(--ink2)] flex items-center gap-1"
                                 >
@@ -841,7 +775,7 @@ export default function AdminAccountsPage() {
                     onClick={() => handleRefreshAccount(acc.id)}
                     disabled={isRefreshing}
                     className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[var(--a1soft)] hover:bg-[var(--a1soft)] text-[var(--a1)] text-xs font-semibold transition-all border border-[var(--a1)]/20 disabled:opacity-50"
-                    title="Re-probe plan, credits and cookie validity live"
+                    title="Refresh BiB status, plan and credits"
                   >
                     <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin' : ''}`} />
                     <span>{isRefreshing ? 'Probing...' : 'Refresh Live'}</span>
@@ -850,7 +784,7 @@ export default function AdminAccountsPage() {
                   <button
                     onClick={() => handleOpenEdit(acc)}
                     className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[var(--bg2)] hover:bg-[var(--bg2)] text-[var(--ink)] text-xs font-semibold transition-all border border-[var(--line)]"
-                    title="Update Plan, Project URL, Cookies & Credits"
+                    title="Update plan, project URL and slots"
                   >
                     <Edit3 className="w-3 h-3 text-[var(--a1)]" />
                     <span>Update</span>
@@ -959,64 +893,22 @@ export default function AdminAccountsPage() {
                 </div>
               </div>
 
-              {/* Legacy cookies — collapsed */}
-              <div className="rounded-[11px] border border-[var(--line)] overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setShowLegacyCookies((v) => !v)}
-                  className="w-full flex items-center justify-between px-3 py-2.5 text-left text-xs font-semibold text-[var(--ink2)] bg-[var(--bg2)] hover:bg-[var(--bg)] transition-colors"
-                >
-                  <span>Advanced: legacy cookie paste</span>
-                  <span className="text-[var(--ink3)] font-normal">{showLegacyCookies ? 'Hide' : 'Show'}</span>
-                </button>
-                {showLegacyCookies && (
-                  <div className="p-3 space-y-3 border-t border-[var(--line)]">
-                    <p className="text-[10px] text-[var(--ink3)]">
-                      Only if you must import an existing jar. BiB login is preferred and keeps the session alive.
-                    </p>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink3)]">
-                        Session cookies (optional)
-                      </label>
-                      <button
-                        type="button"
-                        onClick={handleProbeCookies}
-                        disabled={probing || !cookies.trim()}
-                        className="flex items-center gap-1 text-[10px] text-[var(--a1)] bg-[var(--a1soft)] px-2 py-0.5 rounded-lg font-semibold border border-[var(--a1)]/30 disabled:opacity-40"
-                      >
-                        <Sparkles className={`w-3 h-3 ${probing ? 'animate-spin' : ''}`} />
-                        <span>{probing ? 'Probing…' : 'Auto-Detect'}</span>
-                      </button>
-                    </div>
-                    <textarea
-                      rows={3}
-                      value={cookies}
-                      onChange={(e) => setCookies(e.target.value)}
-                      placeholder="Optional cookie header…"
-                      className="w-full px-3 py-2 rounded-[11px] bg-[var(--bg)] border border-[var(--line)] text-[var(--ink)] placeholder:text-[var(--ink3)] text-xs font-mono focus:outline-none focus:border-[var(--a1)]"
-                    />
-                    {probeResult && (
-                      <div className="p-2.5 rounded-lg bg-[var(--a1soft)] border border-[var(--a1)]/30 text-[11px] space-y-1">
-                        <div className="font-bold text-[var(--ink)] flex items-center gap-1">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-[var(--a1)]" />
-                          Detected {probeResult.planName} · {probeResult.email}
-                        </div>
-                      </div>
-                    )}
-                    <div>
-                      <label className="block text-[10px] font-semibold uppercase tracking-wider text-[var(--ink3)] mb-1">
-                        Optional single project URL
-                      </label>
-                      <input
-                        type="text"
-                        value={projectUrl}
-                        onChange={(e) => setProjectUrl(e.target.value)}
-                        placeholder="Usually leave empty — BiB creates N projects from slots"
-                        className="w-full px-3 py-2 rounded-[11px] bg-[var(--bg)] border border-[var(--line)] text-[var(--ink)] placeholder:text-[var(--ink3)] text-xs font-mono focus:outline-none focus:border-[var(--a1)]"
-                      />
-                    </div>
-                  </div>
-                )}
+              <div className="rounded-[11px] border border-[var(--line)] bg-[var(--bg2)] px-3 py-2.5 text-[11px] text-[var(--ink3)]">
+                After Save & Launch, sign into <span className="text-[var(--ink2)]">flow.google.com</span> inside the BiB
+                stream. Cookies and session tokens are fetched live from BiB — no paste needed.
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-semibold uppercase tracking-wider text-[var(--ink3)] mb-1">
+                  Optional single project URL
+                </label>
+                <input
+                  type="text"
+                  value={projectUrl}
+                  onChange={(e) => setProjectUrl(e.target.value)}
+                  placeholder="Usually leave empty — BiB creates N projects from slots"
+                  className="w-full px-3 py-2 rounded-[11px] bg-[var(--bg)] border border-[var(--line)] text-[var(--ink)] placeholder:text-[var(--ink3)] text-xs font-mono focus:outline-none focus:border-[var(--a1)]"
+                />
               </div>
 
               <div className="flex items-center justify-end gap-3 pt-2">
@@ -1024,9 +916,6 @@ export default function AdminAccountsPage() {
                   type="button"
                   onClick={() => {
                     setShowAddModal(false);
-                    setShowLegacyCookies(false);
-                    setCookies('');
-                    setProbeResult(null);
                   }}
                   className="btn-secondary !px-4 !py-2 !text-xs"
                 >
@@ -1117,25 +1006,12 @@ export default function AdminAccountsPage() {
                   type="text"
                   value={editProjectUrl}
                   onChange={(e) => setEditProjectUrl(e.target.value)}
-                  placeholder="https://labs.google/fx/tools/flow/project/..."
+                  placeholder="https://flow.google.com/project/..."
                   className="w-full px-3.5 py-2.5 rounded-[11px] bg-[var(--bg2)] border border-[var(--line)] text-[var(--ink)] placeholder:text-[var(--ink3)] text-xs font-mono focus:outline-none focus:border-[var(--a1)]"
                 />
                 <p className="text-[11px] text-[var(--ink3)] mt-1">
-                  Generations for this account route here. When updating cookies below, leaving this empty will auto-create a fresh project.
+                  Generations for this account route here. Prefer BiB Ensure projects over manual URLs.
                 </p>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--ink2)] mb-1.5">
-                  Renew Cookies (Optional)
-                </label>
-                <textarea
-                  rows={4}
-                  value={editCookies}
-                  onChange={(e) => setEditCookies(e.target.value)}
-                  placeholder="Paste fresh session cookies if renewing. Credits and expiry sync automatically from Google via these cookies. A new Flow project is created unless a URL is set above."
-                  className="w-full px-3.5 py-2.5 rounded-[11px] bg-[var(--bg2)] border border-[var(--line)] text-[var(--ink)] placeholder:text-[var(--ink3)] text-xs font-mono focus:outline-none focus:border-[var(--a1)]"
-                />
               </div>
 
               <div className="flex items-center justify-end gap-3 pt-3">

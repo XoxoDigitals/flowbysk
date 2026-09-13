@@ -10,7 +10,9 @@ import {
   Trash2,
   Power,
   Wrench,
+  Server,
 } from 'lucide-react';
+import { useSiteSettings } from '@/components/SiteSettingsProvider';
 
 const inputClass =
   'w-full rounded-[11px] border border-[var(--line)] bg-[var(--bg2)] px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink3)] outline-none focus:border-[var(--a1)]';
@@ -27,14 +29,24 @@ type Notice = {
 type ToolMap = Record<string, boolean>;
 
 export default function AdminSettingsPage() {
+  const { refreshSiteSettings } = useSiteSettings();
   const [siteName, setSiteName] = useState('Flowbysk');
   const [logoUrl, setLogoUrl] = useState('');
   const [contactEmail, setContactEmail] = useState('');
   const [allowSignups, setAllowSignups] = useState(true);
   const [ticketSystemEnabled, setTicketSystemEnabled] = useState(true);
+  const [contactPageEnabled, setContactPageEnabled] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+
+  const [accountsAccessIds, setAccountsAccessIds] = useState<string[]>([]);
+  const [accountsAdmins, setAccountsAdmins] = useState<
+    { id: string; email: string; name: string | null; role: string }[]
+  >([]);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [savingAccountsAccess, setSavingAccountsAccess] = useState(false);
+  const [accountsAccessMsg, setAccountsAccessMsg] = useState('');
 
   const [resellerMessage, setResellerMessage] = useState('');
   const [bankDetails, setBankDetails] = useState('');
@@ -58,11 +70,12 @@ export default function AdminSettingsPage() {
 
   const load = async () => {
     try {
-      const [sRes, gRes, nRes, tRes] = await Promise.all([
+      const [sRes, gRes, nRes, tRes, aRes] = await Promise.all([
         fetch('/api/admin/settings'),
         fetch('/api/admin/orders/settings'),
         fetch('/api/admin/notices'),
         fetch('/api/admin/studio-controls'),
+        fetch('/api/admin/accounts-access'),
       ]);
       if (sRes.ok) {
         const data = await sRes.json();
@@ -72,6 +85,7 @@ export default function AdminSettingsPage() {
           setContactEmail(data.settings.contactEmail || '');
           setAllowSignups(data.settings.allowSignups !== false);
           setTicketSystemEnabled(data.settings.ticketSystemEnabled !== false);
+          setContactPageEnabled(data.settings.contactPageEnabled !== false);
         }
       }
       if (gRes.ok) {
@@ -93,6 +107,12 @@ export default function AdminSettingsPage() {
         setToolLabels(data.toolLabels || {});
         setToolIds(data.toolIds || Object.keys(data.tools || {}));
       }
+      if (aRes.ok) {
+        const data = await aRes.json();
+        setIsSuperAdmin(!!data.isSuperAdmin);
+        setAccountsAccessIds(Array.isArray(data.adminUserIds) ? data.adminUserIds : []);
+        setAccountsAdmins(Array.isArray(data.admins) ? data.admins : []);
+      }
     } catch {
       /* ignore */
     }
@@ -111,11 +131,20 @@ export default function AdminSettingsPage() {
       const res = await fetch('/api/admin/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ siteName, logoUrl, contactEmail, allowSignups, ticketSystemEnabled }),
+        body: JSON.stringify({
+          siteName,
+          logoUrl,
+          contactEmail,
+          allowSignups,
+          ticketSystemEnabled,
+          contactPageEnabled,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Save failed');
       setMessage('Site settings saved.');
+      if (data?.settings?.siteName) setSiteName(data.settings.siteName);
+      await refreshSiteSettings();
     } catch (err: any) {
       setError(err.message || 'Save failed');
     } finally {
@@ -250,13 +279,24 @@ export default function AdminSettingsPage() {
             <Settings className="h-4 w-4 text-[var(--a1)]" />
             Site branding
           </h3>
-          <p className="mt-1 text-[13px] text-[var(--ink3)]">Public site name, logo, and contact.</p>
+          <p className="mt-1 text-[13px] text-[var(--ink3)]">
+            Change the public website name (navbar, footer, browser tab), logo, and contact email.
+          </p>
         </div>
         <label className="block text-sm">
           <span className="mb-1.5 block font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">
-            SITE NAME
+            WEBSITE NAME
           </span>
-          <input required value={siteName} onChange={(e) => setSiteName(e.target.value)} className={inputClass} />
+          <input
+            required
+            value={siteName}
+            onChange={(e) => setSiteName(e.target.value)}
+            placeholder="e.g. Flowbysk"
+            className={inputClass}
+          />
+          <p className="mt-1 text-[12px] text-[var(--ink3)]">
+            Shown in the header, footer, login pages, and browser title.
+          </p>
         </label>
         <label className="block text-sm">
           <span className="mb-1.5 block font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">
@@ -302,12 +342,99 @@ export default function AdminSettingsPage() {
             label={ticketSystemEnabled ? 'Enabled' : 'Disabled'}
           />
         </div>
+        <div className="flex items-center justify-between rounded-[11px] border border-[var(--line)] bg-[var(--bg2)] px-3 py-3">
+          <div>
+            <p className="text-sm font-medium text-[var(--ink)]">Contact page</p>
+            <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
+              When off, /contact is hidden from the site and the form API is blocked.
+            </p>
+          </div>
+          <Toggle
+            on={contactPageEnabled}
+            onChange={setContactPageEnabled}
+            label={contactPageEnabled ? 'Enabled' : 'Disabled'}
+          />
+        </div>
         {message && <p className="text-sm text-[var(--a1)]">{message}</p>}
         {error && <p className="text-sm text-rose-500">{error}</p>}
         <button type="submit" disabled={saving} className="btn-primary">
           {saving ? 'Saving…' : 'Save site settings'}
         </button>
       </form>
+
+      {isSuperAdmin && (
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setSavingAccountsAccess(true);
+            setAccountsAccessMsg('');
+            try {
+              const res = await fetch('/api/admin/accounts-access', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ adminUserIds: accountsAccessIds }),
+              });
+              const data = await res.json();
+              if (!res.ok) throw new Error(data.error || 'Save failed');
+              setAccountsAccessIds(data.adminUserIds || []);
+              setAccountsAccessMsg('Accounts page access saved.');
+            } catch (err: any) {
+              setAccountsAccessMsg(err.message || 'Save failed');
+            } finally {
+              setSavingAccountsAccess(false);
+            }
+          }}
+          className="flex flex-col gap-4 rounded-[18px] border border-[var(--line)] bg-[var(--card)] p-6"
+        >
+          <div>
+            <h3 className="flex items-center gap-2 text-base font-semibold">
+              <Server className="h-4 w-4 text-[var(--a1)]" />
+              Provider Accounts access
+            </h3>
+            <p className="mt-1 text-[13px] text-[var(--ink3)]">
+              SUPER_ADMIN always has access. Select which ADMIN users can open{' '}
+              <code className="text-[12px]">/admin/accounts</code>. Everyone else is blocked.
+            </p>
+          </div>
+          <div className="flex max-h-64 flex-col gap-2 overflow-y-auto rounded-[11px] border border-[var(--line)] bg-[var(--bg2)] p-3">
+            {accountsAdmins.length === 0 && (
+              <p className="text-sm text-[var(--ink3)]">No admin users found.</p>
+            )}
+            {accountsAdmins.map((u) => {
+              const checked = accountsAccessIds.includes(u.id) || u.role === 'SUPER_ADMIN';
+              const locked = u.role === 'SUPER_ADMIN';
+              return (
+                <label
+                  key={u.id}
+                  className="flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-[var(--card)]"
+                >
+                  <input
+                    type="checkbox"
+                    disabled={locked}
+                    checked={checked}
+                    onChange={(e) => {
+                      if (locked) return;
+                      setAccountsAccessIds((prev) =>
+                        e.target.checked ? [...prev, u.id] : prev.filter((id) => id !== u.id)
+                      );
+                    }}
+                  />
+                  <span className="min-w-0 flex-1 text-sm text-[var(--ink)]">
+                    {u.name || u.email}
+                    <span className="ml-2 text-[12px] text-[var(--ink3)]">{u.email}</span>
+                  </span>
+                  <span className="font-mono text-[10px] text-[var(--ink3)]">{u.role}</span>
+                </label>
+              );
+            })}
+          </div>
+          {accountsAccessMsg && <p className="text-sm text-[var(--a1)]">{accountsAccessMsg}</p>}
+          <button type="submit" disabled={savingAccountsAccess} className="btn-primary">
+            <Save className="h-4 w-4" />
+            {savingAccountsAccess ? 'Saving…' : 'Save accounts access'}
+          </button>
+        </form>
+      )}
 
       <form
         onSubmit={onSaveTools}

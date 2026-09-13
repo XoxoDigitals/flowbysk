@@ -18,6 +18,9 @@ type ProviderLike = {
 /**
  * Ensure BiB Chrome is up, export live cookies into Prisma, pick a Flow project.
  * Used by Python-backed paths (I2I / I2V / ingredients).
+ *
+ * Fails closed: if BiB is not READY, we skip the export rather than falling back to
+ * stale DB cookies (which may be expired and cause silent auth failures).
  */
 export async function prepareProviderWorkerSession(
   provider: ProviderLike | null | undefined,
@@ -25,54 +28,70 @@ export async function prepareProviderWorkerSession(
 ): Promise<{ cookies?: string; projectId?: string }> {
   if (!provider?.id) return {};
 
-  let cookies = provider.cookies || undefined;
-  const canBib =
+  // Always require BiB to be READY; do not fall back to stale DB cookies for HTTP paths
+  const isBibReady =
     provider.browserStatus === BrowserStatus.READY ||
-    provider.browserStatus === 'READY' ||
-    (Array.isArray(provider.flowProjectIds) && (provider.flowProjectIds as string[]).length > 0);
+    provider.browserStatus === 'READY';
 
-  if (canBib) {
-    try {
-      await ensureBibAccountReady({
-        id: provider.id,
-        maxParallelLimit: provider.maxParallelLimit,
-        flowProjectIds: provider.flowProjectIds,
-        profileDir: provider.profileDir,
-      });
-      const exported = await bibExportCookies(provider.id);
-      if (exported?.cookie && exported.cookie.length > 40) {
-        cookies = exported.cookie;
-        await prisma.providerAccount
-          .update({
-            where: { id: provider.id },
-            data: { cookies: exported.cookie, bibLastSeenAt: new Date() },
-          })
-          .catch(() => 0);
-      }
-      // Push cookies into Python worker session so uploads/I2I share the BiB Google login
-      if (cookies) {
-        await fetch(`${PYTHON_WORKER_URL}/api/auth/cookies`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cookies }),
-        }).catch(() => 0);
-      }
-      // Push live WIZ SNlM0e so Python batchexecute works even when labs OAuth is stale
-      if (exported?.at && String(exported.at).length >= 20) {
-        await fetch(`${PYTHON_WORKER_URL}/api/auth/wiz-meta`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            at: exported.at,
-            bl: exported.bl || undefined,
-            sid: exported.sid || undefined,
-            preferred_base: 'https://flow.google.com',
-          }),
-        }).catch(() => 0);
-      }
-    } catch (e: any) {
-      console.warn('[provider-session] BiB sync failed:', e?.message || e);
+  if (!isBibReady) {
+    // Try to auto-ensure if browser was started but status is stale
+    const canAutoEnsure =
+      Array.isArray(provider.flowProjectIds) && (provider.flowProjectIds as string[]).length > 0;
+    if (!canAutoEnsure) {
+      // BiB not READY and no projects; cannot proceed safely
+      console.warn(`[provider-session] BiB not READY for account ${provider.id}; skipping session prep`);
+      return {};
     }
+  }
+
+  let cookies: string | undefined;
+
+  try {
+    await ensureBibAccountReady({
+      id: provider.id,
+      maxParallelLimit: provider.maxParallelLimit,
+      flowProjectIds: provider.flowProjectIds,
+      profileDir: provider.profileDir,
+    });
+    const exported = await bibExportCookies(provider.id);
+    if (!exported?.authenticated || !exported.cookie || exported.cookie.length < 40) {
+      // Fail closed: BiB export returned unauthenticated or empty cookie
+      console.warn(`[provider-session] BiB export not authenticated for ${provider.id}; failing closed`);
+      return {};
+    }
+    cookies = exported.cookie;
+    await prisma.providerAccount
+      .update({
+        where: { id: provider.id },
+        data: { cookies: exported.cookie, bibLastSeenAt: new Date() },
+      })
+      .catch(() => 0);
+
+    // Push cookies into Python worker session so uploads/I2I share the BiB Google login
+    if (cookies) {
+      await fetch(`${PYTHON_WORKER_URL}/api/auth/cookies`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookies }),
+      }).catch(() => 0);
+    }
+    // Push live WIZ SNlM0e so Python batchexecute works even when labs OAuth is stale
+    if (exported?.at && String(exported.at).length >= 20) {
+      await fetch(`${PYTHON_WORKER_URL}/api/auth/wiz-meta`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          at: exported.at,
+          bl: exported.bl || undefined,
+          sid: exported.sid || undefined,
+          preferred_base: 'https://flow.google.com',
+        }),
+      }).catch(() => 0);
+    }
+  } catch (e: any) {
+    console.warn('[provider-session] BiB sync failed:', e?.message || e);
+    // Fail closed: do not proceed with stale/no cookies
+    return {};
   }
 
   const assignedIds = userId
@@ -160,12 +179,41 @@ export async function refreshFlowMediaId(opts: {
   mediaId?: string | null;
   cookies?: string;
   projectId?: string;
+  /** When set, prefer BiB upload over Python HTTP path */
+  accountId?: string;
   /** Skip ready-check and always re-download + re-upload into the target project */
   forceReupload?: boolean;
 }): Promise<string | undefined> {
   const mediaId = String(opts.mediaId || '').trim();
   if (!mediaId) return undefined;
   if (mediaId.startsWith('staged-') || mediaId.startsWith('upload-')) {
+    // Prefer BiB upload when accountId is provided
+    if (opts.accountId && opts.projectId) {
+      try {
+        const { bibUploadImage } = await import('@/lib/bib');
+        // Resolve staged file URL via Python assets endpoint
+        const assetRes = await fetch(`${PYTHON_WORKER_URL}/api/assets/${encodeURIComponent(mediaId)}/url`, { method: 'GET' }).catch(() => null);
+        let imageUrl: string | null = null;
+        if (assetRes?.ok) {
+          const assetData = await assetRes.json().catch(() => ({}));
+          imageUrl = assetData?.url || assetData?.storagePath || null;
+        }
+        if (imageUrl) {
+          const bibResult = await bibUploadImage({
+            accountId: opts.accountId,
+            projectId: opts.projectId,
+            imageUrl,
+          });
+          if (bibResult?.mediaId) {
+            console.info(`[refreshFlowMediaId] BiB staged ${mediaId} → ${bibResult.mediaId.slice(0, 8)}`);
+            await waitFlowMediaReady(bibResult.mediaId);
+            return bibResult.mediaId;
+          }
+        }
+      } catch (bibErr: any) {
+        console.warn('[refreshFlowMediaId] BiB staged upload failed, falling back to Python:', bibErr?.message || bibErr);
+      }
+    }
     // Promote staged local file into Flow via Python upload (HTTP, not generation CDP)
     try {
       if (opts.cookies) {
@@ -257,6 +305,25 @@ export async function refreshFlowMediaId(opts: {
       sourceUrl = `https://flow-content.google/image/${mediaId}`;
     }
     if (!sourceUrl) return mediaId;
+
+    // Prefer BiB upload when accountId and projectId are provided
+    if (opts.accountId && opts.projectId) {
+      try {
+        const { bibUploadImage } = await import('@/lib/bib');
+        const bibResult = await bibUploadImage({
+          accountId: opts.accountId,
+          projectId: opts.projectId,
+          imageUrl: sourceUrl,
+        });
+        if (bibResult?.mediaId) {
+          console.info(`[refreshFlowMediaId] BiB reupload ${mediaId.slice(0, 8)} → ${bibResult.mediaId.slice(0, 8)}`);
+          await waitFlowMediaReady(bibResult.mediaId);
+          return bibResult.mediaId;
+        }
+      } catch (bibErr: any) {
+        console.warn('[refreshFlowMediaId] BiB reupload failed, falling back to Python:', bibErr?.message || bibErr);
+      }
+    }
 
     const imgRes = await fetch(sourceUrl, {
       headers: opts.cookies ? { Cookie: opts.cookies } : undefined,

@@ -1372,8 +1372,8 @@ export default function StudioShell() {
           <div className="modal-title-row">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
             <div>
-              <h3>Google Flow Authentication</h3>
-              <p>Configure cookies to authenticate directly with Google Flow API</p>
+              <h3>Google Flow Session</h3>
+              <p>Session is managed via Admin BiB login on flow.google.com — no cookie paste</p>
             </div>
           </div>
           <button className="modal-close-btn" id="close-auth-modal-btn">✕</button>
@@ -1396,17 +1396,10 @@ export default function StudioShell() {
             <p className="session-health-missing" id="session-health-missing"></p>
           </div>
           <div className="auth-quick-actions">
-            <button className="quick-btn" id="sync-chrome-cookies-btn">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              <span>Import Cookies from Chrome</span>
-            </button>
+            {/* BiB-only: sync-chrome and cookie import removed — session is managed via Admin BiB login */}
             <button className="quick-btn" id="sync-local-btn">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
               <span>Sync from Local (~/.gflow/env)</span>
-            </button>
-            <button className="quick-btn" id="launch-browser-login-btn">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/></svg>
-              <span>Open Chrome Browser Sign-In</span>
             </button>
           </div>
           <div className="form-group" style={{marginBottom: "14px"}}>
@@ -1424,15 +1417,13 @@ export default function StudioShell() {
               Google API reported: <strong id="detected-plan-text" style={{color: "#60a5fa"}}>Free Tier (G1_FREEMIUM)</strong>. Google Flow restricts Veo 3.1 generation to active Pro/Ultra accounts. Free tier accounts can generate with Omni 1.1 Flash.
             </p>
           </div>
-          <div className="form-group">
-            <label htmlFor="cookie-textarea">PASTE SESSION COOKIES <span style={{fontSize: "11px", color: "var(--text-muted, #999)", fontWeight: "normal", marginLeft: "6px"}}>(Network tab &rarr; Copy 'Cookie' header)</span></label>
-            <textarea id="cookie-textarea" rows={5} placeholder="Paste full Google cookie header (e.g. SID=...; __Secure-next-auth.session-token=...)"></textarea>
-          </div>
+          {/* Cookie paste UI removed — BiB manages session automatically. Use Admin panel to log in. */}
         </div>
         <div className="modal-footer">
           <button className="action-btn danger hidden" id="disconnect-auth-footer-btn" title="Disconnect account and clear all saved cookies">Disconnect Account</button>
           <button className="action-btn" id="cancel-auth-btn">Cancel</button>
-          <button className="action-btn primary" id="save-cookies-btn"><span>Save &amp; Test Connection</span></button>
+          {/* save-cookies-btn kept as no-op DOM hook; app.js will show toast instead */}
+          <button className="action-btn primary hidden" id="save-cookies-btn"><span>Save &amp; Test Connection</span></button>
         </div>
       </div>
     </div>
@@ -1450,7 +1441,7 @@ export default function StudioShell() {
         <div className="modal-body project-modal-body">
           <div className="active-project-card">
             <strong className="active-project-name" id="active-project-name-display">No project selected</strong>
-            <a href="#" target="_blank" rel="noopener noreferrer" className="proj-url-val" id="active-project-url-display">https://labs.google/fx/tools/flow</a>
+            <a href="#" target="_blank" rel="noopener noreferrer" className="proj-url-val" id="active-project-url-display">https://flow.google.com/project/</a>
             <a href="#" target="_blank" rel="noopener noreferrer" className="active-flow-btn" id="active-project-flow-link">Open in Flow</a>
             <button className="copy-small-btn" id="copy-project-url-btn" title="Copy URL"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
           </div>

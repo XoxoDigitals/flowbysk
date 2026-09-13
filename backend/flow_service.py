@@ -168,7 +168,7 @@ BROWSER_UA = (
     "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 )
 SANDBOX_BASE = "https://aisandbox-pa.googleapis.com"
-LABS_FLOW_BASE = "https://labs.google/fx/tools/flow"
+LABS_FLOW_BASE = "https://flow.google.com/project"
 LABS_TRPC_BASE = "https://labs.google/fx/api/trpc"
 FLOW_ANGULAR_BASE = "https://flow.google.com"
 FLOW_TOOL_NAME = "PINHOLE"
@@ -302,11 +302,11 @@ def clean_project_id(raw: Optional[str]) -> str:
 
 
 def project_url(project_id: Optional[str]) -> str:
-    """labs.google Next.js project URL (reCAPTCHA / trpc / history links)."""
+    """flow.google.com project URL (reCAPTCHA / batchexecute / history links)."""
     pid = clean_project_id(project_id)
     if not pid:
         return LABS_FLOW_BASE
-    return f"{LABS_FLOW_BASE}/project/{pid}"
+    return f"https://flow.google.com/project/{pid}"
 
 
 def angular_project_url(project_id: Optional[str]) -> str:
@@ -1464,7 +1464,7 @@ class FlowService:
         try:
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
                 self.history = json.load(f)
-            # Rewrite legacy flow.google.com/project/... links to labs URLs
+            # Normalize project_url to https://flow.google.com/project/{id}
             dirty = False
             for item in self.history:
                 if not isinstance(item, dict):
@@ -1476,7 +1476,10 @@ class FlowService:
                 if desired and item.get("project_url") != desired:
                     item["project_url"] = desired
                     dirty = True
-                elif isinstance(item.get("project_url"), str) and "flow.google.com/project/" in item["project_url"]:
+                elif isinstance(item.get("project_url"), str) and (
+                    "flow.google.com/project/" in item["project_url"]
+                    or "labs.google" in item["project_url"]
+                ):
                     legacy_id = item["project_url"].split("/project/")[-1].split("?")[0].split("&")[0]
                     item["project_url"] = project_url(legacy_id)
                     dirty = True
@@ -1772,126 +1775,19 @@ class FlowService:
         return self._cdp_recv_until(ws, lambda d: d.get("id") == msg_id, timeout=timeout)
 
     def _cdp_apply_labs_session(self, ws: websocket.WebSocket) -> None:
-        """Inject session cookies for labs.google grecaptcha + aisandbox generation.
-
-        Always clear the helper profile first, then inject the fullest jar we have:
-        next-auth alone is enough for labs trpc (project create) but aisandbox
-        reCAPTCHA evaluation rejects next-auth-only tokens. Partial Secure-only
-        exports (SAPISID / __Secure-1PSID without plain SID) still evaluate when
-        those companions are injected with next-auth — do not strip them.
-        """
-        if not self.cookies:
-            raise RuntimeError(
-                "No cookies configured. Paste session cookies from labs.google / flow.google.com "
-                "in Account Chip, or use Sync from ~/.gflow/env."
-            )
-        stay_script = """
-        (function() {
-          Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-          // Only block flow redirects while we are on labs.google (grecaptcha host).
-          // Do NOT block once CDP navigates to flow.google.com for batchexecute.
-          const bad = (u) => {
-            try {
-              if (!(location.hostname || '').includes('labs.google')) return false;
-              return String(u || '').includes('flow.google.com');
-            } catch (e) { return false; }
-          };
-          try {
-            const assign = Location.prototype.assign;
-            Location.prototype.assign = function(u) { if (bad(u)) return; return assign.call(this, u); };
-            const replace = Location.prototype.replace;
-            Location.prototype.replace = function(u) { if (bad(u)) return; return replace.call(this, u); };
-          } catch (e) {}
-        })();
-        """
-        self._cdp_send(ws, "Page.enable", msg_id=9100)
-        self._cdp_send(ws, "Page.addScriptToEvaluateOnNewDocument", {"source": stay_script}, msg_id=9101)
-        self._cdp_send(ws, "Network.enable", msg_id=9102)
-        self._cdp_block_flow_nav = True
-        self._cdp_send(ws, "Fetch.enable", {
-            "patterns": [
-                {"urlPattern": "*://flow.google.com/*", "requestStage": "Request"},
-                {"urlPattern": "*://www.flow.google.com/*", "requestStage": "Request"},
-            ]
-        }, msg_id=9103)
-        self._cdp_send(ws, "Network.clearBrowserCookies", msg_id=9104)
-        report = self.cookie_session_report()
-        # Full jar (next-auth + Google companions) whenever present. labs-only is a
-        # last resort for jars that truly have nothing but next-auth.
-        has_google_companions = any(
-            token in (self.cookies or "")
-            for token in ("SID=", "HSID=", "__Secure-1PSID=", "__Secure-3PSID=", "SAPISID=", "SSID=")
-        )
-        if has_google_companions:
-            cdp_cookies = self._build_cdp_cookies(self.cookies)
-        else:
-            cdp_cookies = self._build_labs_cdp_cookies(self.cookies)
-        if not cdp_cookies:
-            cdp_cookies = self._build_labs_cdp_cookies(self.cookies)
-        if not cdp_cookies:
-            raise RuntimeError(
-                "No usable Flow/labs cookies found in the saved cookie string. "
-                "Reconnect while signed in on flow.google.com."
-            )
-        # Chunk — full jars exceed a single CDP setCookies message.
-        chunk = 40
-        for i in range(0, len(cdp_cookies), chunk):
-            self._cdp_send(
-                ws,
-                "Network.setCookies",
-                {"cookies": cdp_cookies[i : i + chunk]},
-                msg_id=9105 + i,
-                timeout=15.0,
-            )
+        """DISABLED — BiB manages the live browser session; CDP cookie injection no longer used."""
+        logger.info("[cdp] _cdp_apply_labs_session: skipped (BiB-only mode)")
+        return
 
     def _cdp_apply_flow_angular_session(self, ws: websocket.WebSocket) -> None:
-        """Inject cookies for flow.google.com Angular batchexecute.
-
-        Unlike `_cdp_apply_labs_session`, this does NOT abort/block flow.google.com
-        and does NOT clearBrowserCookies (clear+PSID-reinject causes CookieMismatch).
-        """
-        if not self.cookies:
-            raise RuntimeError(
-                "No cookies configured. Paste session cookies from labs.google / flow.google.com "
-                "in Account Chip, or use Sync from ~/.gflow/env."
-            )
-        self._cdp_send(ws, "Page.enable", msg_id=9200)
-        self._cdp_send(ws, "Network.enable", msg_id=9201)
-        # Critical: stop aborting flow.google.com or maseQ CDP fetch → Failed to fetch
-        self._cdp_set_flow_nav_block(ws, False)
-        cookies = self._build_flow_angular_cdp_cookies(self.cookies)
-        if cookies:
-            # Chunk setCookies — large jars can exceed CDP message limits
-            chunk = 80
-            for i in range(0, len(cookies), chunk):
-                self._cdp_send(
-                    ws,
-                    "Network.setCookies",
-                    {"cookies": cookies[i : i + chunk]},
-                    msg_id=9203 + i,
-                    timeout=15.0,
-                )
+        """DISABLED — BiB manages the live browser session; CDP cookie injection no longer used."""
+        logger.info("[cdp] _cdp_apply_flow_angular_session: skipped (BiB-only mode)")
+        return
 
     def _sync_cookies_to_cdp(self):
-        """Inject labs session cookies into running Chrome CDP and open Flow tools page."""
-        if not self.cookies:
-            return
-        try:
-            from gflow.auth.browser_auth import get_saved_cdp_port
-            port = get_saved_cdp_port()
-            if self._is_cdp_port_alive(port):
-                targets = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=2).read())
-                page = next((t for t in targets if t.get("type") == "page"), None)
-                if page:
-                    ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=12)
-                    try:
-                        self._cdp_apply_labs_session(ws)
-                        self._cdp_send(ws, "Page.navigate", {"url": "https://labs.google/fx/tools/flow"}, msg_id=4)
-                        time.sleep(2)
-                    finally:
-                        ws.close()
-        except Exception as e:
-            logger.debug(f"CDP cookie sync notice: {e}")
+        """DISABLED — BiB manages the live browser session; CDP navigation no longer used."""
+        logger.info("[cdp] _sync_cookies_to_cdp: skipped (BiB-only mode)")
+        return
 
     def set_cookies(self, raw_cookies: Any) -> Dict[str, Any]:
         """Update active cookies for a (possibly new) account.
@@ -2072,8 +1968,8 @@ class FlowService:
         try:
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
-                "Origin": "https://labs.google",
-                "Referer": "https://labs.google/fx/tools/flow",
+                "Origin": "https://flow.google.com",
+                "Referer": "https://flow.google.com/project/",
                 "Cookie": self.cookies,
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             }
@@ -2198,7 +2094,7 @@ class FlowService:
             }
 
         headers = {
-            "Origin": "https://labs.google",
+            "Origin": "https://flow.google.com",
             "Referer": "https://flow.google.com/",
             "Cookie": self.cookies,
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -2377,7 +2273,7 @@ class FlowService:
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
             ),
-            "Origin": "https://labs.google",
+            "Origin": "https://flow.google.com",
             "Referer": LABS_FLOW_BASE,
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -2526,22 +2422,7 @@ class FlowService:
 
         self._save_settings()
 
-        # Keep CDP on labs Flow (do not open dead flow.google.com/project links)
-        try:
-            from gflow.auth.browser_auth import get_saved_cdp_port
-            port = get_saved_cdp_port()
-            if self._is_cdp_port_alive(port):
-                targets = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=3).read())
-                page = next((t for t in targets if t.get("type") == "page"), None)
-                if page:
-                    ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=10)
-                    try:
-                        self._cdp_apply_labs_session(ws)
-                        self._cdp_send(ws, "Page.navigate", {"url": LABS_FLOW_BASE}, msg_id=101, timeout=20)
-                    finally:
-                        ws.close()
-        except Exception as e:
-            logger.debug(f"CDP project switch navigate notice: {e}")
+        # BiB-only: do not navigate helper Chrome / CDP on project switch
 
         active_proj = next((p for p in self.projects if p.get("id") == clean_id), None)
         if not active_proj:
@@ -2742,13 +2623,11 @@ class FlowService:
         return self._launch_recaptcha_helper_chrome()
 
     def _ensure_cdp_browser(self, auto_launch: bool = True) -> int:
-        """Return a live CDP port. Auto-launches the helper Chrome if none is running."""
+        """Return a live CDP port if Chrome is already running. Never launches helper Chrome."""
         port = self._get_alive_cdp_port()
         if port:
             return port
-        if auto_launch:
-            return self._launch_recaptcha_helper_chrome()
-        raise RuntimeError("No Chrome CDP session is running.")
+        raise RuntimeError("No Chrome CDP session is running (helper launch disabled; use BiB).")
 
     def _cdp_pick_page_ws(self, port: int, prefer_substr: str = "") -> str:
         """Return webSocketDebuggerUrl for a page tab (optionally preferring a URL substring)."""
@@ -3143,7 +3022,7 @@ class FlowService:
         url = f"https://www.google.com/recaptcha/enterprise.js?render={RECAPTCHA_SITE_KEY}"
         resp = requests.get(
             url,
-            headers={"User-Agent": BROWSER_UA, "Referer": "https://labs.google/"},
+            headers={"User-Agent": BROWSER_UA, "Referer": "https://flow.google.com/"},
             timeout=20,
         )
         m = re.search(r"releases/([\w-]+)/", resp.text or "")
@@ -3179,7 +3058,7 @@ class FlowService:
                 f"&size=invisible&cb={uuid.uuid4().hex[:12]}"
             )
             session = requests.Session()
-            headers = {"User-Agent": BROWSER_UA, "Referer": "https://labs.google/"}
+            headers = {"User-Agent": BROWSER_UA, "Referer": "https://flow.google.com/"}
             try:
                 anchor = session.get(anchor_url, headers=headers, timeout=20)
                 m = re.search(r'id="recaptcha-token"\s+value="([^"]+)"', anchor.text or "")
@@ -3408,184 +3287,23 @@ class FlowService:
         )
 
     def _launch_recaptcha_helper_chrome(self) -> int:
-        """Start (or reuse) a dedicated CDP Chrome for grecaptcha.enterprise minting.
-
-        Uses ~/.gflow/chrome-profile-recaptcha — not the user's everyday Chrome profile —
-        so it will not switch accounts in their normal browser. Labs next-auth cookies
-        from Studio are injected after launch. (Matches Google Flow v3.)
-        """
-        with self._helper_launch_lock:
-            port = self._get_alive_cdp_port()
-            if port:
-                return port
-
-            try:
-                from gflow.auth.browser_auth import get_saved_cdp_port, save_cdp_port, _find_free_port
-            except Exception:
-                get_saved_cdp_port = None  # type: ignore
-                save_cdp_port = None  # type: ignore
-
-                def _find_free_port() -> int:
-                    import socket
-
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.bind(("127.0.0.1", 0))
-                        return int(s.getsockname()[1])
-
-            if get_saved_cdp_port:
-                saved = get_saved_cdp_port()
-                if saved and self._is_cdp_port_alive(saved):
-                    self._cdp_cached_port = saved
-                    self._cdp_probe_miss_until = 0.0
-                    return saved
-
-            chrome = self._find_chrome_binary()
-            profile = Path.home() / ".gflow" / "chrome-profile-recaptcha"
-            profile.mkdir(parents=True, exist_ok=True)
-            port = int(_find_free_port())
-            start_url = LABS_FLOW_BASE
-
-            # Invisible CDP helper — never pop a visible Chrome window on generate.
-            # Matches Google Flow v3 scratch/test_invisible_chrome.py (headless + off-screen).
-            args = [
-                chrome,
-                f"--remote-debugging-port={port}",
-                "--remote-allow-origins=*",
-                f"--user-data-dir={str(profile)}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-blink-features=AutomationControlled",
-                "--headless=new",
-                "--disable-gpu",
-                "--window-position=-3200,-3200",
-                "--window-size=1280,900",
-                start_url,
-            ]
-            creationflags = 0
-            startupinfo = None
-            if os.name == "nt":
-                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = 0  # SW_HIDE
-
-            logger.info(
-                "Launching reCAPTCHA helper Chrome (headless) on port %s (profile=%s)",
-                port,
-                profile,
-            )
-            try:
-                proc = subprocess.Popen(
-                    args,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=creationflags,
-                    startupinfo=startupinfo,
-                    start_new_session=(os.name != "nt"),
-                )
-                self._headless_chrome_proc = proc
-            except Exception as e:
-                raise RuntimeError(f"Failed to launch reCAPTCHA helper Chrome: {e}") from e
-
-            deadline = time.time() + 25.0
-            while time.time() < deadline:
-                if self._probe_cdp_port(port, timeout=0.75):
-                    self._cdp_cached_port = port
-                    self._cdp_probe_miss_until = 0.0
-                    if save_cdp_port:
-                        try:
-                            save_cdp_port(port)
-                        except Exception:
-                            pass
-                    return port
-                time.sleep(0.3)
-
-            raise RuntimeError(
-                f"reCAPTCHA helper Chrome did not expose DevTools on port {port}. "
-                "Close other Chrome locks on ~/.gflow/chrome-profile-recaptcha and retry."
-            )
-
-    def _cdp_open_labs_tab(self, port: int) -> str:
-        """Return a labs.google page websocket, creating/navigating a tab if needed."""
-        try:
-            return self._cdp_pick_page_ws(port, prefer_substr="labs.google")
-        except Exception:
-            pass
-
-        pid = clean_project_id(self.active_project_id or "")
-        target = project_url(pid) if pid else LABS_FLOW_BASE
-        try:
-            ws_url = self._cdp_pick_page_ws(port, prefer_substr="")
-            ws = websocket.create_connection(ws_url, timeout=20)
-            try:
-                self._cdp_send(ws, "Page.enable", msg_id=9600, timeout=8.0)
-                self._cdp_send(ws, "Page.navigate", {"url": target}, msg_id=9601, timeout=15.0)
-                time.sleep(1.5)
-            finally:
-                try:
-                    ws.close()
-                except Exception:
-                    pass
-            return self._cdp_pick_page_ws(port, prefer_substr="labs.google")
-        except Exception:
-            pass
-
-        try:
-            new_url = f"http://127.0.0.1:{port}/json/new?{urllib.parse.quote(target, safe='')}"
-            created = json.loads(urllib.request.urlopen(new_url, timeout=8).read())
-            ws_url = created.get("webSocketDebuggerUrl")
-            if ws_url:
-                time.sleep(1.2)
-                return ws_url
-        except Exception as e:
-            logger.debug("json/new labs tab failed: %s", e)
-
+        """DISABLED — BiB owns Chrome; Python must not spawn helper CDP Chrome."""
         raise RuntimeError(
-            "Could not open labs.google in the reCAPTCHA helper Chrome. "
-            "Open https://labs.google/fx/tools/flow in that window and retry."
+            "reCAPTCHA helper Chrome is disabled (BiB-only mode). "
+            "Use BiB mint/upload on flow.google.com."
         )
 
+    def _cdp_open_labs_tab(self, port: int) -> str:
+        """DISABLED — BiB-only; Python helper tabs are not opened."""
+        raise RuntimeError("CDP labs tab open is disabled (BiB-only mode).")
+
     def _mint_recaptcha_via_helper(self, action: str = "IMAGE_GENERATION") -> str:
-        """Launch/reuse helper Chrome, inject labs session, mint a real grecaptcha token."""
-        if not self.cookies:
-            return ""
-        with self._cdp_op_lock:
-            port = self._launch_recaptcha_helper_chrome()
-            ws_url = self._cdp_open_labs_tab(port)
-            ws = websocket.create_connection(ws_url, timeout=45)
-            try:
-                try:
-                    self._cdp_apply_labs_session(ws)
-                except Exception as e:
-                    logger.debug("labs cookie inject for helper notice: %s", e)
-                pid = clean_project_id(self.active_project_id or "")
-                nav = project_url(pid) if pid else LABS_FLOW_BASE
-                try:
-                    self._cdp_send(ws, "Page.enable", msg_id=9610, timeout=8.0)
-                    self._cdp_send(ws, "Page.navigate", {"url": nav}, msg_id=9611, timeout=20.0)
-                except Exception as e:
-                    logger.debug("helper Page.navigate notice: %s", e)
-                time.sleep(2.0)
-                token = (self._mint_recaptcha_via_ws(ws, action=action, msg_id=20) or "").strip()
-                if token:
-                    logger.info(
-                        "Minted reCAPTCHA via helper Chrome (action=%s, len=%d)",
-                        action,
-                        len(token),
-                    )
-                return token
-            finally:
-                try:
-                    ws.close()
-                except Exception:
-                    pass
+        """DISABLED — BiB mints reCAPTCHA on flow.google.com."""
+        logger.info("[cdp] _mint_recaptcha_via_helper: skipped (BiB-only mode)")
+        return ""
 
     def _mint_recaptcha_any(self, action: str = "IMAGE_GENERATION") -> str:
-        """Best-effort reCAPTCHA: open CDP tab → helper Chrome → HTTP last resort.
-
-        aisandbox rejects most pure-HTTP tokens ("reCAPTCHA evaluation failed"), so
-        we prefer a real `grecaptcha.enterprise.execute` from labs.google (v3 path).
-        """
+        """Best-effort reCAPTCHA: soft CDP tab (if already open) → HTTP. No helper Chrome."""
         token = ""
         try:
             token = self._try_mint_recaptcha_soft(action=action)
@@ -3595,19 +3313,11 @@ class FlowService:
             self._sandbox_http_recaptcha_block_until = 0.0
             return token
 
-        try:
-            token = self._mint_recaptcha_via_helper(action=action)
-        except Exception as e:
-            logger.warning("Helper Chrome reCAPTCHA mint failed: %s", e)
-        if token:
-            self._sandbox_http_recaptcha_block_until = 0.0
-            return token
-
+        # Helper Chrome mint disabled (BiB-only)
         http_tok = self._mint_recaptcha_http(action=action)
         if http_tok:
             logger.warning(
-                "Using HTTP-minted reCAPTCHA token — aisandbox often rejects these; "
-                "helper Chrome mint is preferred"
+                "Using HTTP-minted reCAPTCHA token — prefer BiB mint on flow.google.com"
             )
         return http_tok
 
@@ -3738,14 +3448,14 @@ class FlowService:
 
         if not self._wait_for_grecaptcha_on_ws(ws, timeout=18.0):
             try:
-                self._cdp_send(ws, "Page.navigate", {"url": "https://labs.google/fx/tools/flow"}, msg_id=msg_id - 1, timeout=20)
+                self._cdp_send(ws, "Page.navigate", {"url": "https://flow.google.com/project/"}, msg_id=msg_id - 1, timeout=20)
                 time.sleep(2)
             except Exception as e:
                 logger.debug(f"labs navigate notice: {e}")
             if not self._wait_for_grecaptcha_on_ws(ws, timeout=20.0):
                 raise RuntimeError(
-                    "reCAPTCHA Enterprise did not load on labs.google/fx/tools/flow. "
-                    "Reconnect cookies from a signed-in labs.google session and retry."
+                    "reCAPTCHA Enterprise did not load on the open Flow tab. "
+                    "Use BiB on flow.google.com and retry."
                 )
 
         mint_script = f"""
@@ -3826,8 +3536,8 @@ class FlowService:
 
         headers = {
             "Authorization": f"Bearer {self.access_token}",
-            "Origin": "https://labs.google",
-            "Referer": "https://labs.google/fx/tools/flow",
+            "Origin": "https://flow.google.com",
+            "Referer": "https://flow.google.com/project/",
             "Cookie": self.cookies or "",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Content-Type": "text/plain;charset=UTF-8",
@@ -4082,27 +3792,10 @@ class FlowService:
         payload: dict,
         action: str = "IMAGE_GENERATION",
     ) -> dict:
-        """Mint reCAPTCHA and POST aisandbox in the helper Chrome page.
-
-        Proven path when no usable signed-in tab exists: inject full session,
-        navigate labs project, grecaptcha.execute, then fetch(..., credentials:'include').
-        Caller should hold `_cdp_op_lock`.
-        """
-        self._ensure_aisandbox_auth()
-
-        port = self._launch_recaptcha_helper_chrome()
-        ws_url = self._cdp_open_labs_tab(port)
-        ws = websocket.create_connection(ws_url, timeout=45)
-        try:
-            self._cdp_apply_labs_session(ws)
-            return self._aisandbox_same_page_post_on_ws(
-                ws, endpoint, payload, action=action, navigate=True
-            )
-        finally:
-            try:
-                ws.close()
-            except Exception:
-                pass
+        """DISABLED — BiB-only; Python must not launch helper Chrome for aisandbox."""
+        raise RuntimeError(
+            "aisandbox helper Chrome is disabled (BiB-only mode). Use BiB generate/upload."
+        )
 
     def _execute_cdp_fetch(self, endpoint: str, payload: dict, action: str = "IMAGE_GENERATION") -> dict:
         """Execute aisandbox API call — same-page CDP for reCAPTCHA; HTTP otherwise."""
@@ -4185,8 +3878,8 @@ class FlowService:
                 raise RuntimeError("No access token for aisandbox GET")
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
-                "Origin": "https://labs.google",
-                "Referer": "https://labs.google/fx/tools/flow",
+                "Origin": "https://flow.google.com",
+                "Referer": "https://flow.google.com/project/",
                 "Cookie": self.cookies or "",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             }
@@ -4447,8 +4140,8 @@ class FlowService:
         project_id = clean_project_id(self.active_project_id)
         candidates = [
             (angular_project_url(project_id), FLOW_ANGULAR_BASE + "/"),
-            (project_url(project_id), "https://labs.google/"),
-            (LABS_FLOW_BASE, "https://labs.google/"),
+            (project_url(project_id), "https://flow.google.com/"),
+            (LABS_FLOW_BASE, "https://flow.google.com/"),
         ]
         signed_out = False
         for url, referer in candidates:
@@ -6030,11 +5723,7 @@ class FlowService:
         media_id: Optional[str] = None,
         workflow_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Upscale a video clip to 1K / 1080p resolution.
-
-        Attempts Google Flow native cloud upscaling first when connected.
-        If cloud upscale is unavailable, applies local ffmpeg 1080p remastering.
-        """
+        """Upscale via Google Flow cloud only (BiB path). CDP/ffmpeg remaster disabled."""
         item = next((h for h in self.history if h.get("id") == asset_id), None)
         if not item:
             url = (video_url or "").strip()
@@ -6102,138 +5791,13 @@ class FlowService:
                 "already_upscaled": True,
             }
 
-        native_cloud_url = None
-        media_id = item.get("primary_media_id") or item.get("media_id") or asset_id
-        if media_id and "/" in str(media_id):
-            media_id = str(media_id).split("/")[-1].split("?")[0].strip()
-        workflow_id = item.get("workflow_id") or item.get("parent_workflow_id") or ""
-        if workflow_id and "/" in str(workflow_id):
-            workflow_id = str(workflow_id).split("/")[-1].split("?")[0].strip()
-        is_cloud_asset = "flow-content.google" in video_url or len(asset_id) > 30
-
-        if is_cloud_asset and not self.simulation_mode and self.cookies and self.active_project_id:
-            aspect_map = {
-                "16:9": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-                "9:16": "VIDEO_ASPECT_RATIO_PORTRAIT",
-                "1:1": "VIDEO_ASPECT_RATIO_SQUARE",
-            }
-            wire_aspect = aspect_map.get(item.get("aspect_ratio"), "VIDEO_ASPECT_RATIO_LANDSCAPE")
-            client_ctx = {
-                "projectId": self.active_project_id,
-                "tool": "PINHOLE",
-                "userPaygateTier": self.paygate_tier or "PAYGATE_TIER_TWO",
-                "recaptchaContext": {
-                    "token": "",
-                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
-                },
-            }
-            candidate_model = item.get("model_key")
-            if not candidate_model and item.get("model"):
-                m_match = re.search(r"\((veo_[^)]+)\)", str(item.get("model")))
-                if m_match:
-                    candidate_model = m_match.group(1)
-
-            native_endpoint = f"{SANDBOX_BASE}/v1/video:batchAsyncGenerateVideoUpsampleVideo"
-            req_item = {
-                "videoInput": {"mediaId": media_id},
-                "resolution": "VIDEO_RESOLUTION_1080P",
-                "aspectRatio": wire_aspect,
-                "seed": item.get("seed") or random.randint(10000, 999999),
-                "metadata": {
-                    "workflowId": workflow_id,
-                    "sceneId": item.get("scene_id") or str(uuid.uuid4()),
-                },
-            }
-            if candidate_model:
-                req_item["videoModelKey"] = candidate_model
-            native_payload = {
-                "mediaGenerationContext": {"batchId": f"upsample-batch-{int(time.time() * 1000)}"},
-                "clientContext": client_ctx,
-                "requests": [req_item],
-                "useV2ModelConfig": True,
-            }
-            try:
-                logger.info("Attempting Google Flow native cloud upscaling for media %s...", media_id)
-                native_resp = self._execute_cdp_fetch(native_endpoint, native_payload, action="VIDEO_GENERATION")
-                logger.info("Google Flow native upscale accepted: %s", native_resp)
-                up_media = native_resp.get("media", [])
-                up_media_id = up_media[0].get("name", "") if up_media else ""
-                if up_media_id:
-                    for _ in range(30):
-                        time.sleep(3)
-                        check_data = self._execute_cdp_get(f"{SANDBOX_BASE}/v1/flowMedia/{up_media_id}")
-                        if check_data and isinstance(check_data, dict):
-                            gen_vid = (check_data.get("video") or {}).get("generatedVideo") or {}
-                            fife_url = gen_vid.get("fifeUrl") or (check_data.get("video") or {}).get("fifeUrl")
-                            if fife_url:
-                                native_cloud_url = fife_url
-                                break
-            except Exception as native_err:
-                logger.info(
-                    "Google Flow cloud video upsampler unavailable (%s); applying Studio 1080p remastering",
-                    native_err,
-                )
-
-        if native_cloud_url:
-            logger.info("Downloading native Google Flow upscaled video from cloud...")
-            cloud_bytes = self._download_media_bytes(native_cloud_url)
-            out_path.write_bytes(cloud_bytes)
-            item["upscaled_method"] = "native_cloud"
-        else:
-            logger.info("Executing Studio high-definition 1080p remastering for %s...", asset_id)
-            ffmpeg = self._resolve_ffmpeg()
-            local_path = item.get("local_path") or item.get("path")
-            source_bytes = None
-            if not local_path or not Path(local_path).exists():
-                source_bytes = self._download_media_bytes(video_url)
-
-            with tempfile.TemporaryDirectory(prefix="flow-upscale-") as tmp:
-                tmp_path = Path(tmp)
-                src_file = tmp_path / "source.mp4"
-                if source_bytes:
-                    src_file.write_bytes(source_bytes)
-                else:
-                    src_file = Path(local_path)
-
-                aspect = str(item.get("aspect_ratio") or "").strip()
-                if aspect in ("9:16", "3:4"):
-                    scale_filter = "scale=-2:1920:flags=lanczos,unsharp=5:5:0.7:3:3:0.3"
-                elif aspect == "1:1":
-                    scale_filter = "scale=1080:1080:flags=lanczos,unsharp=5:5:0.7:3:3:0.3"
-                else:
-                    scale_filter = "scale=1920:-2:flags=lanczos,unsharp=5:5:0.7:3:3:0.3"
-
-                cmd = [
-                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(src_file), "-vf", scale_filter,
-                    "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-                    "-pix_fmt", "yuv420p", "-c:a", "copy", str(out_path),
-                ]
-                try:
-                    subprocess.run(cmd, check=True, capture_output=True, timeout=180)
-                except subprocess.CalledProcessError as e:
-                    err = (e.stderr or b"").decode("utf-8", errors="replace")[:400]
-                    logger.error("ffmpeg upscale failed: %s", err)
-                    raise RuntimeError(f"Video upscale failed: {err}") from e
-            item["upscaled_method"] = "studio_hd"
-
-        if not out_path.exists() or out_path.stat().st_size < 1024:
-            raise RuntimeError("Upscaled video file was not generated properly")
-
-        item["upscaled_url"] = f"/api/assets/file/{out_filename}"
-        item["upscaled_download_url"] = f"/api/assets/file/{out_filename}"
-        item["upscaled_path"] = str(out_path)
-        item["upscaled_resolution"] = "1080p"
-        self._save_history()
-
-        return {
-            "success": True,
-            "asset_id": asset_id,
-            "upscaled_url": item["upscaled_url"],
-            "upscaled_download_url": item["upscaled_download_url"],
-            "resolution": "1080p",
-            "method": item.get("upscaled_method", "studio_hd"),
-        }
+        # BiB-only: cloud 1080p upsample must go through Next -> BiB /upsample-video
+        # (aisandbox API on the existing account browser). No CDP helper Chrome, no ffmpeg remaster.
+        raise RuntimeError(
+            "Google Flow cloud upsample only. "
+            "Python CDP helper Chrome and Studio ffmpeg remastering are disabled. "
+            "Use Studio Upscale (BiB aisandbox API on the existing account browser)."
+        )
 
     def extend_video(self, asset_id: str, prompt: str, model: Optional[str] = None) -> Dict[str, Any]:
         """Extend a clip by last-frame extraction → upload → image-to-video (HTTP-first).

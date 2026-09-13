@@ -1,10 +1,14 @@
 'use client';
 
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
+import { useSiteSettings } from '@/components/SiteSettingsProvider';
 
 export default function ContactPage() {
+  const router = useRouter();
+  const { contactPageEnabled } = useSiteSettings();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [subject, setSubject] = useState('Plans and billing');
@@ -12,6 +16,18 @@ export default function ContactPage() {
   const [sent, setSent] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (contactPageEnabled === false) router.replace('/');
+  }, [contactPageEnabled, router]);
+
+  if (contactPageEnabled === false) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[var(--bg)] text-sm text-[var(--ink3)]">
+        Redirecting…
+      </div>
+    );
+  }
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();

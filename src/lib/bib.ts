@@ -135,6 +135,17 @@ export async function bibAccountStatus(accountId: string) {
   return res.json();
 }
 
+/** Navigate the account's BiB Chrome to a URL (e.g. a Flow project page). */
+export async function bibNavigate(accountId: string, url: string) {
+  const res = await bibFetch(`/accounts/${encodeURIComponent(accountId)}/navigate`, {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `BiB navigate failed (${res.status})`);
+  return data;
+}
+
 export async function bibEnsureLabs(accountId: string) {
   const res = await bibFetch(`/accounts/${encodeURIComponent(accountId)}/ensure-labs`, {
     method: 'POST',
@@ -263,6 +274,7 @@ export async function bibExportCookies(accountId: string) {
     at?: string;
     bl?: string;
     sid?: string;
+    cookieNames?: string[];
     hasLabsSession?: boolean;
   };
 }
@@ -300,6 +312,41 @@ export async function bibCreateCharacter(payload: {
   };
 }
 
+/**
+ * Upload an image to a Flow project via live BiB WIZ session (maseQ batchexecute — no CDP).
+ * Accepts either a base64-encoded image or a remote image URL.
+ */
+export async function bibUploadImage(payload: {
+  accountId: string;
+  projectId?: string;
+  imageBase64?: string;
+  imageUrl?: string;
+  mimeType?: string;
+  filename?: string;
+}) {
+  const res = await bibFetch(`/accounts/${encodeURIComponent(payload.accountId)}/upload-image`, {
+    method: 'POST',
+    body: JSON.stringify({
+      projectId: payload.projectId,
+      imageBase64: payload.imageBase64,
+      imageUrl: payload.imageUrl,
+      mimeType: payload.mimeType || 'image/jpeg',
+      filename: payload.filename || 'upload.jpg',
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.success === false) {
+    throw new Error(data.error || `BiB upload-image failed (${res.status})`);
+  }
+  return data as {
+    success: boolean;
+    mediaId: string;
+    imageUrl?: string;
+    projectId?: string;
+    ms?: number;
+  };
+}
+
 export async function bibBootstrap(accounts: { id: string; maxSlots?: number; projectIds?: string[]; profileDir?: string | null }[]) {
   const res = await bibFetch('/bootstrap', {
     method: 'POST',
@@ -308,8 +355,10 @@ export async function bibBootstrap(accounts: { id: string; maxSlots?: number; pr
   return res.json();
 }
 
-export function bibViewerUrl(accountId: string) {
-  return `${getBibPublicUrl()}/account.html?accountId=${encodeURIComponent(accountId)}`;
+export function bibViewerUrl(accountId: string, opts?: { url?: string }) {
+  const base = `${getBibPublicUrl()}/account.html?accountId=${encodeURIComponent(accountId)}`;
+  if (opts?.url) return `${base}&url=${encodeURIComponent(opts.url)}`;
+  return base;
 }
 
 export { BIB_WORKER_URL };

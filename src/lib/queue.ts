@@ -230,8 +230,8 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
         const useBib =
           provider.browserStatus === BrowserStatus.READY ||
           (Array.isArray(provider.flowProjectIds) && (provider.flowProjectIds as string[]).length > 0);
-        // BiB needs remapped wire keys; Python remaps FE keys itself
-        const workerModel = useBib && !isI2V ? wireModel : feModel;
+        // BiB needs remapped wire keys for all BiB paths (including I2V)
+        const workerModel = useBib ? wireModel : feModel;
 
         if (targetProjectId) {
           await prisma.generationJob.update({
@@ -251,7 +251,7 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
           `[queue] job=${job.id} FE=${feModel} → wire=${wireModel} via ${useBib ? 'BiB' : 'Python'} (${isI2V ? 'i2v' : isVideo ? 't2v' : 'image'}) project=${targetProjectId || 'none'}`
         );
 
-        if (useBib && !isI2V) {
+        if (useBib) {
           await ensureBibAccountReady({
             id: provider.id,
             maxParallelLimit: provider.maxParallelLimit,
@@ -262,50 +262,88 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
             const aspectMap: Record<string, number> = { '16:9': 2, '9:16': 1, '1:1': 1 };
             const bibData = await bibGenerateVideo({
               accountId: provider.id,
-              mode: 't2v',
+              mode: isI2V ? 'i2v' : 't2v',
               prompt: job.prompt,
               videoModel: workerModel,
               aspect: aspectMap[String(params.aspect_ratio || '16:9')] || 2,
               projectId: targetProjectId,
+              imageId: params.image_id || params.first_frame_id || undefined,
+              startImageId: params.first_frame_id || params.image_id || undefined,
+              endImageId: params.last_frame_id || undefined,
+              imageIds: Array.isArray(params.image_ids) ? params.image_ids : undefined,
               waitForCompletion: false,
             });
             const mediaUrl = bibData.videoUrl || bibData.url;
             if (mediaUrl) {
               await handleJobSuccess(job.id, mediaUrl, bibData);
-              return;
-            }
-            if (bibData.mediaId) {
+            } else if (bibData.mediaId) {
               await prisma.generationJob.update({
                 where: { id: job.id },
                 data: {
-                  status: JobStatus.GENERATING,
+                  status: JobStatus.CHECKING_STATUS,
                   progress: 20,
-                  outputMetadata: {
-                    workerTaskId: bibData.mediaId,
+                  parameters: {
+                    ...params,
+                    model: feModel,
+                    wireModel,
+                    flowProjectId: targetProjectId,
                     bibMediaId: bibData.mediaId,
-                    bibProjectId: bibData.projectId || targetProjectId || null,
                     bibAccountId: provider.id,
+                    bibProjectId: targetProjectId,
+                  },
+                  outputMetadata: {
+                    bibMediaId: bibData.mediaId,
+                    bibAccountId: provider.id,
+                    bibProjectId: targetProjectId,
                   },
                 },
               });
-              return;
+            } else {
+              throw new Error((bibData as any).error || 'BiB returned no video URL/mediaId');
             }
-            throw new Error(bibData.error || 'BiB video returned no mediaId');
+            return;
           }
-
           const bibData = await bibGenerateImage({
             accountId: provider.id,
-            prompt: job.prompt!,
-            aspectRatio: params.aspect_ratio || '16:9',
+            prompt: job.prompt,
             model: workerModel,
+            aspectRatio: String(params.aspect_ratio || '16:9'),
             projectId: targetProjectId,
+            imageId: params.image_id || undefined,
+            imageIds: Array.isArray(params.image_ids) ? params.image_ids : undefined,
           });
           const mediaUrl = bibData.imageUrl || bibData.url || bibData.assets?.[0]?.url;
-          if (!mediaUrl) throw new Error('BiB returned no image URL');
-          await handleJobSuccess(job.id, mediaUrl, bibData);
+          if (mediaUrl) {
+            await handleJobSuccess(job.id, mediaUrl, bibData);
+          } else if (bibData.mediaId) {
+            await prisma.generationJob.update({
+              where: { id: job.id },
+              data: {
+                status: JobStatus.CHECKING_STATUS,
+                progress: 20,
+                parameters: {
+                  ...params,
+                  model: feModel,
+                  wireModel,
+                  flowProjectId: targetProjectId,
+                  bibMediaId: bibData.mediaId,
+                  bibAccountId: provider.id,
+                  bibProjectId: targetProjectId,
+                },
+                outputMetadata: {
+                  bibMediaId: bibData.mediaId,
+                  bibAccountId: provider.id,
+                  bibProjectId: targetProjectId,
+                },
+              },
+            });
+          } else {
+            throw new Error((bibData as any).error || 'BiB returned no image URL/mediaId');
+          }
           return;
         }
 
+        // Python fallback only when BiB is not available
         const payload = isI2V
           ? {
               prompt: job.prompt,

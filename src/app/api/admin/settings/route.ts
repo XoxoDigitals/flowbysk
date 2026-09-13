@@ -25,6 +25,7 @@ export async function PUT(req: Request) {
       contactEmail: body.contactEmail,
       allowSignups: body.allowSignups,
       ticketSystemEnabled: body.ticketSystemEnabled,
+      contactPageEnabled: body.contactPageEnabled,
     });
     return NextResponse.json({ success: true, settings });
   } catch (error: any) {

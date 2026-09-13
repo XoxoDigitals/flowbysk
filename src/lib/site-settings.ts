@@ -6,6 +6,7 @@ export type PublicSiteSettings = {
   contactEmail: string;
   allowSignups: boolean;
   ticketSystemEnabled: boolean;
+  contactPageEnabled: boolean;
 };
 
 const DEFAULTS: PublicSiteSettings = {
@@ -14,7 +15,26 @@ const DEFAULTS: PublicSiteSettings = {
   contactEmail: 'support@flowbysk.com',
   allowSignups: true,
   ticketSystemEnabled: true,
+  contactPageEnabled: true,
 };
+
+function mapRow(row: {
+  siteName: string;
+  logoUrl: string | null;
+  contactEmail: string;
+  allowSignups: boolean;
+  ticketSystemEnabled: boolean;
+  contactPageEnabled?: boolean;
+}): PublicSiteSettings {
+  return {
+    siteName: row.siteName || DEFAULTS.siteName,
+    logoUrl: row.logoUrl,
+    contactEmail: row.contactEmail || DEFAULTS.contactEmail,
+    allowSignups: row.allowSignups !== false,
+    ticketSystemEnabled: row.ticketSystemEnabled !== false,
+    contactPageEnabled: row.contactPageEnabled !== false,
+  };
+}
 
 export async function getSiteSettings(): Promise<PublicSiteSettings> {
   try {
@@ -27,16 +47,11 @@ export async function getSiteSettings(): Promise<PublicSiteSettings> {
         contactEmail: DEFAULTS.contactEmail,
         allowSignups: DEFAULTS.allowSignups,
         ticketSystemEnabled: DEFAULTS.ticketSystemEnabled,
+        contactPageEnabled: DEFAULTS.contactPageEnabled,
       },
       update: {},
     });
-    return {
-      siteName: row.siteName || DEFAULTS.siteName,
-      logoUrl: row.logoUrl,
-      contactEmail: row.contactEmail || DEFAULTS.contactEmail,
-      allowSignups: row.allowSignups !== false,
-      ticketSystemEnabled: row.ticketSystemEnabled !== false,
-    };
+    return mapRow(row);
   } catch {
     return { ...DEFAULTS };
   }
@@ -48,6 +63,7 @@ export async function updateSiteSettings(data: {
   contactEmail?: string;
   allowSignups?: boolean;
   ticketSystemEnabled?: boolean;
+  contactPageEnabled?: boolean;
 }): Promise<PublicSiteSettings> {
   const row = await prisma.siteSettings.upsert({
     where: { id: 'default' },
@@ -58,6 +74,7 @@ export async function updateSiteSettings(data: {
       contactEmail: data.contactEmail?.trim() || DEFAULTS.contactEmail,
       allowSignups: data.allowSignups ?? DEFAULTS.allowSignups,
       ticketSystemEnabled: data.ticketSystemEnabled ?? DEFAULTS.ticketSystemEnabled,
+      contactPageEnabled: data.contactPageEnabled ?? DEFAULTS.contactPageEnabled,
     },
     update: {
       ...(data.siteName !== undefined ? { siteName: data.siteName.trim() || DEFAULTS.siteName } : {}),
@@ -69,13 +86,10 @@ export async function updateSiteSettings(data: {
       ...(data.ticketSystemEnabled !== undefined
         ? { ticketSystemEnabled: Boolean(data.ticketSystemEnabled) }
         : {}),
+      ...(data.contactPageEnabled !== undefined
+        ? { contactPageEnabled: Boolean(data.contactPageEnabled) }
+        : {}),
     },
   });
-  return {
-    siteName: row.siteName,
-    logoUrl: row.logoUrl,
-    contactEmail: row.contactEmail,
-    allowSignups: row.allowSignups !== false,
-    ticketSystemEnabled: row.ticketSystemEnabled !== false,
-  };
+  return mapRow(row);
 }

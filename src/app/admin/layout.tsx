@@ -49,12 +49,13 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const [loading, setLoading] = useState(true);
   const [adminName, setAdminName] = useState('Admin');
   const [adminRole, setAdminRole] = useState('ADMIN');
+  const [canAccessAccounts, setCanAccessAccounts] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
 
   useEffect(() => {
     fetch('/api/auth/me')
       .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
+      .then(async (data) => {
         const role = data?.user?.role;
         if (!data?.authenticated || (role !== 'ADMIN' && role !== 'SUPER_ADMIN')) {
           if (role === 'RESELLER') router.push('/reseller');
@@ -63,11 +64,28 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           setIsAdmin(true);
           setAdminRole(role);
           setAdminName(data.user?.name || data.user?.email || 'Admin');
+          try {
+            const aRes = await fetch('/api/admin/accounts-access');
+            if (aRes.ok) {
+              const aData = await aRes.json();
+              setCanAccessAccounts(!!aData.allowed);
+            } else {
+              setCanAccessAccounts(role === 'SUPER_ADMIN');
+            }
+          } catch {
+            setCanAccessAccounts(role === 'SUPER_ADMIN');
+          }
         }
       })
       .catch(() => router.push('/dashboard'))
       .finally(() => setLoading(false));
   }, [router]);
+
+  useEffect(() => {
+    if (!loading && isAdmin && pathname?.startsWith('/admin/accounts') && !canAccessAccounts) {
+      router.replace('/admin');
+    }
+  }, [loading, isAdmin, pathname, canAccessAccounts, router]);
 
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
@@ -92,7 +110,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       ? [{ name: 'System Users', href: '/admin/system-users', icon: ShieldAlert }]
       : []),
     { name: 'Orders', href: '/admin/orders', icon: ShoppingBag },
-    { name: 'Accounts', href: '/admin/accounts', icon: Server },
+    ...(canAccessAccounts ? [{ name: 'Accounts', href: '/admin/accounts', icon: Server }] : []),
     { name: 'Jobs', href: '/admin/jobs', icon: ListOrdered },
     { name: 'Plans', href: '/admin/plans', icon: Layers },
     { name: 'Messages', href: '/admin/messages', icon: Mail },

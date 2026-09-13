@@ -5,7 +5,7 @@ import { useSiteSettings } from './SiteSettingsProvider';
 import SiteBrand from './SiteBrand';
 
 export default function Footer() {
-  const { siteName } = useSiteSettings();
+  const { siteName, contactPageEnabled } = useSiteSettings();
   const year = new Date().getFullYear();
 
   return (
@@ -34,9 +34,11 @@ export default function Footer() {
           <Link href="/about" className="text-sm text-[var(--ink2)] hover:text-[var(--ink)]">
             About
           </Link>
-          <Link href="/contact" className="text-sm text-[var(--ink2)] hover:text-[var(--ink)]">
-            Contact
-          </Link>
+          {contactPageEnabled !== false && (
+            <Link href="/contact" className="text-sm text-[var(--ink2)] hover:text-[var(--ink)]">
+              Contact
+            </Link>
+          )}
           <Link href="/guide" className="text-sm text-[var(--ink2)] hover:text-[var(--ink)]">
             Credit guide
           </Link>

@@ -203,6 +203,7 @@ export async function POST(req: Request) {
         if (!resolved) return resolved;
         return (
           (await refreshFlowMediaId({
+            accountId: provider.id,
             mediaId: resolved,
             cookies: liveCookies,
             projectId: targetProjectId,
@@ -361,6 +362,7 @@ export async function POST(req: Request) {
         }
         const repairedStart = startId
           ? (await refreshFlowMediaId({
+              accountId: provider.id,
               mediaId: startId,
               cookies: liveCookies,
               projectId: targetProjectId,
@@ -369,6 +371,7 @@ export async function POST(req: Request) {
           : null;
         const repairedEnd = endId
           ? (await refreshFlowMediaId({
+              accountId: provider.id,
               mediaId: endId,
               cookies: liveCookies,
               projectId: targetProjectId,
