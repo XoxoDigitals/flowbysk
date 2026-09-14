@@ -44,7 +44,16 @@ export async function PUT(req: Request) {
               ? null
               : body.egressProxyUrl,
     });
-    return NextResponse.json({ success: true, settings });
+    const res = NextResponse.json({ success: true, settings });
+    // Keep admin unlocked when turning maintenance on
+    if (settings.maintenanceMode) {
+      res.cookies.set('mod_admin', '1', {
+        path: '/',
+        maxAge: 60 * 60 * 24 * 30,
+        sameSite: 'lax',
+      });
+    }
+    return res;
   } catch (error: any) {
     const msg = error.message || 'Forbidden';
     const status = msg === 'FORBIDDEN' ? 403 : msg.startsWith('Invalid proxy') ? 400 : 500;

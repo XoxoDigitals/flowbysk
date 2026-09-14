@@ -9,7 +9,8 @@ function isAssetPath(pathname: string) {
     pathname.startsWith('/_next') ||
     pathname.startsWith('/static') ||
     pathname.startsWith('/favicon') ||
-    /\.(?:ico|png|jpg|jpeg|gif|svg|webp|css|js|map|txt|woff2?)$/i.test(pathname)
+    pathname === '/maintenance-status.json' ||
+    /\.(?:ico|png|jpg|jpeg|gif|svg|webp|css|js|map|txt|woff2?|json)$/i.test(pathname)
   );
 }
 
@@ -34,30 +35,30 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
-  if (
-    pathname === '/maintenance' ||
-    pathname === '/api/public/maintenance' ||
-    isAssetPath(pathname)
-  ) {
+  if (pathname === '/maintenance' || isAssetPath(pathname)) {
     return NextResponse.next();
   }
 
+  // Read static public flag — avoids self-fetch deadlock with /api (which failed open before).
   let maintenance = false;
   try {
-    const r = await fetch(new URL('/api/public/maintenance', req.url), {
-      headers: { 'x-middleware-check': '1' },
+    const flagUrl = new URL('/maintenance-status.json', req.nextUrl.origin);
+    const r = await fetch(flagUrl, {
       cache: 'no-store',
+      headers: { Accept: 'application/json' },
     });
     if (r.ok) {
       const data = await r.json();
       maintenance = !!data.maintenanceMode;
     }
   } catch {
-    /* fail open if status API unreachable */
+    /* layout still enforces */
   }
 
   if (maintenance) {
     if (pathname.startsWith('/api/')) {
+      // Allow the public status endpoint only
+      if (pathname === '/api/public/maintenance') return NextResponse.next();
       return NextResponse.json(
         { error: 'Site is under maintenance', maintenanceMode: true },
         { status: 503 }

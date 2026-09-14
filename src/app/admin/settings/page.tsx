@@ -486,9 +486,10 @@ export default function AdminSettingsPage() {
           <div>
             <p className="text-sm font-medium text-[var(--ink)]">Maintenance mode</p>
             <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
-              Shows a maintenance page site-wide. Bypass with{' '}
-              <code className="rounded bg-[var(--bg2)] px-1 font-mono text-[11px]">?mod_admin</code>{' '}
-              (anyone with that URL).
+              Shows a maintenance page site-wide after you click <b>Save site settings</b>. Bypass
+              with{' '}
+              <code className="rounded bg-[var(--bg2)] px-1 font-mono text-[11px]">?mod_admin</code>
+              . Test in a private window (your admin session keeps a bypass cookie).
             </p>
           </div>
           <Toggle

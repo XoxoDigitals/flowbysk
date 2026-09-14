@@ -1,9 +1,12 @@
 import type { Metadata, Viewport } from 'next';
 import { Poppins, JetBrains_Mono } from 'next/font/google';
+import { cookies } from 'next/headers';
 import './globals.css';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import { SiteSettingsProvider } from '@/components/SiteSettingsProvider';
 import { getSiteSettings } from '@/lib/site-settings';
+import { resolveMaintenanceMode } from '@/lib/siteRuntime';
+import MaintenancePage from './maintenance/page';
 
 const body = Poppins({
   subsets: ['latin'],
@@ -42,7 +45,16 @@ export const viewport: Viewport = {
   themeColor: '#090b10',
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const jar = await cookies();
+  const bypass = jar.get('mod_admin')?.value === '1';
+  let maintenance = false;
+  try {
+    maintenance = await resolveMaintenanceMode();
+  } catch {
+    maintenance = false;
+  }
+
   return (
     <html lang="en" className={`dark ${body.variable} ${mono.variable}`} suppressHydrationWarning>
       <body className="min-h-screen bg-[var(--bg)] font-body text-[var(--ink)] antialiased">
@@ -52,7 +64,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           }}
         />
         <ThemeProvider>
-          <SiteSettingsProvider>{children}</SiteSettingsProvider>
+          <SiteSettingsProvider>
+            {maintenance && !bypass ? <MaintenancePage /> : children}
+          </SiteSettingsProvider>
         </ThemeProvider>
       </body>
     </html>
