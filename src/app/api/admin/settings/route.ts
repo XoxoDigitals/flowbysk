@@ -1,10 +1,14 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
 import { getAdminSiteSettings, updateSiteSettings } from '@/lib/site-settings';
+import { startProxyAutoRotateLoop } from '@/lib/proxyAutoRotate';
+
+export const runtime = 'nodejs';
 
 export async function GET(req: Request) {
   try {
     await requireAdmin(req);
+    startProxyAutoRotateLoop();
     const settings = await getAdminSiteSettings();
     return NextResponse.json({ success: true, settings });
   } catch (error: any) {
