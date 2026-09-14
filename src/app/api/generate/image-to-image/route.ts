@@ -11,6 +11,7 @@ import { resolveImageFrontendModel, resolveImageWireModel } from '@/lib/modelWir
 import { createStudioLog } from '@/lib/studioLogs';
 import { prepareProviderWorkerSession, refreshFlowMediaId } from '@/lib/providerSession';
 import { bibGenerateImage, ensureBibAccountReady } from '@/lib/bib';
+import { noteUnusualActivityFailure } from '@/lib/unusualActivityProxyRotate';
 
 async function resolveMediaId(id?: string | null) {
   if (!id) return id || undefined;
@@ -427,6 +428,10 @@ export async function POST(req: Request) {
       });
     } catch (workerErr: any) {
       console.error('I2I generation worker error:', workerErr.message);
+
+      noteUnusualActivityFailure(workerErr?.message || workerErr).catch((e) =>
+        console.warn('[proxy-rotate]', e)
+      );
 
       await prisma.generationJob.update({
         where: { id: job.id },

@@ -13,7 +13,8 @@ import {
 let consecutiveUnusual = 0;
 let rotating = false;
 
-const UNUSUAL_RE = /UNUSUAL_ACTIVITY|RECAPTCHA|unusual\s*activity/i;
+const UNUSUAL_RE =
+  /UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC|RECAPTCHA|unusual\s*activity/i;
 
 export function isUnusualActivityError(raw: unknown): boolean {
   return UNUSUAL_RE.test(String(raw ?? ''));

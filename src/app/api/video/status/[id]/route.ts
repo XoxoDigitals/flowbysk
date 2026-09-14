@@ -6,6 +6,7 @@ import { JobStatus } from '@prisma/client';
 import { createStudioLog } from '@/lib/studioLogs';
 import { bibVideoStatus } from '@/lib/bib';
 import { toUserFacingError } from '@/lib/userMessages';
+import { noteUnusualActivityFailure } from '@/lib/unusualActivityProxyRotate';
 
 const PYTHON_WORKER_URL = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
 
@@ -207,6 +208,9 @@ export async function GET(
             },
           });
           if (updateRes.count > 0) {
+            noteUnusualActivityFailure(failMsg).catch((e) =>
+              console.warn('[proxy-rotate]', e)
+            );
             await releaseCredits(
               job.userId,
               job.walletType,
@@ -380,11 +384,15 @@ export async function GET(
         }
 
         if (workerAsset.status === 'FAILED') {
+          const failMsg = workerAsset.error || 'Generation failed upstream';
+          noteUnusualActivityFailure(failMsg).catch((e) =>
+            console.warn('[proxy-rotate]', e)
+          );
           await prisma.generationJob.update({
             where: { id: job.id },
             data: {
               status: JobStatus.FAILED,
-              errorMessage: workerAsset.error || 'Generation failed upstream',
+              errorMessage: failMsg,
               completedAt: new Date(),
               expiresAt: new Date(Date.now() + 4 * 60 * 60 * 1000),
             },
@@ -394,10 +402,10 @@ export async function GET(
             job.walletType,
             job.creditCost,
             job.id,
-            workerAsset.error || 'Generation failed upstream'
+            failMsg
           );
           checkAndDispatchNextJobs(job.userId).catch(console.error);
-          await logJobTerminal(job, 'failed', workerAsset.error || 'Generation failed upstream');
+          await logJobTerminal(job, 'failed', failMsg);
 
           return NextResponse.json({
             success: false,

@@ -180,6 +180,14 @@ export async function bibScrapeProjects(accountId: string) {
   return data;
 }
 
+function unusualHintFromBibData(data: Record<string, unknown>): string {
+  const blob = JSON.stringify(data?.stages ?? data ?? {});
+  const m = blob.match(/PUBLIC_ERROR_[A-Z0-9_]*UNUSUAL_ACTIVITY[A-Z0-9_]*/i);
+  if (m) return m[0];
+  if (/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC|RECAPTCHA/i.test(blob)) return 'UNUSUAL_ACTIVITY';
+  return '';
+}
+
 export async function bibGenerateImage(payload: {
   accountId: string;
   prompt: string;
@@ -203,7 +211,13 @@ export async function bibGenerateImage(payload: {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.success === false) {
-    throw new Error(data.error || data.raw || `BiB generate failed (${res.status})`);
+    const base = data.error || data.raw || `BiB generate failed (${res.status})`;
+    const hint = unusualHintFromBibData(data);
+    throw new Error(
+      hint && !/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC/i.test(String(base))
+        ? `${base} (${hint})`
+        : String(base)
+    );
   }
   return data as {
     success: boolean;
@@ -225,8 +239,13 @@ export async function bibGenerateVideo(payload: Record<string, unknown>) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.success === false) {
     const stage = data.stage ? ` [${data.stage}]` : '';
+    const base =
+      data.error || data.raw || `BiB video failed (${res.status})${stage}`;
+    const hint = unusualHintFromBibData(data);
     throw new Error(
-      data.error || data.raw || `BiB video failed (${res.status})${stage}`
+      hint && !/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC/i.test(String(base))
+        ? `${base} (${hint})`
+        : String(base)
     );
   }
   return data as {

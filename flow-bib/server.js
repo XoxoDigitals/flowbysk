@@ -1049,10 +1049,19 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
 
     if (!mediaId && !videoUrl) {
       console.warn(`[${accountId}] video submit: no mediaId`, stages);
+      const stagesBlob = JSON.stringify(stages || {});
+      const unusualMatch = stagesBlob.match(/PUBLIC_ERROR_[A-Z0-9_]*UNUSUAL_ACTIVITY[A-Z0-9_]*/i);
+      const unusualHint = unusualMatch
+        ? unusualMatch[0]
+        : /UNUSUAL_ACTIVITY|RECAPTCHA|TOO_MUCH_TRAFFIC/i.test(stagesBlob)
+          ? 'UNUSUAL_ACTIVITY'
+          : '';
       return res.status(502).json({
         success: false,
         stage: 'submit',
-        error: 'Video submitted but mediaId could not be parsed — check Flow project',
+        error: unusualHint
+          ? `Video submitted but mediaId could not be parsed (${unusualHint})`
+          : 'Video submitted but mediaId could not be parsed — check Flow project',
         imageUrl,
         stages,
         ms: Date.now() - t0,

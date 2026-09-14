@@ -95,8 +95,9 @@ async function resolveEgressProxyUrl(opts = {}) {
     return _cache.url;
   }
 
-  let url = normalizeProxyUrl(process.env.EGRESS_PROXY_URL);
-  if (!url) url = readMirror();
+  // Mirror is source of truth (Admin / proxy-rotate write it). Env is fallback only.
+  let url = readMirror();
+  if (!url) url = normalizeProxyUrl(process.env.EGRESS_PROXY_URL);
 
   if (!url) {
     try {

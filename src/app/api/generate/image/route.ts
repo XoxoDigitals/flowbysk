@@ -13,6 +13,7 @@ import { bibGenerateImage, ensureBibAccountReady } from '@/lib/bib';
 import { createStudioLog } from '@/lib/studioLogs';
 import { resolveTargetFlowProject } from '@/lib/flowProjects';
 import { resolveImageFrontendModel, resolveImageWireModel } from '@/lib/modelWire';
+import { noteUnusualActivityFailure } from '@/lib/unusualActivityProxyRotate';
 // image remaps: Python remaps FE→wire once; BiB needs wire keys directly.
 
 export async function POST(req: Request) {
@@ -369,6 +370,10 @@ export async function POST(req: Request) {
       });
     } catch (workerErr: any) {
       console.error('Image generation worker error:', workerErr.message);
+
+      noteUnusualActivityFailure(workerErr?.message || workerErr).catch((e) =>
+        console.warn('[proxy-rotate]', e)
+      );
 
       await prisma.generationJob.update({
         where: { id: job.id },
