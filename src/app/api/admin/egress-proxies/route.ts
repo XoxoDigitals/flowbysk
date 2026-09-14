@@ -116,11 +116,31 @@ export async function PUT(req: Request) {
   }
 }
 
-/** POST — check one proxy (or active) and persist IP/country on that entry. */
+/** POST — check one proxy, or action=rotate to rotate + relaunch BiB (keeps login). */
 export async function POST(req: Request) {
   try {
     await requireAdmin(req);
     const body = await req.json().catch(() => ({}));
+
+    if (body.action === 'rotate') {
+      const { performEgressProxyRotateAndRelaunch } = await import(
+        '@/lib/unusualActivityProxyRotate'
+      );
+      const { maskProxyUrl } = await import('@/lib/egressProxy');
+      const result = await performEgressProxyRotateAndRelaunch({ reason: 'manual admin rotate' });
+      const mirror = readEgressProxyMirror();
+      return NextResponse.json({
+        success: result.ok,
+        rotated: result.rotated,
+        from: result.from ? maskProxyUrl(result.from) : null,
+        to: result.to ? maskProxyUrl(result.to) : null,
+        activeUrl: result.to,
+        relaunched: result.relaunched,
+        error: result.error,
+        proxies: mirror.proxies,
+      }, { status: result.ok ? 200 : 400 });
+    }
+
     const mirror = readEgressProxyMirror();
     let proxies = mirror.proxies;
     const id = typeof body.id === 'string' ? body.id : '';

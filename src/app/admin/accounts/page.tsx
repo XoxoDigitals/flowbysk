@@ -24,6 +24,8 @@ import {
   Play,
   Unplug,
   MonitorPlay,
+  RefreshCcw,
+  Globe,
 } from 'lucide-react';
 
 interface AccountItem {
@@ -90,11 +92,42 @@ export default function AdminAccountsPage() {
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
   const [creatingProjectForId, setCreatingProjectForId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [activeProxy, setActiveProxy] = useState<{
+    url: string | null;
+    masked?: string;
+    ip?: string | null;
+    country?: string | null;
+  }>({ url: null });
+  const [rotatingProxy, setRotatingProxy] = useState(false);
 
   // Edit form state
   const [editPlanTier, setEditPlanTier] = useState('Google AI Ultra');
   const [editProjectUrl, setEditProjectUrl] = useState('');
   const [editMaxParallelLimit, setEditMaxParallelLimit] = useState(5);
+
+  const fetchActiveProxy = async () => {
+    try {
+      const res = await fetch('/api/admin/egress-proxies');
+      if (!res.ok) return;
+      const data = await res.json();
+      const activeUrl = data.activeUrl || null;
+      const active = Array.isArray(data.proxies)
+        ? data.proxies.find((p: any) => p.enabled !== false && p.url === activeUrl) ||
+          data.proxies.find((p: any) => p.enabled !== false)
+        : null;
+      const masked = activeUrl
+        ? String(activeUrl).replace(/:([^:@/]+)@/, ':****@')
+        : null;
+      setActiveProxy({
+        url: activeUrl,
+        masked: masked || undefined,
+        ip: active?.ip ?? null,
+        country: active?.country ?? null,
+      });
+    } catch {
+      /* ignore */
+    }
+  };
 
   const fetchAccounts = async () => {
     try {
@@ -112,7 +145,39 @@ export default function AdminAccountsPage() {
 
   useEffect(() => {
     fetchAccounts();
+    fetchActiveProxy();
   }, []);
+
+  const handleRotateProxy = async () => {
+    if (
+      !confirm(
+        'Rotate to the next egress proxy and relaunch BiB? Google login is kept on the same profile.'
+      )
+    ) {
+      return;
+    }
+    setRotatingProxy(true);
+    try {
+      const res = await fetch('/api/admin/egress-proxies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'rotate' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Rotate failed');
+      await fetchActiveProxy();
+      await fetchAccounts();
+      alert(
+        data.rotated
+          ? `Rotated to ${data.to || 'next proxy'} · relaunched ${data.relaunched || 0} account(s)`
+          : data.error || 'Rotate did not complete'
+      );
+    } catch (err: any) {
+      alert(err.message || 'Rotate failed');
+    } finally {
+      setRotatingProxy(false);
+    }
+  };
 
   const handleCopyProjectUrl = (id: string, url: string) => {
     navigator.clipboard.writeText(url);
@@ -706,6 +771,35 @@ export default function AdminAccountsPage() {
                     >
                       {acc.creditClassification === 'CREDITS_AVAILABLE' ? 'Funded (Pro Work)' : 'Exhausted (Zero-cost)'}
                     </span>
+                  </div>
+
+                  <div className="mt-2 rounded-lg border border-[var(--line)] bg-[var(--bg2)] px-2.5 py-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--ink3)]">
+                          <Globe className="h-3 w-3" />
+                          Active egress proxy
+                        </p>
+                        <p className="mt-0.5 truncate font-mono text-[11px] text-[var(--ink)]" title={activeProxy.url || ''}>
+                          {activeProxy.masked || activeProxy.url || 'None configured'}
+                        </p>
+                        {(activeProxy.ip || activeProxy.country) && (
+                          <p className="mt-0.5 text-[11px] text-[var(--ink3)]">
+                            {[activeProxy.ip, activeProxy.country].filter(Boolean).join(' · ')}
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleRotateProxy}
+                        disabled={rotatingProxy || bibBusyId === acc.id}
+                        className="shrink-0 flex items-center gap-1 rounded-lg border border-[var(--a1)]/30 bg-[var(--a1soft)] px-2 py-1 text-[11px] font-semibold text-[var(--a1)] disabled:opacity-50"
+                        title="Rotate to next proxy and relaunch (keeps Google login)"
+                      >
+                        <RefreshCcw className={`h-3 w-3 ${rotatingProxy ? 'animate-spin' : ''}`} />
+                        {rotatingProxy ? '…' : 'Rotate'}
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

@@ -608,6 +608,12 @@ model SiteSettings {
   ticketSystemEnabled Boolean @default(true)
   /// When false, the public Contact page and form are hidden
   contactPageEnabled Boolean @default(true)
+  /// When true, site shows maintenance page (bypass with ?mod_admin)
+  maintenanceMode Boolean @default(false)
+  /// Auto-rotate egress proxies on an interval
+  proxyAutoRotateEnabled Boolean @default(false)
+  /// Minutes between automatic proxy rotations
+  proxyAutoRotateMinutes Int @default(60)
   /// Optional HTTP(S) egress proxy for BiB Chrome + Python worker (legacy single; kept in sync with first enabled)
   egressProxyUrl String?
   /// Proxy list: [{ id, url, enabled }]

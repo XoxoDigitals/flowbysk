@@ -26,6 +26,9 @@ export async function PUT(req: Request) {
       allowSignups: body.allowSignups,
       ticketSystemEnabled: body.ticketSystemEnabled,
       contactPageEnabled: body.contactPageEnabled,
+      maintenanceMode: body.maintenanceMode,
+      proxyAutoRotateEnabled: body.proxyAutoRotateEnabled,
+      proxyAutoRotateMinutes: body.proxyAutoRotateMinutes,
       egressProxies: body.egressProxies !== undefined ? body.egressProxies : undefined,
       // Legacy single field only if list not sent
       egressProxyUrl:

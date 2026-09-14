@@ -17,11 +17,52 @@ const {
   sleep,
 } = require('./helpers');
 const { resolveEgressProxyUrl, parseProxyForChrome } = require('./egressProxy');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
 
 const HEADLESS = process.env.HEADLESS === 'false' ? false : true;
 const PROFILES_ROOT =
   process.env.BIB_PROFILES_DIR || path.resolve(__dirname, '..', '..', 'data', 'bib-profiles');
 const PROFILES_ROOT_RESOLVED = path.resolve(PROFILES_ROOT);
+
+/** Remove Chrome profile lock files so relaunch can reuse the same logged-in profile. */
+function clearProfileLockFiles(profileDir) {
+  for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    try {
+      fs.unlinkSync(path.join(profileDir, name));
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Kill orphan Chrome processes still holding this user-data-dir (profile stays intact → no logout).
+ */
+async function killOrphanChromeForProfile(profileDir) {
+  const dir = path.resolve(profileDir);
+  try {
+    if (process.platform === 'win32') {
+      const ps = `
+        $d = '${dir.replace(/'/g, "''")}';
+        Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+          Where-Object { $_.CommandLine -and $_.CommandLine.Contains($d) } |
+          ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+      `;
+      await execFileAsync('powershell.exe', ['-NoProfile', '-Command', ps], {
+        timeout: 20000,
+        windowsHide: true,
+      }).catch(() => {});
+    } else {
+      await execFileAsync('pkill', ['-f', dir], { timeout: 10000 }).catch(() => {});
+    }
+  } catch {
+    /* ignore */
+  }
+  await sleep(600);
+  clearProfileLockFiles(dir);
+}
 
 /** Strip path separators / traversal segments so accountId can't escape PROFILES_ROOT. */
 function sanitizeAccountId(accountId) {
@@ -148,6 +189,8 @@ class AccountSession {
     this.lastError = null;
     this.authLostNotified = false;
     fs.mkdirSync(this.profileDir, { recursive: true });
+    // Ensure no orphan Chrome holds this profile (keeps cookies — no Google logout).
+    await killOrphanChromeForProfile(this.profileDir);
 
     const chromePath = findChrome();
     if (!chromePath) {
@@ -246,6 +289,8 @@ class AccountSession {
     this.cdp = null;
     this.latestFrame = null;
     this.status = 'STOPPED';
+    // Always clear orphan locks so the next launch reuses the same profile (stay logged in).
+    await killOrphanChromeForProfile(this.profileDir);
     if (clearProfile) {
       try {
         fs.rmSync(this.profileDir, { recursive: true, force: true });
@@ -1118,10 +1163,10 @@ class AccountSession {
   }
 
   /**
-   * Probe exit IP/country through the Chrome page (uses --proxy-server if set).
+   * Probe exit IP/country via curl through the configured proxy (avoids page
+   * "Execution context was destroyed" during navigation / rotate).
    */
   async refreshEgressIp() {
-    if (!this.page) return null;
     let proxyUrl = null;
     try {
       proxyUrl = await resolveEgressProxyUrl();
@@ -1130,39 +1175,41 @@ class AccountSession {
     }
     this.egressProxyUrl = proxyUrl;
     this.egressError = null;
+
+    const curlJson = async (url) => {
+      const args = ['-sS', '--max-time', '20', '-H', 'Accept: application/json', url];
+      if (proxyUrl) args.splice(1, 0, '-x', proxyUrl);
+      try {
+        const { stdout } = await execFileAsync('curl', args, {
+          encoding: 'utf8',
+          timeout: 25000,
+          windowsHide: true,
+          maxBuffer: 256 * 1024,
+        });
+        const text = String(stdout || '').trim();
+        if (!text) return null;
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    };
+
     try {
-      const info = await this.page.evaluate(async () => {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), 15000);
-        try {
-          try {
-            const r = await fetch('https://ipapi.co/json/', {
-              signal: ctrl.signal,
-              headers: { Accept: 'application/json' },
-            });
-            const j = await r.json();
-            if (j && j.ip && !j.error) {
-              return {
-                ip: String(j.ip),
-                country: String(j.country_name || j.country || ''),
-                countryCode: String(j.country_code || ''),
-              };
-            }
-          } catch (_) {
-            /* fallback */
-          }
-          try {
-            const r2 = await fetch('https://api.ipify.org?format=json', { signal: ctrl.signal });
-            const j2 = await r2.json();
-            if (j2 && j2.ip) return { ip: String(j2.ip), country: '', countryCode: '' };
-          } catch (_) {
-            /* ignore */
-          }
-          return null;
-        } finally {
-          clearTimeout(t);
+      let info = null;
+      const first = await curlJson('https://ipapi.co/json/');
+      if (first && first.ip && !first.error) {
+        info = {
+          ip: String(first.ip),
+          country: String(first.country_name || first.country || ''),
+          countryCode: String(first.country_code || ''),
+        };
+      } else {
+        const second = await curlJson('https://api.ipify.org?format=json');
+        if (second && second.ip) {
+          info = { ip: String(second.ip), country: '', countryCode: '' };
         }
-      });
+      }
+
       if (info && info.ip) {
         this.egressIp = info.ip;
         this.egressCountry = info.country || null;
@@ -1179,7 +1226,13 @@ class AccountSession {
       this.egressError = 'Could not resolve exit IP';
       return null;
     } catch (e) {
-      this.egressError = e.message || String(e);
+      const msg = e && e.message ? e.message : String(e);
+      // Never surface navigation destroy as a sticky proxy error
+      if (/Execution context was destroyed|Target closed|navigation/i.test(msg)) {
+        this.egressError = null;
+        return null;
+      }
+      this.egressError = msg.slice(0, 160);
       return null;
     }
   }

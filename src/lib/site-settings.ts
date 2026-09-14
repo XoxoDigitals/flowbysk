@@ -8,6 +8,7 @@ import {
   writeEgressProxyMirror,
 } from './egressProxy';
 import { randomUUID } from 'crypto';
+import { readSiteRuntime, writeSiteRuntimePatch } from './siteRuntime';
 
 export type PublicSiteSettings = {
   siteName: string;
@@ -16,12 +17,16 @@ export type PublicSiteSettings = {
   allowSignups: boolean;
   ticketSystemEnabled: boolean;
   contactPageEnabled: boolean;
+  maintenanceMode: boolean;
 };
 
 /** Admin-only fields (not exposed on public site-settings API). */
 export type AdminSiteSettings = PublicSiteSettings & {
   egressProxyUrl: string | null;
   egressProxies: EgressProxyEntry[];
+  proxyAutoRotateEnabled: boolean;
+  proxyAutoRotateMinutes: number;
+  lastProxyRotateAt: string | null;
 };
 
 const DEFAULTS: PublicSiteSettings = {
@@ -31,6 +36,7 @@ const DEFAULTS: PublicSiteSettings = {
   allowSignups: true,
   ticketSystemEnabled: true,
   contactPageEnabled: true,
+  maintenanceMode: false,
 };
 
 function mapPublic(row: {
@@ -40,7 +46,9 @@ function mapPublic(row: {
   allowSignups: boolean;
   ticketSystemEnabled: boolean;
   contactPageEnabled?: boolean;
+  maintenanceMode?: boolean;
 }): PublicSiteSettings {
+  const rt = readSiteRuntime();
   return {
     siteName: row.siteName || DEFAULTS.siteName,
     logoUrl: row.logoUrl,
@@ -48,6 +56,8 @@ function mapPublic(row: {
     allowSignups: row.allowSignups !== false,
     ticketSystemEnabled: row.ticketSystemEnabled !== false,
     contactPageEnabled: row.contactPageEnabled !== false,
+    maintenanceMode:
+      typeof row.maintenanceMode === 'boolean' ? row.maintenanceMode : rt.maintenanceMode,
   };
 }
 
@@ -75,14 +85,27 @@ function mapAdmin(row: {
   allowSignups: boolean;
   ticketSystemEnabled: boolean;
   contactPageEnabled?: boolean;
+  maintenanceMode?: boolean;
+  proxyAutoRotateEnabled?: boolean;
+  proxyAutoRotateMinutes?: number;
   egressProxyUrl?: string | null;
   egressProxies?: unknown;
 }): AdminSiteSettings {
   const egressProxies = proxiesFromRow(row);
+  const rt = readSiteRuntime();
   return {
     ...mapPublic(row),
     egressProxies,
     egressProxyUrl: activeEgressProxyUrl(egressProxies),
+    proxyAutoRotateEnabled:
+      typeof row.proxyAutoRotateEnabled === 'boolean'
+        ? row.proxyAutoRotateEnabled
+        : rt.proxyAutoRotateEnabled,
+    proxyAutoRotateMinutes:
+      typeof row.proxyAutoRotateMinutes === 'number'
+        ? row.proxyAutoRotateMinutes
+        : rt.proxyAutoRotateMinutes,
+    lastProxyRotateAt: rt.lastProxyRotateAt,
   };
 }
 
@@ -98,12 +121,13 @@ export async function getSiteSettings(): Promise<PublicSiteSettings> {
         allowSignups: DEFAULTS.allowSignups,
         ticketSystemEnabled: DEFAULTS.ticketSystemEnabled,
         contactPageEnabled: DEFAULTS.contactPageEnabled,
+        maintenanceMode: DEFAULTS.maintenanceMode,
       },
       update: {},
     });
-    return mapPublic(row);
+    return mapPublic(row as any);
   } catch {
-    return { ...DEFAULTS };
+    return { ...DEFAULTS, maintenanceMode: readSiteRuntime().maintenanceMode };
   }
 }
 
@@ -119,16 +143,29 @@ export async function getAdminSiteSettings(): Promise<AdminSiteSettings> {
         allowSignups: DEFAULTS.allowSignups,
         ticketSystemEnabled: DEFAULTS.ticketSystemEnabled,
         contactPageEnabled: DEFAULTS.contactPageEnabled,
+        maintenanceMode: DEFAULTS.maintenanceMode,
       },
       update: {},
     });
-    return mapAdmin(row);
+    const mapped = mapAdmin(row as any);
+    // Keep middleware/timer mirror in sync with DB
+    writeSiteRuntimePatch({
+      maintenanceMode: mapped.maintenanceMode,
+      proxyAutoRotateEnabled: mapped.proxyAutoRotateEnabled,
+      proxyAutoRotateMinutes: mapped.proxyAutoRotateMinutes,
+    });
+    return mapped;
   } catch {
     const mirror = readEgressProxyMirror();
+    const rt = readSiteRuntime();
     return {
       ...DEFAULTS,
+      maintenanceMode: rt.maintenanceMode,
       egressProxyUrl: mirror.url,
       egressProxies: mirror.proxies,
+      proxyAutoRotateEnabled: rt.proxyAutoRotateEnabled,
+      proxyAutoRotateMinutes: rt.proxyAutoRotateMinutes,
+      lastProxyRotateAt: rt.lastProxyRotateAt,
     };
   }
 }
@@ -140,6 +177,9 @@ export async function updateSiteSettings(data: {
   allowSignups?: boolean;
   ticketSystemEnabled?: boolean;
   contactPageEnabled?: boolean;
+  maintenanceMode?: boolean;
+  proxyAutoRotateEnabled?: boolean;
+  proxyAutoRotateMinutes?: number;
   egressProxyUrl?: string | null;
   egressProxies?: EgressProxyEntry[] | unknown;
 }): Promise<AdminSiteSettings> {
@@ -168,6 +208,24 @@ export async function updateSiteSettings(data: {
     writeEgressProxyMirror(proxies);
   }
 
+  if (
+    data.maintenanceMode !== undefined ||
+    data.proxyAutoRotateEnabled !== undefined ||
+    data.proxyAutoRotateMinutes !== undefined
+  ) {
+    writeSiteRuntimePatch({
+      ...(data.maintenanceMode !== undefined
+        ? { maintenanceMode: Boolean(data.maintenanceMode) }
+        : {}),
+      ...(data.proxyAutoRotateEnabled !== undefined
+        ? { proxyAutoRotateEnabled: Boolean(data.proxyAutoRotateEnabled) }
+        : {}),
+      ...(data.proxyAutoRotateMinutes !== undefined
+        ? { proxyAutoRotateMinutes: Number(data.proxyAutoRotateMinutes) || 60 }
+        : {}),
+    });
+  }
+
   try {
     const row = await prisma.siteSettings.upsert({
       where: { id: 'default' },
@@ -179,6 +237,9 @@ export async function updateSiteSettings(data: {
         allowSignups: data.allowSignups ?? DEFAULTS.allowSignups,
         ticketSystemEnabled: data.ticketSystemEnabled ?? DEFAULTS.ticketSystemEnabled,
         contactPageEnabled: data.contactPageEnabled ?? DEFAULTS.contactPageEnabled,
+        maintenanceMode: data.maintenanceMode ?? DEFAULTS.maintenanceMode,
+        proxyAutoRotateEnabled: data.proxyAutoRotateEnabled ?? false,
+        proxyAutoRotateMinutes: data.proxyAutoRotateMinutes ?? 60,
         egressProxyUrl: active ?? null,
         egressProxies: proxies ?? [],
       },
@@ -195,20 +256,33 @@ export async function updateSiteSettings(data: {
         ...(data.contactPageEnabled !== undefined
           ? { contactPageEnabled: Boolean(data.contactPageEnabled) }
           : {}),
+        ...(data.maintenanceMode !== undefined
+          ? { maintenanceMode: Boolean(data.maintenanceMode) }
+          : {}),
+        ...(data.proxyAutoRotateEnabled !== undefined
+          ? { proxyAutoRotateEnabled: Boolean(data.proxyAutoRotateEnabled) }
+          : {}),
+        ...(data.proxyAutoRotateMinutes !== undefined
+          ? { proxyAutoRotateMinutes: Math.max(1, Number(data.proxyAutoRotateMinutes) || 60) }
+          : {}),
         ...(proxies !== undefined
           ? { egressProxies: proxies, egressProxyUrl: active }
           : {}),
       },
     });
-    return mapAdmin(row);
+    return mapAdmin(row as any);
   } catch (e) {
     console.warn('[site-settings] DB update partial failure:', e);
     const publicPart = await getSiteSettings().catch(() => ({ ...DEFAULTS }));
     const mirror = readEgressProxyMirror();
+    const rt = readSiteRuntime();
     return {
       ...publicPart,
       egressProxies: proxies ?? mirror.proxies,
       egressProxyUrl: active ?? mirror.url,
+      proxyAutoRotateEnabled: rt.proxyAutoRotateEnabled,
+      proxyAutoRotateMinutes: rt.proxyAutoRotateMinutes,
+      lastProxyRotateAt: rt.lastProxyRotateAt,
     };
   }
 }

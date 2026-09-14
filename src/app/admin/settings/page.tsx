@@ -36,6 +36,11 @@ export default function AdminSettingsPage() {
   const [allowSignups, setAllowSignups] = useState(true);
   const [ticketSystemEnabled, setTicketSystemEnabled] = useState(true);
   const [contactPageEnabled, setContactPageEnabled] = useState(true);
+  const [maintenanceMode, setMaintenanceMode] = useState(false);
+  const [proxyAutoRotateEnabled, setProxyAutoRotateEnabled] = useState(false);
+  const [proxyAutoRotateMinutes, setProxyAutoRotateMinutes] = useState(60);
+  const [lastProxyRotateAt, setLastProxyRotateAt] = useState<string | null>(null);
+  const [rotatingProxy, setRotatingProxy] = useState(false);
   const [egressProxies, setEgressProxies] = useState<
     {
       id: string;
@@ -104,6 +109,12 @@ export default function AdminSettingsPage() {
           setAllowSignups(data.settings.allowSignups !== false);
           setTicketSystemEnabled(data.settings.ticketSystemEnabled !== false);
           setContactPageEnabled(data.settings.contactPageEnabled !== false);
+          setMaintenanceMode(data.settings.maintenanceMode === true);
+          setProxyAutoRotateEnabled(data.settings.proxyAutoRotateEnabled === true);
+          setProxyAutoRotateMinutes(
+            Math.max(1, Number(data.settings.proxyAutoRotateMinutes) || 60)
+          );
+          setLastProxyRotateAt(data.settings.lastProxyRotateAt || null);
         }
       }
       if (pRes.ok) {
@@ -172,12 +183,23 @@ export default function AdminSettingsPage() {
           allowSignups,
           ticketSystemEnabled,
           contactPageEnabled,
+          maintenanceMode,
+          proxyAutoRotateEnabled,
+          proxyAutoRotateMinutes,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Save failed');
       setMessage('Site settings saved.');
       if (data?.settings?.siteName) setSiteName(data.settings.siteName);
+      if (data?.settings) {
+        setMaintenanceMode(data.settings.maintenanceMode === true);
+        setProxyAutoRotateEnabled(data.settings.proxyAutoRotateEnabled === true);
+        setProxyAutoRotateMinutes(
+          Math.max(1, Number(data.settings.proxyAutoRotateMinutes) || 60)
+        );
+        setLastProxyRotateAt(data.settings.lastProxyRotateAt || null);
+      }
       await refreshSiteSettings();
     } catch (err: any) {
       setError(err.message || 'Save failed');
@@ -460,6 +482,21 @@ export default function AdminSettingsPage() {
             label={contactPageEnabled ? 'Enabled' : 'Disabled'}
           />
         </div>
+        <div className="flex items-center justify-between rounded-[11px] border border-amber-500/30 bg-amber-500/5 px-3 py-3">
+          <div>
+            <p className="text-sm font-medium text-[var(--ink)]">Maintenance mode</p>
+            <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
+              Shows a maintenance page site-wide. Bypass with{' '}
+              <code className="rounded bg-[var(--bg2)] px-1 font-mono text-[11px]">?mod_admin</code>{' '}
+              (anyone with that URL).
+            </p>
+          </div>
+          <Toggle
+            on={maintenanceMode}
+            onChange={setMaintenanceMode}
+            label={maintenanceMode ? 'ON' : 'Off'}
+          />
+        </div>
         {message && <p className="text-sm text-[var(--a1)]">{message}</p>}
         {error && <p className="text-sm text-rose-500">{error}</p>}
         <button type="submit" disabled={saving} className="btn-primary">
@@ -476,8 +513,105 @@ export default function AdminSettingsPage() {
           <p className="mt-1 text-[13px] text-[var(--ink3)]">
             Add proxies, click <b>Save proxies</b>, then <b>Check</b> to verify the exit IP and
             country. First enabled proxy is used by BiB Chrome and the Python worker. After
-            saving, restart BiB (`pm2 restart flowbysk-bib`).
+            saving, restart BiB (`pm2 restart flowbysk-bib`). Rotate keeps the same Chrome
+            profile so Google stays logged in.
           </p>
+        </div>
+        <div className="flex flex-col gap-3 rounded-[14px] border border-[var(--line)] bg-[var(--bg2)] p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium">Auto-rotate proxies</p>
+              <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
+                Automatically switch to the next enabled proxy on a timer and relaunch BiB
+                (no logout).
+              </p>
+            </div>
+            <Toggle
+              on={proxyAutoRotateEnabled}
+              onChange={setProxyAutoRotateEnabled}
+              label={proxyAutoRotateEnabled ? 'On' : 'Off'}
+            />
+          </div>
+          <label className="block text-sm">
+            <span className="mb-1.5 block font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">
+              INTERVAL (MINUTES)
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={1440}
+              value={proxyAutoRotateMinutes}
+              onChange={(e) => setProxyAutoRotateMinutes(Math.max(1, Number(e.target.value) || 60))}
+              className={`${inputClass} max-w-[160px]`}
+            />
+          </label>
+          {lastProxyRotateAt && (
+            <p className="text-[12px] text-[var(--ink3)]">
+              Last rotate: {new Date(lastProxyRotateAt).toLocaleString()}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn-secondary !text-[13px]"
+              disabled={saving}
+              onClick={async () => {
+                setSaving(true);
+                setProxyMsg('');
+                setProxyErr('');
+                try {
+                  const res = await fetch('/api/admin/settings', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      proxyAutoRotateEnabled,
+                      proxyAutoRotateMinutes,
+                    }),
+                  });
+                  const data = await res.json();
+                  if (!res.ok) throw new Error(data.error || 'Save failed');
+                  setProxyMsg('Auto-rotate settings saved.');
+                  setLastProxyRotateAt(data.settings?.lastProxyRotateAt || lastProxyRotateAt);
+                } catch (err: any) {
+                  setProxyErr(err.message || 'Save failed');
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              Save auto-rotate
+            </button>
+            <button
+              type="button"
+              className="btn-primary !text-[13px]"
+              disabled={rotatingProxy}
+              onClick={async () => {
+                setRotatingProxy(true);
+                setProxyMsg('');
+                setProxyErr('');
+                try {
+                  const res = await fetch('/api/admin/egress-proxies', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'rotate' }),
+                  });
+                  const data = await res.json();
+                  if (!res.ok) throw new Error(data.error || 'Rotate failed');
+                  setProxyMsg(
+                    `Rotated to ${data.to || 'next proxy'} · relaunched ${data.relaunched || 0} account(s)`
+                  );
+                  if (Array.isArray(data.proxies)) setEgressProxies(mapProxyList(data.proxies));
+                  setLastProxyRotateAt(new Date().toISOString());
+                } catch (err: any) {
+                  setProxyErr(err.message || 'Rotate failed');
+                } finally {
+                  setRotatingProxy(false);
+                }
+              }}
+            >
+              {rotatingProxy ? 'Rotating…' : 'Rotate manually'}
+            </button>
+          </div>
         </div>
         {egressProxies.length === 0 && (
           <p className="text-[13px] text-[var(--ink3)]">No proxies saved yet.</p>
