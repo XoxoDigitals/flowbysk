@@ -118,7 +118,13 @@ export default function AdminPm2LogsPage() {
 
   const clearLogs = async (scope: 'current' | 'all') => {
     const label = scope === 'all' ? 'ALL services (web + bib + api)' : `current tab (${tab})`;
-    if (!confirm(`Clear ${label} PM2 logs?\nA copy will be saved under History first.`)) return;
+    if (
+      !confirm(
+        `Clear ${label} PM2 logs AND delete History archives for this scope?\nThis cannot be undone.`
+      )
+    ) {
+      return;
+    }
     setClearing(true);
     setMsg('');
     setErr('');
@@ -130,6 +136,7 @@ export default function AdminPm2LogsPage() {
       if (!res.ok) throw new Error(data.error || 'Clear failed');
       setMsg(data.message || 'Cleared');
       setHistoryName(null);
+      setArchives([]);
       await fetchLogs();
     } catch (e: any) {
       setErr(e.message || 'Clear failed');

@@ -51,7 +51,7 @@ export async function GET(req: Request) {
   }
 }
 
-/** DELETE — clear live PM2 logs (archives a copy first). Super admin only. */
+/** DELETE — clear live PM2 logs and delete History archives for that scope. Super admin only. */
 export async function DELETE(req: Request) {
   try {
     await requireSuperAdmin(req);
@@ -61,13 +61,17 @@ export async function DELETE(req: Request) {
       scope === 'all' ? ('all' as const) : parseService(searchParams.get('service'));
 
     const result = clearPm2ServiceLogs(service);
+    const parts: string[] = [];
+    if (result.cleared.length) parts.push(`cleared ${result.cleared.length} live file(s)`);
+    if (result.deletedHistory.length) {
+      parts.push(`deleted ${result.deletedHistory.length} history file(s)`);
+    }
     return NextResponse.json({
       success: result.errors.length === 0,
       ...result,
       message:
-        result.cleared.length > 0
-          ? `Cleared ${result.cleared.length} log file(s)` +
-            (result.archived.length ? ` · archived ${result.archived.length}` : '')
+        parts.length > 0
+          ? parts.join(' · ')
           : result.errors[0] || 'No log files found to clear',
     });
   } catch (error: any) {

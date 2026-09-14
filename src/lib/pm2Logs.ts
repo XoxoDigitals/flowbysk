@@ -173,36 +173,18 @@ export function readPm2ServiceLogs(
 
 export function clearPm2ServiceLogs(service: Pm2Service | 'all'): {
   cleared: string[];
-  archived: string[];
+  deletedHistory: string[];
   errors: string[];
 } {
   const services: Pm2Service[] =
     service === 'all' ? ['web', 'bib', 'api'] : [service];
   const cleared: string[] = [];
-  const archived: string[] = [];
+  const deletedHistory: string[] = [];
   const errors: string[] = [];
-
-  const historyDir = path.join(process.cwd(), 'data', 'pm2-log-history');
-  try {
-    fs.mkdirSync(historyDir, { recursive: true });
-  } catch {
-    /* ignore */
-  }
-
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 
   for (const svc of services) {
     for (const f of listLogFiles(svc)) {
       try {
-        if (f.size > 0) {
-          const dest = path.join(historyDir, `${svc}-${stamp}-${f.name}`);
-          try {
-            fs.copyFileSync(f.path, dest);
-            archived.push(dest);
-          } catch {
-            /* archive optional */
-          }
-        }
         fs.truncateSync(f.path, 0);
         cleared.push(f.path);
       } catch (e: any) {
@@ -211,7 +193,30 @@ export function clearPm2ServiceLogs(service: Pm2Service | 'all'): {
     }
   }
 
-  return { cleared, archived, errors };
+  // Also wipe archived History copies for this scope
+  const historyDir = path.join(process.cwd(), 'data', 'pm2-log-history');
+  try {
+    if (fs.existsSync(historyDir)) {
+      const entries = fs.readdirSync(historyDir);
+      for (const name of entries) {
+        if (!name.endsWith('.log')) continue;
+        const matchAll = service === 'all';
+        const matchSvc = services.some((svc) => name.startsWith(`${svc}-`));
+        if (!matchAll && !matchSvc) continue;
+        const full = path.join(historyDir, name);
+        try {
+          fs.unlinkSync(full);
+          deletedHistory.push(name);
+        } catch (e: any) {
+          errors.push(`${full}: ${e?.message || 'delete failed'}`);
+        }
+      }
+    }
+  } catch (e: any) {
+    errors.push(`history: ${e?.message || 'failed'}`);
+  }
+
+  return { cleared, deletedHistory, errors };
 }
 
 export function listPm2LogHistory(service?: Pm2Service, limit = 40): {
