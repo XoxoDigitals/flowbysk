@@ -3,8 +3,11 @@ import { BrowserStatus } from '@prisma/client';
 import {
   maskProxyUrl,
   rotateActiveEgressProxy,
+  rotateProxyForAccount,
+  reassignUniqueProxies,
   readEgressProxyMirror,
   activeEgressProxyUrl,
+  getProxyUrlForAccount,
 } from './egressProxy';
 import {
   bibDisconnectAccount,
@@ -14,7 +17,6 @@ import {
 } from './bib';
 import { writeSiteRuntimePatch, readSiteRuntime } from './siteRuntime';
 
-let consecutiveUnusual = Math.max(0, readSiteRuntime().unusualActivityStreak || 0);
 let rotating = false;
 
 const UNUSUAL_RE =
@@ -25,7 +27,6 @@ export function isUnusualActivityError(raw: unknown): boolean {
 }
 
 export function resetUnusualActivityStreak(): void {
-  consecutiveUnusual = 0;
   try {
     writeSiteRuntimePatch({ unusualActivityStreak: 0 });
   } catch {
@@ -34,25 +35,170 @@ export function resetUnusualActivityStreak(): void {
 }
 
 export function getUnusualActivityStreak(): number {
-  return consecutiveUnusual;
-}
-
-function persistStreak(n: number) {
-  consecutiveUnusual = n;
-  try {
-    writeSiteRuntimePatch({ unusualActivityStreak: n });
-  } catch {
-    /* ignore */
-  }
+  return Math.max(0, readSiteRuntime().unusualActivityStreak || 0);
 }
 
 async function sleep(ms: number) {
   await new Promise((r) => setTimeout(r, ms));
 }
 
+async function relaunchAccount(acc: {
+  id: string;
+  maxParallelLimit?: number | null;
+  flowProjectIds?: unknown;
+  profileDir?: string | null;
+}) {
+  await bibDisconnectAccount(acc.id, false);
+  await sleep(800);
+  await bibLaunchAccount(acc.id, {
+    maxSlots: acc.maxParallelLimit || 5,
+    projectIds: Array.isArray(acc.flowProjectIds) ? (acc.flowProjectIds as string[]) : [],
+    profileDir: acc.profileDir,
+  });
+  for (let i = 0; i < 8; i++) {
+    await sleep(750);
+    try {
+      const st = await bibAccountStatus(acc.id);
+      if (st?.running || st?.status === 'READY' || st?.status === 'NEEDS_LOGIN') break;
+    } catch {
+      /* retry */
+    }
+  }
+}
+
+async function listRelaunchTargets(onlyAccountId?: string) {
+  const accounts = await prisma.providerAccount.findMany({
+    where: onlyAccountId
+      ? { id: onlyAccountId }
+      : {
+          OR: [
+            { browserStatus: BrowserStatus.READY },
+            { browserStatus: BrowserStatus.NEEDS_LOGIN },
+            { browserStatus: BrowserStatus.STARTING },
+            { profileDir: { not: null } },
+          ],
+        },
+    select: {
+      id: true,
+      maxParallelLimit: true,
+      flowProjectIds: true,
+      profileDir: true,
+      browserStatus: true,
+    },
+  });
+
+  if (onlyAccountId) return accounts;
+
+  let liveIds: string[] = [];
+  try {
+    const r = await bibFetch('/accounts');
+    const data = await r.json().catch(() => ({}));
+    liveIds = Array.isArray(data.accounts)
+      ? data.accounts
+          .filter((a: any) => a?.running || a?.status === 'READY' || a?.status === 'NEEDS_LOGIN')
+          .map((a: any) => a.accountId)
+      : [];
+  } catch {
+    /* ignore */
+  }
+
+  if (liveIds.length > 0) return accounts.filter((a) => liveIds.includes(a.id));
+  return accounts.filter(
+    (a) =>
+      a.browserStatus === BrowserStatus.READY ||
+      a.browserStatus === BrowserStatus.NEEDS_LOGIN ||
+      !!a.profileDir
+  );
+}
+
 /**
- * Rotate active egress proxy and relaunch BiB Chromes on the same profiles
- * (cookies preserved — no Google logout). Clears BiB proxy cache first.
+ * Rotate ONE account onto a different unique proxy and relaunch that Chrome only.
+ * Used after unusual-activity: retry → rotate this account → retry again.
+ */
+export async function rotateProxyAndRelaunchForAccount(
+  accountId: string,
+  opts?: { reason?: string }
+): Promise<{
+  ok: boolean;
+  rotated: boolean;
+  from: string | null;
+  to: string | null;
+  relaunched: number;
+  error?: string;
+}> {
+  if (!accountId) {
+    return { ok: false, rotated: false, from: null, to: null, relaunched: 0, error: 'accountId required' };
+  }
+  if (rotating) {
+    return {
+      ok: false,
+      rotated: false,
+      from: null,
+      to: getProxyUrlSafe(accountId),
+      relaunched: 0,
+      error: 'Rotation already in progress',
+    };
+  }
+
+  rotating = true;
+  try {
+    const rotated = rotateProxyForAccount(accountId);
+    if (!rotated.ok || !rotated.to) {
+      return {
+        ok: false,
+        rotated: false,
+        from: rotated.from,
+        to: rotated.to,
+        relaunched: 0,
+        error: rotated.error || 'Need ≥2 enabled proxies to rotate',
+      };
+    }
+
+    console.warn(
+      `[proxy-rotate] account ${accountId.slice(0, 8)} ${opts?.reason || 'manual'} → ${maskProxyUrl(rotated.to)}`
+    );
+
+    try {
+      await bibFetch('/egress-proxy/clear-cache', { method: 'POST', body: '{}' });
+    } catch (e) {
+      console.warn('[proxy-rotate] clear-cache:', e);
+    }
+
+    const targets = await listRelaunchTargets(accountId);
+    let relaunched = 0;
+    for (const acc of targets) {
+      try {
+        await relaunchAccount(acc);
+        relaunched += 1;
+      } catch (e) {
+        console.warn(`[proxy-rotate] relaunch ${acc.id}:`, e);
+      }
+    }
+
+    writeSiteRuntimePatch({
+      lastProxyRotateAt: new Date().toISOString(),
+      lastProxyRotateReason: String(opts?.reason || `account ${accountId.slice(0, 8)}`).slice(0, 120),
+      unusualActivityStreak: 0,
+    });
+
+    return {
+      ok: true,
+      rotated: true,
+      from: rotated.from,
+      to: rotated.to,
+      relaunched,
+    };
+  } finally {
+    rotating = false;
+  }
+}
+
+function getProxyUrlSafe(accountId: string): string | null {
+  return getProxyUrlForAccount(accountId);
+}
+
+/**
+ * Manual / auto-timer: rotate pool order, reassign unique proxies to live accounts, relaunch all.
  */
 export async function performEgressProxyRotateAndRelaunch(opts?: {
   reason?: string;
@@ -63,6 +209,7 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
   to: string | null;
   relaunched: number;
   error?: string;
+  reason?: string;
 }> {
   if (rotating) {
     return {
@@ -99,70 +246,13 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
       console.warn('[proxy-rotate] clear-cache:', e);
     }
 
-    const accounts = await prisma.providerAccount.findMany({
-      where: {
-        OR: [
-          { browserStatus: BrowserStatus.READY },
-          { browserStatus: BrowserStatus.NEEDS_LOGIN },
-          { browserStatus: BrowserStatus.STARTING },
-          { profileDir: { not: null } },
-        ],
-      },
-      select: {
-        id: true,
-        maxParallelLimit: true,
-        flowProjectIds: true,
-        profileDir: true,
-        browserStatus: true,
-      },
-    });
-
-    let liveIds: string[] = [];
-    try {
-      const r = await bibFetch('/accounts');
-      const data = await r.json().catch(() => ({}));
-      liveIds = Array.isArray(data.accounts)
-        ? data.accounts
-            .filter((a: any) => a?.running || a?.status === 'READY' || a?.status === 'NEEDS_LOGIN')
-            .map((a: any) => a.accountId)
-        : [];
-    } catch {
-      /* ignore */
-    }
-
-    const targets =
-      liveIds.length > 0
-        ? accounts.filter((a) => liveIds.includes(a.id))
-        : accounts.filter(
-            (a) =>
-              a.browserStatus === BrowserStatus.READY ||
-              a.browserStatus === BrowserStatus.NEEDS_LOGIN ||
-              !!a.profileDir
-          );
+    const targets = await listRelaunchTargets();
+    reassignUniqueProxies(targets.map((a) => a.id));
 
     let relaunched = 0;
     for (const acc of targets) {
       try {
-        // clearProfile=false keeps Google cookies in userDataDir
-        await bibDisconnectAccount(acc.id, false);
-        await sleep(800);
-        await bibLaunchAccount(acc.id, {
-          maxSlots: acc.maxParallelLimit || 5,
-          projectIds: Array.isArray(acc.flowProjectIds)
-            ? (acc.flowProjectIds as string[])
-            : [],
-          profileDir: acc.profileDir,
-        });
-        // Wait briefly for Chrome to come up before next jobs hit generate
-        for (let i = 0; i < 8; i++) {
-          await sleep(750);
-          try {
-            const st = await bibAccountStatus(acc.id);
-            if (st?.running || st?.status === 'READY' || st?.status === 'NEEDS_LOGIN') break;
-          } catch {
-            /* retry */
-          }
-        }
+        await relaunchAccount(acc);
         relaunched += 1;
       } catch (e) {
         console.warn(`[proxy-rotate] relaunch ${acc.id}:`, e);
@@ -172,8 +262,8 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
     writeSiteRuntimePatch({
       lastProxyRotateAt: new Date().toISOString(),
       lastProxyRotateReason: String(opts?.reason || 'manual').slice(0, 120),
+      unusualActivityStreak: 0,
     });
-    consecutiveUnusual = 0;
 
     return {
       ok: true,
@@ -189,31 +279,29 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
 }
 
 /**
- * Call on each unusual-activity failure (including system-retry attempts).
- * After 3 consecutive hits, rotate egress proxy and relaunch BiB Chromes.
+ * Legacy streak helper — unusual flow now lives in withSystemErrorRetry
+ * (retry → rotate account proxy → retry). Kept for video status hooks.
  */
-export async function noteUnusualActivityFailure(errorMessage: unknown): Promise<{
+export async function noteUnusualActivityFailure(
+  errorMessage: unknown,
+  accountId?: string
+): Promise<{
   rotated: boolean;
   streak: number;
   proxy?: string | null;
 }> {
   if (!isUnusualActivityError(errorMessage)) {
-    return { rotated: false, streak: consecutiveUnusual };
+    return { rotated: false, streak: getUnusualActivityStreak() };
   }
-  const next = consecutiveUnusual + 1;
-  persistStreak(next);
-  console.warn(`[proxy-rotate] unusual streak ${next}/3 — ${String(errorMessage).slice(0, 120)}`);
-  if (next < 3 || rotating) {
-    return { rotated: false, streak: next };
+  if (accountId) {
+    const result = await rotateProxyAndRelaunchForAccount(accountId, {
+      reason: 'unusual activity',
+    });
+    return {
+      rotated: result.rotated,
+      streak: 0,
+      proxy: result.to,
+    };
   }
-
-  const result = await performEgressProxyRotateAndRelaunch({
-    reason: `unusual activity (×${next})`,
-  });
-  persistStreak(0);
-  return {
-    rotated: result.rotated,
-    streak: 0,
-    proxy: result.to,
-  };
+  return { rotated: false, streak: getUnusualActivityStreak() };
 }

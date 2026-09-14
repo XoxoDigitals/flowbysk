@@ -341,6 +341,7 @@ export async function POST(req: Request) {
           label: `api-ingredients-bib:${job.id}`,
           delayMs: 2000,
           maxAttempts: 2,
+          providerAccountId: provider.id,
         });
       } catch (err) {
         if (!isMediaRepairableError(err) || !flowRefs.length) throw err;

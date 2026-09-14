@@ -1,9 +1,15 @@
 /**
  * Shared “System Error” detection + automatic retries before failing a generation.
  * Policy violations are NOT retried (user-facing rejection stays).
+ *
+ * Unusual activity / too-much-traffic:
+ *   1) retry once on same proxy
+ *   2) rotate THAT account’s proxy + relaunch BiB
+ *   3) retry once more
+ *   then throw (do not fail on the first unusual hit).
  */
 
-import { isUnusualActivityError, noteUnusualActivityFailure } from './unusualActivityProxyRotate';
+import { isUnusualActivityError, rotateProxyAndRelaunchForAccount } from './unusualActivityProxyRotate';
 
 export function isPolicyGenerationError(raw: unknown): boolean {
   const text = String(raw ?? '').trim();
@@ -52,9 +58,11 @@ export type SystemRetryOptions = {
   delayMs?: number;
   /** Override wait specifically for throttle errors (default 10000). */
   throttleDelayMs?: number;
-  /** Total attempts including the first (default 5). */
+  /** Total attempts including the first for normal system errors (default 5). */
   maxAttempts?: number;
   label?: string;
+  /** Provider account id — required for per-account unusual proxy rotate. */
+  providerAccountId?: string;
   /** Called before each retry attempt (after the first failure). */
   onRetry?: (err: unknown, attempt: number) => void | Promise<void>;
   /** If returns false, skip the automatic retry (e.g. user cancelled). */
@@ -64,7 +72,7 @@ export type SystemRetryOptions = {
 /**
  * Run `fn`. On system-class errors, retry up to maxAttempts-1 more times.
  * Policy errors propagate immediately.
- * Throttle (USER_REQUESTS_THROTTLED / e=4) waits 10s by default before retry.
+ * Unusual: retry → rotate account proxy → retry → then fail.
  */
 export async function withSystemErrorRetry<T>(
   fn: () => Promise<T>,
@@ -76,7 +84,10 @@ export async function withSystemErrorRetry<T>(
   const label = opts.label || 'generation';
 
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  let unusualHits = 0;
+  let normalAttempts = 0;
+
+  while (true) {
     try {
       return await fn();
     } catch (err) {
@@ -85,25 +96,72 @@ export async function withSystemErrorRetry<T>(
       if (/stop by user|cancelled by user/i.test(msg)) throw err;
       if (!isSystemGenerationError(msg)) throw err;
 
-      // Each unusual / too-much-traffic hit counts toward auto proxy-rotate (incl. retries).
-      if (isUnusualActivityError(msg)) {
-        noteUnusualActivityFailure(msg).catch((e) =>
-          console.warn('[proxy-rotate] streak update failed:', e)
-        );
-      }
-
-      if (attempt >= maxAttempts) break;
       if (opts.shouldContinue && !(await opts.shouldContinue())) {
         throw err;
       }
+
+      // Unusual / too-much-traffic: never fail on first hit.
+      if (isUnusualActivityError(msg)) {
+        unusualHits += 1;
+        console.warn(
+          `[system-retry] ${label}: unusual #${unusualHits} — ${msg.slice(0, 160)}`
+        );
+
+        if (unusualHits === 1) {
+          console.warn(`[system-retry] ${label}: retrying same proxy…`);
+          if (opts.onRetry) await opts.onRetry(err, unusualHits);
+          await new Promise((r) => setTimeout(r, Math.max(delayMs, 3000)));
+          if (opts.shouldContinue && !(await opts.shouldContinue())) {
+            throw new Error('Stop by user');
+          }
+          continue;
+        }
+
+        if (unusualHits === 2) {
+          if (opts.providerAccountId) {
+            console.warn(
+              `[system-retry] ${label}: rotating proxy for account ${opts.providerAccountId.slice(0, 8)}…`
+            );
+            try {
+              const rot = await rotateProxyAndRelaunchForAccount(opts.providerAccountId, {
+                reason: 'unusual activity',
+              });
+              console.warn(
+                `[system-retry] ${label}: proxy rotate ${rot.rotated ? 'ok' : 'skipped'} → ${
+                  rot.to || rot.error || 'n/a'
+                }`
+              );
+            } catch (e) {
+              console.warn(`[system-retry] ${label}: proxy rotate failed:`, e);
+            }
+          } else {
+            console.warn(
+              `[system-retry] ${label}: unusual #2 but no providerAccountId — cannot rotate`
+            );
+          }
+          if (opts.onRetry) await opts.onRetry(err, unusualHits);
+          await new Promise((r) => setTimeout(r, Math.max(delayMs, 4000)));
+          if (opts.shouldContinue && !(await opts.shouldContinue())) {
+            throw new Error('Stop by user');
+          }
+          continue;
+        }
+
+        // unusualHits >= 3 → give up
+        break;
+      }
+
+      // Normal system errors
+      normalAttempts += 1;
+      if (normalAttempts >= maxAttempts) break;
 
       const waitMs = isThrottleGenerationError(msg)
         ? Math.max(delayMs, throttleDelayMs)
         : delayMs;
       console.warn(
-        `[system-retry] ${label}: attempt ${attempt}/${maxAttempts} failed — ${msg.slice(0, 180)}; retrying in ${waitMs}ms…`
+        `[system-retry] ${label}: attempt ${normalAttempts}/${maxAttempts} failed — ${msg.slice(0, 180)}; retrying in ${waitMs}ms…`
       );
-      if (opts.onRetry) await opts.onRetry(err, attempt);
+      if (opts.onRetry) await opts.onRetry(err, normalAttempts);
       if (opts.shouldContinue && !(await opts.shouldContinue())) {
         throw new Error('Stop by user');
       }
@@ -113,6 +171,7 @@ export async function withSystemErrorRetry<T>(
       }
     }
   }
+
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr || 'Generation failed'));
 }
 

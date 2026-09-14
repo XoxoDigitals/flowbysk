@@ -461,6 +461,7 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
       {
         label: `queue-job:${job.id}`,
         delayMs: 1800,
+        providerAccountId: provider.id,
         shouldContinue: async () => !(await isJobCancelled(job.id)),
         onRetry: async () => {
           if (await isJobCancelled(job.id)) return;

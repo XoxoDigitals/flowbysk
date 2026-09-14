@@ -298,7 +298,7 @@ export async function POST(req: Request) {
             workerData: data,
           };
         },
-        { label: `api-i2i-bib:${job.id}`, delayMs: 2000, maxAttempts: 3 }
+        { label: `api-i2i-bib:${job.id}`, delayMs: 2000, maxAttempts: 3, providerAccountId: provider.id }
       );
 
       const latest = await prisma.generationJob.findUnique({ where: { id: job.id } });

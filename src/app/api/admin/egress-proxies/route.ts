@@ -55,6 +55,7 @@ export async function GET(req: Request) {
       success: true,
       proxies,
       activeUrl: activeEgressProxyUrl(proxies),
+      assignments: mirror.assignments || {},
       lastProxyRotateAt: rt.lastProxyRotateAt,
       lastProxyRotateReason: rt.lastProxyRotateReason,
     });

@@ -214,7 +214,7 @@ class AccountSession {
       ];
       let proxyAuth = null;
       try {
-        const proxyUrl = await resolveEgressProxyUrl({ force: true });
+        const proxyUrl = await resolveEgressProxyUrl({ force: true, accountId: this.accountId });
         if (proxyUrl) {
           const parsed = parseProxyForChrome(proxyUrl);
           launchArgs.push(`--proxy-server=${parsed.server}`);
@@ -1175,7 +1175,7 @@ class AccountSession {
   async refreshEgressIp() {
     let proxyUrl = null;
     try {
-      proxyUrl = await resolveEgressProxyUrl();
+      proxyUrl = await resolveEgressProxyUrl({ accountId: this.accountId });
     } catch {
       proxyUrl = null;
     }

@@ -285,7 +285,7 @@ export async function POST(req: Request) {
 
           throw new Error('BiB provider required for image generation — Launch account in Admin');
         },
-        { label: `api-image:${job.id}`, delayMs: 1800 }
+        { label: `api-image:${job.id}`, delayMs: 1800, providerAccountId: provider.id }
       );
 
       // User may have pressed Stop while worker was running
