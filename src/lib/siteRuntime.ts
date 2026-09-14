@@ -15,6 +15,7 @@ export type SiteRuntime = {
   proxyAutoRotateEnabled: boolean;
   proxyAutoRotateMinutes: number;
   lastProxyRotateAt: string | null;
+  lastProxyRotateReason: string | null;
   updatedAt: string | null;
 };
 
@@ -23,6 +24,7 @@ const DEFAULTS: SiteRuntime = {
   proxyAutoRotateEnabled: false,
   proxyAutoRotateMinutes: 60,
   lastProxyRotateAt: null,
+  lastProxyRotateReason: null,
   updatedAt: null,
 };
 
@@ -56,6 +58,8 @@ export function readSiteRuntime(): SiteRuntime {
       ),
       lastProxyRotateAt:
         typeof raw.lastProxyRotateAt === 'string' ? raw.lastProxyRotateAt : null,
+      lastProxyRotateReason:
+        typeof raw.lastProxyRotateReason === 'string' ? raw.lastProxyRotateReason : null,
       updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : null,
     };
   } catch {

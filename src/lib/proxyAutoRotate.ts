@@ -18,7 +18,7 @@ async function tick() {
 
   try {
     await performEgressProxyRotateAndRelaunch({
-      reason: `auto-rotate every ${minutes}m`,
+      reason: `auto (${minutes}m)`,
     });
   } catch (e) {
     console.warn('[proxy-auto-rotate]', e);

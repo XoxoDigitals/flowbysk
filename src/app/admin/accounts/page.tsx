@@ -98,7 +98,10 @@ export default function AdminAccountsPage() {
     ip?: string | null;
     country?: string | null;
   }>({ url: null });
+  const [lastProxyRotateAt, setLastProxyRotateAt] = useState<string | null>(null);
+  const [lastProxyRotateReason, setLastProxyRotateReason] = useState<string | null>(null);
   const [rotatingProxy, setRotatingProxy] = useState(false);
+  const [rotateMsg, setRotateMsg] = useState('');
 
   // Edit form state
   const [editPlanTier, setEditPlanTier] = useState('Google AI Ultra');
@@ -124,6 +127,10 @@ export default function AdminAccountsPage() {
         ip: active?.ip ?? null,
         country: active?.country ?? null,
       });
+      if (data.lastProxyRotateAt) setLastProxyRotateAt(data.lastProxyRotateAt);
+      if (typeof data.lastProxyRotateReason === 'string') {
+        setLastProxyRotateReason(data.lastProxyRotateReason);
+      }
     } catch {
       /* ignore */
     }
@@ -157,6 +164,7 @@ export default function AdminAccountsPage() {
       return;
     }
     setRotatingProxy(true);
+    setRotateMsg('Rotating proxy…');
     try {
       const res = await fetch('/api/admin/egress-proxies', {
         method: 'POST',
@@ -165,17 +173,22 @@ export default function AdminAccountsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Rotate failed');
+      if (data.lastProxyRotateAt) setLastProxyRotateAt(data.lastProxyRotateAt);
+      if (typeof data.lastProxyRotateReason === 'string') {
+        setLastProxyRotateReason(data.lastProxyRotateReason);
+      }
       await fetchActiveProxy();
       await fetchAccounts();
-      alert(
+      setRotateMsg(
         data.rotated
-          ? `Rotated to ${data.to || 'next proxy'} · relaunched ${data.relaunched || 0} account(s)`
+          ? `Rotated · relaunched ${data.relaunched || 0} account(s)`
           : data.error || 'Rotate did not complete'
       );
     } catch (err: any) {
-      alert(err.message || 'Rotate failed');
+      setRotateMsg(err.message || 'Rotate failed');
     } finally {
       setRotatingProxy(false);
+      setTimeout(() => setRotateMsg(''), 6000);
     }
   };
 
@@ -788,6 +801,19 @@ export default function AdminAccountsPage() {
                             {[activeProxy.ip, activeProxy.country].filter(Boolean).join(' · ')}
                           </p>
                         )}
+                        {lastProxyRotateAt ? (
+                          <p className="mt-1 flex items-center gap-1 text-[10px] text-[var(--ink3)]">
+                            <Clock className="h-3 w-3 shrink-0" />
+                            Last rotate:{' '}
+                            {new Date(lastProxyRotateAt).toLocaleString()}
+                            {lastProxyRotateReason ? ` · ${lastProxyRotateReason}` : ''}
+                          </p>
+                        ) : (
+                          <p className="mt-1 text-[10px] text-[var(--ink3)]">No rotate recorded yet</p>
+                        )}
+                        {rotateMsg ? (
+                          <p className="mt-1 text-[10px] text-[var(--a1)]">{rotateMsg}</p>
+                        ) : null}
                       </div>
                       <button
                         type="button"
@@ -797,7 +823,7 @@ export default function AdminAccountsPage() {
                         title="Rotate to next proxy and relaunch (keeps Google login)"
                       >
                         <RefreshCcw className={`h-3 w-3 ${rotatingProxy ? 'animate-spin' : ''}`} />
-                        {rotatingProxy ? '…' : 'Rotate'}
+                        {rotatingProxy ? 'Rotating…' : 'Rotate'}
                       </button>
                     </div>
                   </div>

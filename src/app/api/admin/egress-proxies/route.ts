@@ -9,6 +9,7 @@ import {
   writeEgressProxyMirror,
 } from '@/lib/egressProxy';
 import { prisma } from '@/lib/prisma';
+import { readSiteRuntime } from '@/lib/siteRuntime';
 
 async function syncDbBestEffort(proxies: EgressProxyEntry[]) {
   try {
@@ -49,10 +50,13 @@ export async function GET(req: Request) {
         /* ignore */
       }
     }
+    const rt = readSiteRuntime();
     return NextResponse.json({
       success: true,
       proxies,
       activeUrl: activeEgressProxyUrl(proxies),
+      lastProxyRotateAt: rt.lastProxyRotateAt,
+      lastProxyRotateReason: rt.lastProxyRotateReason,
     });
   } catch (error: any) {
     return NextResponse.json(
@@ -127,8 +131,9 @@ export async function POST(req: Request) {
         '@/lib/unusualActivityProxyRotate'
       );
       const { maskProxyUrl } = await import('@/lib/egressProxy');
-      const result = await performEgressProxyRotateAndRelaunch({ reason: 'manual admin rotate' });
+      const result = await performEgressProxyRotateAndRelaunch({ reason: 'manual' });
       const mirror = readEgressProxyMirror();
+      const rt = readSiteRuntime();
       return NextResponse.json({
         success: result.ok,
         rotated: result.rotated,
@@ -138,6 +143,8 @@ export async function POST(req: Request) {
         relaunched: result.relaunched,
         error: result.error,
         proxies: mirror.proxies,
+        lastProxyRotateAt: rt.lastProxyRotateAt,
+        lastProxyRotateReason: rt.lastProxyRotateReason,
       }, { status: result.ok ? 200 : 400 });
     }
 

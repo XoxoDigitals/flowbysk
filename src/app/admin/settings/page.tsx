@@ -40,6 +40,7 @@ export default function AdminSettingsPage() {
   const [proxyAutoRotateEnabled, setProxyAutoRotateEnabled] = useState(false);
   const [proxyAutoRotateMinutes, setProxyAutoRotateMinutes] = useState(60);
   const [lastProxyRotateAt, setLastProxyRotateAt] = useState<string | null>(null);
+  const [lastProxyRotateReason, setLastProxyRotateReason] = useState<string | null>(null);
   const [rotatingProxy, setRotatingProxy] = useState(false);
   const [egressProxies, setEgressProxies] = useState<
     {
@@ -115,6 +116,7 @@ export default function AdminSettingsPage() {
             Math.max(1, Number(data.settings.proxyAutoRotateMinutes) || 60)
           );
           setLastProxyRotateAt(data.settings.lastProxyRotateAt || null);
+          setLastProxyRotateReason(data.settings.lastProxyRotateReason || null);
         }
       }
       if (pRes.ok) {
@@ -132,6 +134,10 @@ export default function AdminSettingsPage() {
             lastError: p.lastError ?? null,
           }))
         );
+        if (data.lastProxyRotateAt) setLastProxyRotateAt(data.lastProxyRotateAt);
+        if (typeof data.lastProxyRotateReason === 'string') {
+          setLastProxyRotateReason(data.lastProxyRotateReason);
+        }
       }
       if (gRes.ok) {
         const data = await gRes.json();
@@ -549,6 +555,7 @@ export default function AdminSettingsPage() {
           {lastProxyRotateAt && (
             <p className="text-[12px] text-[var(--ink3)]">
               Last rotate: {new Date(lastProxyRotateAt).toLocaleString()}
+              {lastProxyRotateReason ? ` · ${lastProxyRotateReason}` : ''}
             </p>
           )}
           <div className="flex flex-wrap gap-2">
@@ -602,7 +609,8 @@ export default function AdminSettingsPage() {
                     `Rotated to ${data.to || 'next proxy'} · relaunched ${data.relaunched || 0} account(s)`
                   );
                   if (Array.isArray(data.proxies)) setEgressProxies(mapProxyList(data.proxies));
-                  setLastProxyRotateAt(new Date().toISOString());
+                  setLastProxyRotateAt(data.lastProxyRotateAt || new Date().toISOString());
+                  setLastProxyRotateReason(data.lastProxyRotateReason || 'manual');
                 } catch (err: any) {
                   setProxyErr(err.message || 'Rotate failed');
                 } finally {

@@ -87,6 +87,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     }
   }, [loading, isAdmin, pathname, canAccessAccounts, router]);
 
+  useEffect(() => {
+    if (!loading && isAdmin && pathname?.startsWith('/admin/logs') && adminRole !== 'SUPER_ADMIN') {
+      router.replace('/admin');
+    }
+  }, [loading, isAdmin, pathname, adminRole, router]);
+
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
     router.push('/');
@@ -116,7 +122,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     { name: 'Messages', href: '/admin/messages', icon: Mail },
     { name: 'Tickets', href: '/admin/tickets', icon: LifeBuoy },
     { name: 'Stripe', href: '/admin/stripe', icon: CreditCard },
-    { name: 'Logs', href: '/admin/logs', icon: ShieldAlert },
+    ...(adminRole === 'SUPER_ADMIN'
+      ? [{ name: 'Logs', href: '/admin/logs', icon: ShieldAlert }]
+      : []),
     { name: 'Studio Logs', href: '/admin/studio-logs', icon: Terminal },
     { name: 'Settings', href: '/admin/settings', icon: Settings },
   ];

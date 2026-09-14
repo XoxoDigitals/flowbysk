@@ -218,7 +218,11 @@ export default function AdminStudioLogsPage() {
             title={queuePaused ? 'Resume dispatching IN_QUEUE jobs' : 'Stop starting new pending jobs'}
           >
             {queuePaused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
-            {queuePaused ? 'Start Queue Pending' : 'Stop Queue Pending'}
+            {actionBusy === 'start_queue' || actionBusy === 'pause_queue'
+              ? 'Working…'
+              : queuePaused
+                ? 'Start Queue Pending'
+                : 'Stop Queue Pending'}
           </button>
           <button
             type="button"
@@ -226,10 +230,10 @@ export default function AdminStudioLogsPage() {
             onClick={() => {
               if (confirm('Cancel all currently generating jobs?')) runAction('cancel_generating');
             }}
-            className="inline-flex items-center gap-1.5 rounded-[11px] border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-500"
+            className="inline-flex items-center gap-1.5 rounded-[11px] border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-500 disabled:opacity-50"
           >
-            <XCircle className="h-3.5 w-3.5" />
-            Cancel Generating
+            <XCircle className={`h-3.5 w-3.5 ${actionBusy === 'cancel_generating' ? 'animate-pulse' : ''}`} />
+            {actionBusy === 'cancel_generating' ? 'Cancelling…' : 'Cancel Generating'}
           </button>
           <button
             type="button"
@@ -237,10 +241,10 @@ export default function AdminStudioLogsPage() {
             onClick={() => {
               if (confirm('Retry recent failed prompts?')) runAction('retry_failed');
             }}
-            className="inline-flex items-center gap-1.5 rounded-[11px] border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-600"
+            className="inline-flex items-center gap-1.5 rounded-[11px] border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-600 disabled:opacity-50"
           >
-            <RotateCcw className="h-3.5 w-3.5" />
-            Retry Failed Prompts
+            <RotateCcw className={`h-3.5 w-3.5 ${actionBusy === 'retry_failed' ? 'animate-spin' : ''}`} />
+            {actionBusy === 'retry_failed' ? 'Retrying…' : 'Retry Failed Prompts'}
           </button>
           <button
             type="button"
@@ -424,26 +428,28 @@ export default function AdminStudioLogsPage() {
                           <>
                             <button
                               type="button"
-                              className="inline-flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[10px] font-medium text-rose-500"
+                              disabled={!!actionBusy}
+                              className="inline-flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[10px] font-medium text-rose-500 disabled:opacity-50"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 runAction('cancel', { runId: run.runId || undefined, jobId: run.runId ? undefined : run.id });
                               }}
                             >
-                              <XCircle className="h-3 w-3" />
-                              Cancel / Stop
+                              <XCircle className={`h-3 w-3 ${actionBusy === 'cancel' ? 'animate-pulse' : ''}`} />
+                              {actionBusy === 'cancel' ? 'Stopping…' : 'Cancel / Stop'}
                             </button>
                             {run.status === 'GENERATING' && (
                               <button
                                 type="button"
-                                className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10px] font-medium text-sky-600"
+                                disabled={!!actionBusy}
+                                className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10px] font-medium text-sky-600 disabled:opacity-50"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   runAction('retry', { runId: run.runId || undefined, jobId: run.runId ? undefined : run.id });
                                 }}
                               >
-                                <RotateCcw className="h-3 w-3" />
-                                Retry Generating
+                                <RotateCcw className={`h-3 w-3 ${actionBusy === 'retry' ? 'animate-spin' : ''}`} />
+                                {actionBusy === 'retry' ? 'Retrying…' : 'Retry Generating'}
                               </button>
                             )}
                           </>
@@ -451,14 +457,15 @@ export default function AdminStudioLogsPage() {
                         {(run.status === 'FAILED' || run.status === 'CANCELLED') && (
                           <button
                             type="button"
-                            className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10px] font-medium text-sky-600"
+                            disabled={!!actionBusy}
+                            className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10px] font-medium text-sky-600 disabled:opacity-50"
                             onClick={(e) => {
                               e.stopPropagation();
                               runAction('retry', { runId: run.runId || undefined, jobId: run.runId ? undefined : run.id });
                             }}
                           >
-                            <RotateCcw className="h-3 w-3" />
-                            Retry Failed
+                            <RotateCcw className={`h-3 w-3 ${actionBusy === 'retry' ? 'animate-spin' : ''}`} />
+                            {actionBusy === 'retry' ? 'Retrying…' : 'Retry Failed'}
                           </button>
                         )}
                       </div>

@@ -30,7 +30,8 @@ data/database.sqlite
 data/captures/
 data/settings.json
 data/egress-proxy.json
-data/site-runtime.json
+data/pm2-log-history/
+data/pm2-logs/
 data/characters.json
 data/bib-autolaunch.json
 

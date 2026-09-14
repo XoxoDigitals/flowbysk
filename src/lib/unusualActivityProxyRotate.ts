@@ -155,7 +155,10 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
       }
     }
 
-    writeSiteRuntimePatch({ lastProxyRotateAt: new Date().toISOString() });
+    writeSiteRuntimePatch({
+      lastProxyRotateAt: new Date().toISOString(),
+      lastProxyRotateReason: String(opts?.reason || 'manual').slice(0, 120),
+    });
     consecutiveUnusual = 0;
 
     return {
@@ -164,6 +167,7 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
       from: rotated.from,
       to: rotated.to,
       relaunched,
+      reason: opts?.reason || 'manual',
     };
   } finally {
     rotating = false;
@@ -188,7 +192,7 @@ export async function noteUnusualActivityFailure(errorMessage: unknown): Promise
   }
 
   const result = await performEgressProxyRotateAndRelaunch({
-    reason: `unusual activity ×${consecutiveUnusual}`,
+    reason: `unusual activity (×${consecutiveUnusual})`,
   });
   consecutiveUnusual = 0;
   return {

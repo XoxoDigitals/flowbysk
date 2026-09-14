@@ -27,6 +27,7 @@ export type AdminSiteSettings = PublicSiteSettings & {
   proxyAutoRotateEnabled: boolean;
   proxyAutoRotateMinutes: number;
   lastProxyRotateAt: string | null;
+  lastProxyRotateReason: string | null;
 };
 
 const DEFAULTS: PublicSiteSettings = {
@@ -106,6 +107,7 @@ function mapAdmin(row: {
         ? row.proxyAutoRotateMinutes
         : rt.proxyAutoRotateMinutes,
     lastProxyRotateAt: rt.lastProxyRotateAt,
+    lastProxyRotateReason: rt.lastProxyRotateReason,
   };
 }
 
@@ -166,6 +168,7 @@ export async function getAdminSiteSettings(): Promise<AdminSiteSettings> {
       proxyAutoRotateEnabled: rt.proxyAutoRotateEnabled,
       proxyAutoRotateMinutes: rt.proxyAutoRotateMinutes,
       lastProxyRotateAt: rt.lastProxyRotateAt,
+      lastProxyRotateReason: rt.lastProxyRotateReason,
     };
   }
 }
@@ -283,6 +286,7 @@ export async function updateSiteSettings(data: {
       proxyAutoRotateEnabled: rt.proxyAutoRotateEnabled,
       proxyAutoRotateMinutes: rt.proxyAutoRotateMinutes,
       lastProxyRotateAt: rt.lastProxyRotateAt,
+      lastProxyRotateReason: rt.lastProxyRotateReason,
     };
   }
 }
