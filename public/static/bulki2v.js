@@ -42,8 +42,14 @@
     _serverHydrated: false,
   };
 
-  /** Match Studio plan parallel slots (Pro default). Do not POST every idle scene at once. */
-  const MAX_PARALLEL = 5;
+  /** Match Studio plan parallel slots at 50% for bulk (user parallel 4 → 2). */
+  function getMaxParallel() {
+    if (typeof window.getBulkMaxParallel === 'function') {
+      return window.getBulkMaxParallel();
+    }
+    const plan = Math.max(1, Number(window.__GFLOW_MAX_PARALLEL__) || 5);
+    return Math.max(1, Math.floor(plan / 2));
+  }
 
   function getActiveProjectId() {
     try {
@@ -320,6 +326,11 @@
     }
     const maxAttempts = 5;
     const delayMs = 2500;
+    const throttleDelayMs = 10000;
+    const isThrottle = (raw) =>
+      /USER_REQUESTS_THROTTLED|REQUESTS_THROTTLED|THROTTLED|batchexecute error e=4|\be\s*=\s*4\b/i.test(
+        String(raw == null ? '' : raw)
+      );
     let lastErr;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
@@ -330,8 +341,13 @@
         const labelText = toUserFacingGenerationError(msg);
         if (labelText !== 'System Error' && labelText !== 'Unusual activity') throw err;
         if (attempt >= maxAttempts) break;
-        console.warn(`[BulkI2V] system-retry ${label || ''} attempt ${attempt}/${maxAttempts}:`, msg);
-        await new Promise((r) => setTimeout(r, delayMs));
+        const waitMs = isThrottle(msg) ? Math.max(delayMs, throttleDelayMs) : delayMs;
+        console.warn(
+          `[BulkI2V] system-retry ${label || ''} attempt ${attempt}/${maxAttempts}:`,
+          msg,
+          `(${waitMs}ms)`
+        );
+        await new Promise((r) => setTimeout(r, waitMs));
       }
     }
     throw lastErr;
@@ -2042,7 +2058,7 @@
         const inFlight = biv.scenes.filter(
           (s) => s.status === 'queued' || s.status === 'generating'
         ).length;
-        const slots = Math.max(0, MAX_PARALLEL - inFlight);
+        const slots = Math.max(0, getMaxParallel() - inFlight);
         if (!slots) break;
         const nextIdx = biv.scenes.findIndex((s) => s.status === 'idle');
         if (nextIdx < 0) break;

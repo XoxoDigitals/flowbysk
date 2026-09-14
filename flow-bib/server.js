@@ -722,6 +722,7 @@ app.post('/generate', requireInternalSecret, async (req, res) => {
         /PER_MODEL_DAILY_QUOTA|QUOTA_REACHED|RESOURCE_EXHAUSTED/i.test(text) &&
         'Google daily quota reached for this image model';
       const wrbErr = /\[\[\"e\",\s*(\d+)/.exec(text);
+      const throttled = /USER_REQUESTS_THROTTLED|REQUESTS_THROTTLED/i.test(text);
       const emptyChar =
         charRefs.length > 0 && /wrb\.fr","ogiZ0b",null/.test(text)
           ? 'Flow rejected character image request — check character is synced in this project'
@@ -729,6 +730,9 @@ app.post('/generate', requireInternalSecret, async (req, res) => {
       const errMsg =
         quota ||
         emptyChar ||
+        (throttled
+          ? `PUBLIC_ERROR_USER_REQUESTS_THROTTLED (batchexecute e=${wrbErr ? wrbErr[1] : '4'})`
+          : null) ||
         (wrbErr ? `Flow batchexecute error e=${wrbErr[1]}` : null) ||
         'No image URL in response';
       console.warn(

@@ -4,12 +4,12 @@ import { useEffect } from 'react';
 import StudioShell from '@/components/studio/StudioShell';
 
 const WHISK_SRC = '/static/whisk.js?v=model-remap-1';
-const BULKT2V_SRC = '/static/bulkt2v.js?v=btv-8';
-const BULKT2I_SRC = '/static/bulkt2i.js?v=bti-7';
-const BULKI2V_SRC = '/static/bulki2v.js?v=biv-8';
+const BULKT2V_SRC = '/static/bulkt2v.js?v=btv-9';
+const BULKT2I_SRC = '/static/bulkt2i.js?v=bti-8';
+const BULKI2V_SRC = '/static/bulki2v.js?v=biv-9';
 // Bump when app.js boot/reveal logic changes.
-const APP_SRC = '/static/app.js?v=studio-skel-2';
-const STORYTELLER_SRC = '/static/storyteller.js?v=bvs-28';
+const APP_SRC = '/static/app.js?v=throttle-bulk-1';
+const STORYTELLER_SRC = '/static/storyteller.js?v=bvs-29';
 
 function waitForStudioShell(timeoutMs = 5000): Promise<boolean> {
   return new Promise((resolve) => {

@@ -126,9 +126,16 @@
     return label === 'System Error' || label === 'Unusual activity';
   }
 
+  function isThrottleGenerationError(raw) {
+    return /USER_REQUESTS_THROTTLED|REQUESTS_THROTTLED|PUBLIC_ERROR_USER_REQUESTS_THROTTLED|THROTTLED|batchexecute error e=4|\be\s*=\s*4\b/i.test(
+      String(raw == null ? '' : raw)
+    );
+  }
+
   async function withSystemErrorRetry(fn, label) {
     const maxAttempts = 5;
     const delayMs = 2500;
+    const throttleDelayMs = 10000;
     let lastErr;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
@@ -139,14 +146,32 @@
         if (/stop by user|cancelled by user/i.test(msg)) throw err;
         if (!isSystemGenerationError(msg)) throw err;
         if (attempt >= maxAttempts) break;
+        const waitMs = isThrottleGenerationError(msg)
+          ? Math.max(delayMs, throttleDelayMs)
+          : delayMs;
         console.warn(
           `[system-retry] ${label || 'generation'}: attempt ${attempt}/${maxAttempts} failed —`,
-          msg
+          msg,
+          `(retry in ${waitMs}ms)`
         );
-        await new Promise((r) => setTimeout(r, delayMs));
+        await new Promise((r) => setTimeout(r, waitMs));
       }
     }
     throw lastErr;
+  }
+
+  /** Bulk tools: 50% of plan parallel (min 1). */
+  function getBulkMaxParallel() {
+    const plan = Math.max(
+      1,
+      Number(
+        (typeof window !== 'undefined' &&
+          (window.__GFLOW_MAX_PARALLEL__ ||
+            (window.__GFLOW_STATE__ && window.__GFLOW_STATE__.maxParallel))) ||
+          5
+      ) || 5
+    );
+    return Math.max(1, Math.floor(plan / 2));
   }
 
   /**
@@ -194,6 +219,7 @@
     activeProjectId: '',
     activeProjectUrl: '',
     projects: [],
+    maxParallel: 5,
     modelPrices: null, // { byAlias: { GEM_PIX_2: { price, walletType, ... } } }
     characters: [],
     selectedCharacterIds: new Set(),
@@ -694,6 +720,8 @@
 
     setupEventListeners();
     setStudioMode(state.mode);
+    // Paint gallery skeleton before reveal so the shell never flashes empty/broken
+    renderGallerySkeleton(8);
     // Instant fast load
     loadModelPrices();
     setInterval(() => loadModelPrices(), 30_000);
@@ -702,7 +730,6 @@
     });
     fetchAuthStatus();
     loadCharacters();
-    loadAssets();
     fetchProjects();
     loadVoicePresets();
     setCharCreateSource('generate');
@@ -714,6 +741,21 @@
 
     // Restore Studio page from URL (refresh keeps storyteller/whisk/etc.)
     restoreStudioViewFromUrl({ replaceUrl: true });
+
+    // Wait for first assets paint (or timeout) so reveal isn't empty → pop
+    try {
+      await Promise.race([
+        loadAssets(),
+        new Promise((resolve) => setTimeout(resolve, 3000)),
+      ]);
+    } catch (_) {
+      /* gallery may still be skeleton */
+    }
+
+    // Double rAF so layout/CSS settle before removing boot overlay
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
     markStudioShellReady();
     if (!window.__GFLOW_STUDIO_POPSTATE__) {
       window.__GFLOW_STUDIO_POPSTATE__ = true;
@@ -778,6 +820,14 @@
           badge.textContent = data.user.plan.toUpperCase();
         }
         state.studioPlanName = data.user.plan || 'Free';
+        const mp = Math.max(1, Number(data.user.maxParallel) || 1);
+        state.maxParallel = mp;
+        try {
+          window.__GFLOW_MAX_PARALLEL__ = mp;
+          if (!window.__GFLOW_STATE__) window.__GFLOW_STATE__ = {};
+          window.__GFLOW_STATE__.maxParallel = mp;
+          window.__GFLOW_STATE__.activeProjectId = state.activeProjectId;
+        } catch (_) {}
         if (data.user.wallets?.pro) {
           state.proCreditsAvailable = Number(data.user.wallets.pro.available ?? 0) || 0;
         }
@@ -8818,6 +8868,8 @@
   window.toUserFacingGenerationError = toUserFacingGenerationError;
   window.isSystemGenerationError = isSystemGenerationError;
   window.withSystemErrorRetry = withSystemErrorRetry;
+  window.getBulkMaxParallel = getBulkMaxParallel;
+  window.isThrottleGenerationError = isThrottleGenerationError;
   window.openRefPickerModal = openRefPickerModal;
   window.openMediaViewerModal = openMediaViewerModal;
   window.closeMediaViewerModal = closeMediaViewerModal;

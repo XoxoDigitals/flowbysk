@@ -29,7 +29,7 @@ export function isSystemGenerationError(raw: unknown): boolean {
   if (!text) return true;
   if (isPolicyGenerationError(text)) return false;
   if (
-    /RECAPTCHA|UNUSUAL_ACTIVITY|unusual\s*activity|Bearer rejected|MODEL_ACCESS_DENIED|QUOTA|WORKER RETURNED|WORKER HTTP|INTERNAL SERVER|TIMEOUT|CDP|COOKIE|Insufficient|ECONNRESET|ETIMEDOUT|fetch failed|network|not ready|mediaId|browser not launched|mint failed/i.test(
+    /RECAPTCHA|UNUSUAL_ACTIVITY|unusual\s*activity|USER_REQUESTS_THROTTLED|REQUESTS_THROTTLED|THROTTLED|batchexecute error e=4|\be=4\b|Bearer rejected|MODEL_ACCESS_DENIED|QUOTA|WORKER RETURNED|WORKER HTTP|INTERNAL SERVER|TIMEOUT|CDP|COOKIE|Insufficient|ECONNRESET|ETIMEDOUT|fetch failed|network|not ready|mediaId|browser not launched|mint failed/i.test(
       text
     )
   ) {
@@ -39,8 +39,17 @@ export function isSystemGenerationError(raw: unknown): boolean {
   return true;
 }
 
+/** Google rate-limit / throttle — use a longer backoff before retry. */
+export function isThrottleGenerationError(raw: unknown): boolean {
+  return /USER_REQUESTS_THROTTLED|REQUESTS_THROTTLED|PUBLIC_ERROR_USER_REQUESTS_THROTTLED|THROTTLED|batchexecute error e=4|\be\s*=\s*4\b/i.test(
+    String(raw ?? '')
+  );
+}
+
 export type SystemRetryOptions = {
   delayMs?: number;
+  /** Override wait specifically for throttle errors (default 10000). */
+  throttleDelayMs?: number;
   /** Total attempts including the first (default 5). */
   maxAttempts?: number;
   label?: string;
@@ -53,12 +62,14 @@ export type SystemRetryOptions = {
 /**
  * Run `fn`. On system-class errors, retry up to maxAttempts-1 more times.
  * Policy errors propagate immediately.
+ * Throttle (USER_REQUESTS_THROTTLED / e=4) waits 10s by default before retry.
  */
 export async function withSystemErrorRetry<T>(
   fn: () => Promise<T>,
   opts: SystemRetryOptions = {}
 ): Promise<T> {
   const delayMs = opts.delayMs ?? 2500;
+  const throttleDelayMs = opts.throttleDelayMs ?? 10000;
   const maxAttempts = Math.max(1, opts.maxAttempts ?? 5);
   const label = opts.label || 'generation';
 
@@ -76,14 +87,17 @@ export async function withSystemErrorRetry<T>(
         throw err;
       }
 
+      const waitMs = isThrottleGenerationError(msg)
+        ? Math.max(delayMs, throttleDelayMs)
+        : delayMs;
       console.warn(
-        `[system-retry] ${label}: attempt ${attempt}/${maxAttempts} failed — ${msg.slice(0, 180)}; retrying…`
+        `[system-retry] ${label}: attempt ${attempt}/${maxAttempts} failed — ${msg.slice(0, 180)}; retrying in ${waitMs}ms…`
       );
       if (opts.onRetry) await opts.onRetry(err, attempt);
       if (opts.shouldContinue && !(await opts.shouldContinue())) {
         throw new Error('Stop by user');
       }
-      await new Promise((r) => setTimeout(r, delayMs));
+      await new Promise((r) => setTimeout(r, waitMs));
       if (opts.shouldContinue && !(await opts.shouldContinue())) {
         throw new Error('Stop by user');
       }
