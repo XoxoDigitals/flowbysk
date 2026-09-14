@@ -10,7 +10,6 @@ import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
 import { prepareProviderWorkerSession, refreshFlowMediaId } from '@/lib/providerSession';
 import { createStudioLog } from '@/lib/studioLogs';
 import { bibGenerateImage, bibGenerateVideo, ensureBibAccountReady, bibEnsureLabs } from '@/lib/bib';
-import { noteUnusualActivityFailure } from '@/lib/unusualActivityProxyRotate';
 import {
   resolveImageFrontendModel,
   resolveImageWireModel,
@@ -509,9 +508,6 @@ export async function POST(req: Request) {
       });
     } catch (workerErr: any) {
       console.error('Ingredients generation worker error:', workerErr.message);
-      noteUnusualActivityFailure(workerErr?.message || workerErr).catch((e) =>
-        console.warn('[proxy-rotate]', e)
-      );
       await prisma.generationJob.update({
         where: { id: job.id },
         data: {

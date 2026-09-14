@@ -1118,16 +1118,22 @@ class AccountSession {
         } catch {
           /* ignore */
         }
-      } else if (this.browser) {
+      } else if (hasWeb && !signedOut) {
+        // Google cookies still present — WIZ `at` can be missing mid-navigation /
+        // after proxy relaunch / on non-project pages. Do NOT flap to NEEDS_LOGIN.
+        if (this.status !== 'STARTING') this.status = 'READY';
+      } else if (this.browser && (!hasWeb || signedOut)) {
         this.status = 'NEEDS_LOGIN';
       }
 
       const projectId = projectFromHref(ctx.href);
+      // "Logged in" for API gates = Google web session cookies, not only WIZ at.
+      const sessionAlive = hasWeb && !signedOut;
       return {
         ...this.publicStatus(),
         url: ctx.href,
         origin: ctx.origin,
-        authenticated: !!ctx.at && hasWeb,
+        authenticated: sessionAlive,
         hasProject: !!projectId,
         projectId,
         at: !!ctx.at,
@@ -1524,13 +1530,17 @@ class AccountSession {
     this._healthTimer = setInterval(() => {
       this.refreshAuthStatus()
         .then((st) => {
-          if (st.status === 'NEEDS_LOGIN' || (!st.authenticated && this.status !== 'STOPPED')) {
-            if (this.wasReady && !this.authLostNotified && this.status !== 'STARTING') {
-              this.authLostNotified = true;
-              this.status = 'NEEDS_LOGIN';
-              if (typeof AccountSession.onAuthLost === 'function') {
-                AccountSession.onAuthLost(this.accountId, st);
-              }
+          // Only true cookie logout — missing WIZ `at` mid-nav is not auth-lost.
+          if (
+            st.hasWebSession === false &&
+            this.wasReady &&
+            !this.authLostNotified &&
+            this.status !== 'STARTING'
+          ) {
+            this.authLostNotified = true;
+            this.status = 'NEEDS_LOGIN';
+            if (typeof AccountSession.onAuthLost === 'function') {
+              AccountSession.onAuthLost(this.accountId, st);
             }
           }
         })

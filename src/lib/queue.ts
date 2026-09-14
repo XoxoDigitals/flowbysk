@@ -20,10 +20,7 @@ import {
   resolveEffectiveParallel,
 } from '@/lib/customDeals';
 import { toUserFacingQueueMessage, toUserFacingError } from '@/lib/userMessages';
-import {
-  noteUnusualActivityFailure,
-  resetUnusualActivityStreak,
-} from '@/lib/unusualActivityProxyRotate';
+import { resetUnusualActivityStreak } from '@/lib/unusualActivityProxyRotate';
 
 const PYTHON_WORKER_URL = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
 
@@ -635,9 +632,7 @@ export async function handleJobFailure(jobId: string, errorMessage: string) {
 
   console.error(`[jobFailure ${jobId}]`, errorMessage);
 
-  noteUnusualActivityFailure(errorMessage).catch((e) =>
-    console.warn('[proxy-rotate]', e)
-  );
+  // Unusual streak is counted inside withSystemErrorRetry (each attempt).
 
   // Release customer reserved credits
   await releaseCredits(job.userId, job.walletType, job.creditCost, job.id, errorMessage);

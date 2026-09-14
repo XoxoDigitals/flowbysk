@@ -12,9 +12,9 @@ import {
   bibLaunchAccount,
   bibAccountStatus,
 } from './bib';
-import { writeSiteRuntimePatch } from './siteRuntime';
+import { writeSiteRuntimePatch, readSiteRuntime } from './siteRuntime';
 
-let consecutiveUnusual = 0;
+let consecutiveUnusual = Math.max(0, readSiteRuntime().unusualActivityStreak || 0);
 let rotating = false;
 
 const UNUSUAL_RE =
@@ -26,10 +26,24 @@ export function isUnusualActivityError(raw: unknown): boolean {
 
 export function resetUnusualActivityStreak(): void {
   consecutiveUnusual = 0;
+  try {
+    writeSiteRuntimePatch({ unusualActivityStreak: 0 });
+  } catch {
+    /* ignore */
+  }
 }
 
 export function getUnusualActivityStreak(): number {
   return consecutiveUnusual;
+}
+
+function persistStreak(n: number) {
+  consecutiveUnusual = n;
+  try {
+    writeSiteRuntimePatch({ unusualActivityStreak: n });
+  } catch {
+    /* ignore */
+  }
 }
 
 async function sleep(ms: number) {
@@ -175,8 +189,8 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
 }
 
 /**
- * Call on generation failure. After 3 consecutive unusual-activity errors,
- * rotate egress proxy and relaunch BiB Chromes.
+ * Call on each unusual-activity failure (including system-retry attempts).
+ * After 3 consecutive hits, rotate egress proxy and relaunch BiB Chromes.
  */
 export async function noteUnusualActivityFailure(errorMessage: unknown): Promise<{
   rotated: boolean;
@@ -186,15 +200,17 @@ export async function noteUnusualActivityFailure(errorMessage: unknown): Promise
   if (!isUnusualActivityError(errorMessage)) {
     return { rotated: false, streak: consecutiveUnusual };
   }
-  consecutiveUnusual += 1;
-  if (consecutiveUnusual < 3 || rotating) {
-    return { rotated: false, streak: consecutiveUnusual };
+  const next = consecutiveUnusual + 1;
+  persistStreak(next);
+  console.warn(`[proxy-rotate] unusual streak ${next}/3 — ${String(errorMessage).slice(0, 120)}`);
+  if (next < 3 || rotating) {
+    return { rotated: false, streak: next };
   }
 
   const result = await performEgressProxyRotateAndRelaunch({
-    reason: `unusual activity (×${consecutiveUnusual})`,
+    reason: `unusual activity (×${next})`,
   });
-  consecutiveUnusual = 0;
+  persistStreak(0);
   return {
     rotated: result.rotated,
     streak: 0,

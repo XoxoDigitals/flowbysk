@@ -12,7 +12,6 @@ import { fetchWorkerJsonWithSystemRetry, withSystemErrorRetry } from '@/lib/syst
 import { bibGenerateVideo, BIB_WORKER_URL, ensureBibAccountReady } from '@/lib/bib';
 import { resolveTargetFlowProject } from '@/lib/flowProjects';
 import { createStudioLog } from '@/lib/studioLogs';
-import { noteUnusualActivityFailure } from '@/lib/unusualActivityProxyRotate';
 
 export async function POST(req: Request) {
   try {
@@ -433,10 +432,6 @@ export async function POST(req: Request) {
           ? workerErr.message
           : formatWorkerFetchError(workerErr);
       console.error('Video generation worker error:', workerMsg);
-
-      noteUnusualActivityFailure(workerMsg).catch((e) =>
-        console.warn('[proxy-rotate]', e)
-      );
 
       await prisma.generationJob.update({
         where: { id: job.id },

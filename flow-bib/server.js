@@ -105,6 +105,45 @@ function getOrCreate(accountId, opts = {}) {
   return s;
 }
 
+/**
+ * True Google login = web session cookies. WIZ `at` can be briefly missing
+ * mid-navigation / after relaunch — recover by opening a project page.
+ */
+async function ensureAccountUsable(s, preferredProject) {
+  if (!s?.browser) {
+    const err = new Error('Account browser not launched');
+    err.statusCode = 409;
+    throw err;
+  }
+
+  let auth = await s.refreshAuthStatus();
+  if (auth.status === 'READY' && auth.at) return auth;
+
+  if (auth.hasWebSession || auth.authenticated) {
+    const pid =
+      preferredProject ||
+      auth.projectId ||
+      (Array.isArray(s.projectIds) && s.projectIds[0]) ||
+      null;
+    if (pid && !auth.at) {
+      try {
+        await s.navigate(`https://flow.google.com/project/${pid}`);
+        await sleep(1000);
+        auth = await s.refreshAuthStatus();
+      } catch (e) {
+        console.warn(`[${s.accountId}] recover WIZ at:`, e.message);
+      }
+    }
+    if (auth.hasWebSession || auth.authenticated || auth.status === 'READY') {
+      return auth;
+    }
+  }
+
+  const err = new Error('Account not logged in');
+  err.statusCode = 401;
+  throw err;
+}
+
 function readAutolaunchState() {
   try {
     const fs = require('fs');
@@ -502,9 +541,10 @@ app.post('/create-character', requireInternalSecret, async (req, res) => {
 
     const s = pool.get(accountId);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
-    if (s.status !== 'READY') {
-      const auth = await s.refreshAuthStatus();
-      if (!auth.authenticated) return res.status(401).json({ error: 'Account not logged in' });
+    try {
+      await ensureAccountUsable(s, preferredProject);
+    } catch (e) {
+      return res.status(e.statusCode || 500).json({ error: e.message });
     }
 
     let ctx = await s.readContext();
@@ -658,13 +698,17 @@ app.post('/generate', requireInternalSecret, async (req, res) => {
     if (!prompt) return res.status(400).json({ error: 'prompt required' });
     const s = pool.get(accountId);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
-    if (s.status !== 'READY') {
-      const auth = await s.refreshAuthStatus();
-      if (!auth.authenticated) return res.status(401).json({ error: 'Account not logged in' });
+    try {
+      await ensureAccountUsable(s, preferredProject);
+    } catch (e) {
+      return res.status(e.statusCode || 500).json({ error: e.message });
     }
 
-    const ctx = await s.readContext();
-    if (!ctx.at) return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
+    let ctx = await s.readContext();
+    if (!ctx.at) {
+      // Last chance recover (ensureAccountUsable already tried once)
+      return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
+    }
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'No projectId available' });
 
@@ -672,6 +716,7 @@ app.post('/generate', requireInternalSecret, async (req, res) => {
     if (!projectFromHref(ctx.href)) {
       await s.navigate(`https://flow.google.com/project/${projectId}`);
       await sleep(800);
+      ctx = await s.readContext();
     }
 
     const recaptcha = await s.mintRecaptcha('IMAGE_GENERATION');
@@ -787,9 +832,14 @@ app.post('/batch-run', requireInternalSecret, async (req, res) => {
     if (!accountId) return res.status(400).json({ error: 'accountId required' });
     const s = pool.get(accountId);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    try {
+      await ensureAccountUsable(s);
+    } catch (e) {
+      return res.status(e.statusCode || 500).json({ error: e.message });
+    }
 
     const ctx = await s.readContext();
-    if (!ctx.at) return res.status(401).json({ error: 'not logged in' });
+    if (!ctx.at) return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
     const { cookie } = await s.cookieHeaderFor(ctx.origin);
 
     let tasks = [];
@@ -879,9 +929,14 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
     if (!prompt) return res.status(400).json({ error: 'prompt required' });
     const s = pool.get(accountId);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    try {
+      await ensureAccountUsable(s, preferredProject);
+    } catch (e) {
+      return res.status(e.statusCode || 500).json({ error: e.message });
+    }
 
     let ctx = await s.readContext();
-    if (!ctx.at) return res.status(401).json({ error: 'not logged in' });
+    if (!ctx.at) return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'no projectId' });
 
@@ -1192,9 +1247,10 @@ app.post('/accounts/:id/upload-image', requireInternalSecret, async (req, res) =
 
     const s = pool.get(accountId);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
-    if (s.status !== 'READY') {
-      const auth = await s.refreshAuthStatus();
-      if (!auth.authenticated) return res.status(401).json({ error: 'Account not logged in' });
+    try {
+      await ensureAccountUsable(s, preferredProject);
+    } catch (e) {
+      return res.status(e.statusCode || 500).json({ error: e.message });
     }
 
     let ctx = await s.readContext();

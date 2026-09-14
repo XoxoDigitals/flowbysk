@@ -12,7 +12,6 @@ import { prepareProviderWorkerSession, refreshFlowMediaId } from '@/lib/provider
 import { createStudioLog } from '@/lib/studioLogs';
 import { bibGenerateVideo, ensureBibAccountReady, bibEnsureLabs } from '@/lib/bib';
 import { resolveVideoWireModel } from '@/lib/modelWire';
-import { noteUnusualActivityFailure } from '@/lib/unusualActivityProxyRotate';
 
 function isMediaParseError(err: unknown) {
   const msg = String((err as any)?.message || err || '');
@@ -471,10 +470,6 @@ export async function POST(req: Request) {
       });
     } catch (workerErr: any) {
       console.error('I2V generation worker error:', workerErr.message);
-
-      noteUnusualActivityFailure(workerErr?.message || workerErr).catch((e) =>
-        console.warn('[proxy-rotate]', e)
-      );
 
       await prisma.generationJob.update({
         where: { id: job.id },

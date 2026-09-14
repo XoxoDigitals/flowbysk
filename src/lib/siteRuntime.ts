@@ -16,6 +16,8 @@ export type SiteRuntime = {
   proxyAutoRotateMinutes: number;
   lastProxyRotateAt: string | null;
   lastProxyRotateReason: string | null;
+  /** Persisted unusual-activity failure streak (retries count). */
+  unusualActivityStreak: number;
   updatedAt: string | null;
 };
 
@@ -25,6 +27,7 @@ const DEFAULTS: SiteRuntime = {
   proxyAutoRotateMinutes: 60,
   lastProxyRotateAt: null,
   lastProxyRotateReason: null,
+  unusualActivityStreak: 0,
   updatedAt: null,
 };
 
@@ -60,6 +63,10 @@ export function readSiteRuntime(): SiteRuntime {
         typeof raw.lastProxyRotateAt === 'string' ? raw.lastProxyRotateAt : null,
       lastProxyRotateReason:
         typeof raw.lastProxyRotateReason === 'string' ? raw.lastProxyRotateReason : null,
+      unusualActivityStreak: Math.max(
+        0,
+        Math.min(100, Number(raw.unusualActivityStreak) || 0)
+      ),
       updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : null,
     };
   } catch {

@@ -3,6 +3,8 @@
  * Policy violations are NOT retried (user-facing rejection stays).
  */
 
+import { isUnusualActivityError, noteUnusualActivityFailure } from './unusualActivityProxyRotate';
+
 export function isPolicyGenerationError(raw: unknown): boolean {
   const text = String(raw ?? '').trim();
   if (!text) return false;
@@ -82,6 +84,14 @@ export async function withSystemErrorRetry<T>(
       const msg = err instanceof Error ? err.message : String(err);
       if (/stop by user|cancelled by user/i.test(msg)) throw err;
       if (!isSystemGenerationError(msg)) throw err;
+
+      // Each unusual / too-much-traffic hit counts toward auto proxy-rotate (incl. retries).
+      if (isUnusualActivityError(msg)) {
+        noteUnusualActivityFailure(msg).catch((e) =>
+          console.warn('[proxy-rotate] streak update failed:', e)
+        );
+      }
+
       if (attempt >= maxAttempts) break;
       if (opts.shouldContinue && !(await opts.shouldContinue())) {
         throw err;
