@@ -7,8 +7,8 @@ const WHISK_SRC = '/static/whisk.js?v=model-remap-1';
 const BULKT2V_SRC = '/static/bulkt2v.js?v=btv-8';
 const BULKT2I_SRC = '/static/bulkt2i.js?v=bti-7';
 const BULKI2V_SRC = '/static/bulki2v.js?v=biv-8';
-// Bump when app.js display logic changes so browsers don't keep a stale Studio shell script.
-const APP_SRC = '/static/app.js?v=unusual-proxy-1';
+// Bump when app.js boot/reveal logic changes.
+const APP_SRC = '/static/app.js?v=studio-skel-2';
 const STORYTELLER_SRC = '/static/storyteller.js?v=bvs-28';
 
 function waitForStudioShell(timeoutMs = 5000): Promise<boolean> {
@@ -49,12 +49,49 @@ function loadScriptOnce(src: string): Promise<void> {
   });
 }
 
+function forceStudioBooting() {
+  try {
+    const d = document.documentElement;
+    d.classList.add('studio-booting');
+    d.classList.remove('studio-ready');
+    d.classList.add('theme-flow-dark');
+    document.body.classList.add('theme-flow-dark');
+    const skel = document.getElementById('studio-boot-skeleton');
+    if (skel) {
+      skel.style.display = 'flex';
+      skel.style.opacity = '1';
+      skel.setAttribute('aria-hidden', 'true');
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function forceStudioReady() {
+  try {
+    document.documentElement.classList.remove('studio-booting');
+    document.documentElement.classList.add('studio-ready');
+    document.body.classList.add('theme-flow-dark');
+    const skel = document.getElementById('studio-boot-skeleton');
+    if (skel) {
+      skel.style.opacity = '0';
+      window.setTimeout(() => {
+        skel.style.display = 'none';
+      }, 240);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
  * Catch-all Studio route: /dashboard/studio and /dashboard/studio/<view>
  * (storyteller, whisk, characters, images, …) so refresh keeps the active page.
  */
 export default function StudioPage() {
   useEffect(() => {
+    // Client navigations don't re-run layout <script> — force boot overlay here
+    forceStudioBooting();
     document.body.classList.add('theme-flow-dark');
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
@@ -66,6 +103,7 @@ export default function StudioPage() {
       if (cancelled) return;
       if (!ready) {
         console.error('[Studio] Shell DOM not ready; scripts not loaded');
+        forceStudioReady();
         return;
       }
       try {
@@ -90,22 +128,17 @@ export default function StudioPage() {
         await loadScriptOnce(BULKI2V_SRC);
         if (cancelled) return;
         await loadScriptOnce(APP_SRC);
-        // Failsafe: reveal shell even if app.js init stalls
+        // Failsafe: reveal if app.js never marks ready (hung init)
         window.setTimeout(() => {
           try {
             if (document.documentElement.classList.contains('studio-booting')) {
-              document.documentElement.classList.remove('studio-booting');
-              document.documentElement.classList.add('studio-ready');
-              document.body.classList.add('theme-flow-dark');
+              forceStudioReady();
             }
           } catch (_) {}
-        }, 2500);
+        }, 8000);
       } catch (e) {
         console.error('[Studio] Script load failed', e);
-        try {
-          document.documentElement.classList.remove('studio-booting');
-          document.documentElement.classList.add('studio-ready');
-        } catch (_) {}
+        forceStudioReady();
       }
     })();
 
@@ -123,6 +156,7 @@ export default function StudioPage() {
         .forEach((el) => el.parentNode?.removeChild(el));
       document.body.classList.remove('theme-flow-dark');
       document.body.style.overflow = prevOverflow;
+      document.documentElement.classList.remove('studio-booting', 'studio-ready');
     };
   }, []);
 

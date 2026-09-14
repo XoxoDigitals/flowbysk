@@ -553,7 +553,20 @@
       document.documentElement.classList.add('theme-flow-dark');
       document.body.classList.add('theme-flow-dark');
       const skel = document.getElementById('studio-boot-skeleton');
-      if (skel) skel.setAttribute('aria-hidden', 'true');
+      if (skel) {
+        skel.style.transition = 'opacity 0.22s ease';
+        skel.style.opacity = '0';
+        skel.setAttribute('aria-hidden', 'true');
+        window.setTimeout(() => {
+          try {
+            skel.style.display = 'none';
+          } catch (_) {}
+        }, 240);
+      }
+      const root = document.querySelector('.studio-next-root');
+      if (root) {
+        root.classList.add('studio-shell-visible');
+      }
     } catch (_) {}
   }
 

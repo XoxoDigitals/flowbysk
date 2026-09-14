@@ -10,21 +10,32 @@ export default function StudioLayout({ children }: { children: ReactNode }) {
     <>
       <script
         dangerouslySetInnerHTML={{
-          __html: `(function(){try{document.documentElement.classList.add('studio-booting');document.documentElement.classList.add('theme-flow-dark');if(document.body){document.body.classList.add('theme-flow-dark');}}catch(e){}})();`,
+          __html: `(function(){try{var d=document.documentElement;d.classList.add('studio-booting');d.classList.remove('studio-ready');d.classList.add('theme-flow-dark');if(document.body){document.body.classList.add('theme-flow-dark');}}catch(e){}})();`,
         }}
       />
       <style
         dangerouslySetInnerHTML={{
           __html: `
-html.studio-booting, html.studio-booting body { background: #090b10 !important; }
+html.studio-booting, html.studio-booting body,
+html:not(.studio-ready) body:has(#studio-boot-skeleton) {
+  background: #090b10 !important;
+}
+/* Hide real shell until boot completes — avoid FOUC / broken flash */
 html.studio-booting .studio-next-root,
-html.studio-booting .flow-app-shell {
+html.studio-booting .flow-app-shell,
+html:not(.studio-ready) .studio-next-root {
   visibility: hidden !important;
   opacity: 0 !important;
   pointer-events: none !important;
 }
+html.studio-ready .studio-next-root {
+  visibility: visible !important;
+  opacity: 1 !important;
+  transition: opacity 0.28s ease;
+  pointer-events: auto !important;
+}
 #studio-boot-skeleton {
-  display: none;
+  display: flex;
   position: fixed;
   inset: 0;
   z-index: 99999;
@@ -34,9 +45,11 @@ html.studio-booting .flow-app-shell {
   padding: 16px;
   gap: 16px;
   box-sizing: border-box;
+  opacity: 1;
 }
-html.studio-booting #studio-boot-skeleton { display: flex !important; }
-html.studio-ready #studio-boot-skeleton { display: none !important; }
+html.studio-ready #studio-boot-skeleton {
+  pointer-events: none;
+}
 .studio-skel-header {
   height: 52px;
   border-radius: 12px;
@@ -90,6 +103,7 @@ html.studio-ready #studio-boot-skeleton { display: none !important; }
   100% { background-position: -200% 0; }
 }
 .flow-media-card.is-skeleton .card-media-wrapper {
+  min-height: 100%;
   background: linear-gradient(90deg, #141820 25%, #1c2430 50%, #141820 75%);
   background-size: 200% 100%;
   animation: studioSkelShimmer 1.2s ease-in-out infinite;
@@ -105,12 +119,12 @@ html.studio-ready #studio-boot-skeleton { display: none !important; }
         href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700&display=swap"
         rel="stylesheet"
       />
-      <link rel="stylesheet" href="/static/style.css?v=studio-skel-1" />
+      <link rel="stylesheet" href="/static/style.css?v=studio-skel-2" />
       <link rel="stylesheet" href="/static/whisk.css?v=mobile-1" />
       <link rel="stylesheet" href="/static/storyteller.css?v=mobile-2" />
       <link rel="stylesheet" href="/static/bulkt2v.css?v=mobile-2" />
       <link rel="stylesheet" href="/static/bulkt2i.css?v=mobile-2" />
-      <link rel="stylesheet" href="/static/bulki2v.css?v=biv-6" />
+      <link rel="stylesheet" href="/static/bulki2v.css?v=biv-8" />
       {children}
     </>
   );
