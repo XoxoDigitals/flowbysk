@@ -15,6 +15,8 @@ import {
   resolveImageWireModel,
   resolveVideoFrontendModel,
   resolveVideoWireModel,
+  nextImageWireModel,
+  isImageModelQuotaError,
 } from '@/lib/modelWire';
 
 function isMediaParseError(err: unknown) {
@@ -297,6 +299,7 @@ export async function POST(req: Request) {
 
       const isVid = output_type === 'video';
       const aspectMap: Record<string, number> = { '16:9': 2, '9:16': 1, '1:1': 1 };
+      let attemptImageModel: string | null = null;
 
       const runOnce = async (refs: string[]) => {
         if (isVid) {
@@ -323,11 +326,12 @@ export async function POST(req: Request) {
         }
         const feModel = resolveImageFrontendModel(String(model || 'GEM_PIX_2'));
         const wireModel = resolveImageWireModel(feModel);
+        if (!attemptImageModel) attemptImageModel = wireModel;
         return bibGenerateImage({
           accountId: provider.id,
           prompt: job.prompt,
           aspectRatio: aspect_ratio,
-          model: wireModel,
+          model: attemptImageModel,
           projectId: targetProjectId,
           imageIds: refs,
           imageId: refs[0],
@@ -342,6 +346,14 @@ export async function POST(req: Request) {
           delayMs: 2000,
           maxAttempts: 2,
           providerAccountId: provider.id,
+          onRetry: async (err) => {
+            if (isVid || !isImageModelQuotaError(err) || !attemptImageModel) return;
+            const prev = attemptImageModel;
+            attemptImageModel = nextImageWireModel(attemptImageModel);
+            console.warn(
+              `[api-ingredients:${job.id}] daily quota on ${prev} — retry with next image model ${attemptImageModel}`
+            );
+          },
         });
       } catch (err) {
         if (!isMediaRepairableError(err) || !flowRefs.length) throw err;
