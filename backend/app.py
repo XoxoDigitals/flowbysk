@@ -1551,7 +1551,24 @@ def proxy_media(url: str = Query(..., description="Target media URL to proxy")):
         if flow_service.cookies and _proxy_target_allows_cookies(url):
             headers["Cookie"] = flow_service.cookies
 
-        req = requests.get(url, headers=headers, stream=True, timeout=30)
+        try:
+            req = requests.get(url, headers=headers, stream=True, timeout=30)
+            req.raise_for_status()
+        except Exception as e:
+            err = f"{e}"
+            if (
+                "407" in err
+                or "ProxyError" in err
+                or "Tunnel connection failed" in err
+                or "Unable to connect to proxy" in err
+            ):
+                # Dead egress proxy — signed CDN URLs usually work direct
+                req = requests.get(
+                    url, headers=headers, stream=True, timeout=30, proxies={}, trust_env=False
+                )
+                req.raise_for_status()
+            else:
+                raise
         return StreamingResponse(
             req.iter_content(chunk_size=64 * 1024),
             media_type=req.headers.get("Content-Type", "application/octet-stream"),
