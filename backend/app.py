@@ -1562,10 +1562,12 @@ def proxy_media(url: str = Query(..., description="Target media URL to proxy")):
                 or "Tunnel connection failed" in err
                 or "Unable to connect to proxy" in err
             ):
-                # Dead egress proxy — signed CDN URLs usually work direct
-                req = requests.get(
-                    url, headers=headers, stream=True, timeout=30, proxies={}, trust_env=False
-                )
+                # Dead egress proxy — signed CDN URLs usually work direct.
+                # trust_env is a Session attribute, not a requests.get kwarg.
+                _sess = requests.Session()
+                _sess.trust_env = False
+                _sess.proxies = {}
+                req = _sess.get(url, headers=headers, stream=True, timeout=30)
                 req.raise_for_status()
             else:
                 raise

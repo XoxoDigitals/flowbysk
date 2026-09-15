@@ -2535,6 +2535,20 @@ class FlowService:
                 json=payload,
                 timeout=30,
             )
+            if resp.status_code == 401:
+                logger.warning(
+                    "project.createProject returned 401; refreshing labs session once and retrying"
+                )
+                try:
+                    self.refresh_session()
+                except Exception as refresh_err:
+                    logger.warning("labs session refresh before createProject retry: %s", refresh_err)
+                resp = requests.post(
+                    f"{LABS_TRPC_BASE}/project.createProject",
+                    headers=self._labs_headers(),
+                    json=payload,
+                    timeout=30,
+                )
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
@@ -5538,20 +5552,13 @@ class FlowService:
         if self.cookies and "google" in url:
             headers["Cookie"] = self.cookies
 
-        def _get(*, trust_env: bool, proxies: Optional[Dict[str, str]] = None):
-            kwargs: Dict[str, Any] = {
-                "headers": headers,
-                "timeout": timeout,
-                "trust_env": trust_env,
-            }
-            if proxies is not None:
-                kwargs["proxies"] = proxies
-            elif trust_env:
-                kwargs.update(apply_proxies_kwargs(url, {}))
-            return requests.get(url, **kwargs)
-
         try:
-            resp = _get(trust_env=True)
+            resp = requests.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                **apply_proxies_kwargs(url, {}),
+            )
             resp.raise_for_status()
         except Exception as first_err:
             err_text = f"{first_err}"
@@ -5579,7 +5586,11 @@ class FlowService:
                 "Media download via egress proxy failed (%s); retrying direct (no proxy)",
                 err_text[:180],
             )
-            resp = _get(trust_env=False, proxies={})
+            # trust_env is a Session attribute, not a get() kwarg
+            session = requests.Session()
+            session.trust_env = False
+            session.proxies = {}
+            resp = session.get(url, headers=headers, timeout=timeout)
             resp.raise_for_status()
 
         data = resp.content

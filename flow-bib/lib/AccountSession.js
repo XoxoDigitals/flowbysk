@@ -876,6 +876,8 @@ class AccountSession {
     let result = await runPost(accessToken);
     if (result.status === 401) {
       this._labsTokenCache = null;
+      await this.ensureLabsSession({ force: true }).catch(() => null);
+      await this._nudgeAisandboxBearerSniff();
       accessToken = await this.fetchLabsAccessToken({ force: true });
       if (accessToken) result = await runPost(accessToken);
     }

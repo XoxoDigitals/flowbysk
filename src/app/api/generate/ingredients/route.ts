@@ -26,7 +26,7 @@ function isMediaParseError(err: unknown) {
 
 function isLabsAuthError(err: unknown) {
   const msg = String((err as any)?.message || err || '');
-  return /No labs access_token|aisandbox|reCAPTCHA mint failed|UNUSUAL_ACTIVITY/i.test(msg);
+  return /No labs access_token|aisandbox|\b401\b|reCAPTCHA mint failed|UNUSUAL_ACTIVITY/i.test(msg);
 }
 
 function isMediaRepairableError(err: unknown) {

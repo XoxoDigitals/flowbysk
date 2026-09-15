@@ -1,8 +1,21 @@
 import { BrowserStatus } from '@prisma/client';
+import fs from 'fs';
+import path from 'path';
 import { prisma } from '@/lib/prisma';
 import { ensureBibAccountReady, bibExportCookies } from '@/lib/bib';
 import { resolveTargetFlowProject } from '@/lib/flowProjects';
 import { PYTHON_WORKER_URL } from '@/lib/worker';
+
+const UPLOAD_DIR = path.resolve(process.cwd(), 'data/uploads');
+
+function mimeFromPath(filePath: string, fallback = 'image/jpeg'): string {
+  const lower = String(filePath || '').toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  return fallback;
+}
 
 type ProviderLike = {
   id: string;
@@ -187,68 +200,104 @@ export async function refreshFlowMediaId(opts: {
   const mediaId = String(opts.mediaId || '').trim();
   if (!mediaId) return undefined;
   if (mediaId.startsWith('staged-') || mediaId.startsWith('upload-')) {
-    // Prefer BiB upload when accountId is provided
+    // Prefer local prisma asset → BiB base64 upload (avoids CDN / Python staged lookup)
     if (opts.accountId && opts.projectId) {
       try {
         const { bibUploadImage } = await import('@/lib/bib');
-        // Resolve staged file URL via Python assets endpoint
-        const assetRes = await fetch(`${PYTHON_WORKER_URL}/api/assets/${encodeURIComponent(mediaId)}/url`, { method: 'GET' }).catch(() => null);
-        let imageUrl: string | null = null;
-        if (assetRes?.ok) {
-          const assetData = await assetRes.json().catch(() => ({}));
-          imageUrl = assetData?.url || assetData?.storagePath || null;
+        const assetRec = await prisma.asset.findFirst({
+          where: { OR: [{ upstreamAssetId: mediaId }, { id: mediaId }] },
+          select: { url: true, storagePath: true, mimeType: true },
+        });
+
+        let filePath: string | null = null;
+        if (assetRec?.storagePath && !String(assetRec.storagePath).startsWith('http')) {
+          if (fs.existsSync(assetRec.storagePath)) {
+            filePath = assetRec.storagePath;
+          }
         }
-        if (imageUrl) {
-          const bibResult = await bibUploadImage({
-            accountId: opts.accountId,
-            projectId: opts.projectId,
-            imageUrl,
-          });
-          if (bibResult?.mediaId) {
-            console.info(`[refreshFlowMediaId] BiB staged ${mediaId} → ${bibResult.mediaId.slice(0, 8)}`);
-            await waitFlowMediaReady(bibResult.mediaId);
-            return bibResult.mediaId;
+        if (!filePath && assetRec?.url) {
+          const m = String(assetRec.url).match(/^\/api\/assets\/file\/(.+)$/);
+          if (m?.[1]) {
+            const candidate = path.join(UPLOAD_DIR, path.basename(m[1]));
+            if (fs.existsSync(candidate)) filePath = candidate;
+          }
+        }
+
+        if (filePath) {
+          const buf = fs.readFileSync(filePath);
+          if (buf.length >= 100) {
+            const mimeType =
+              assetRec?.mimeType || mimeFromPath(filePath, 'image/jpeg');
+            const bibResult = await bibUploadImage({
+              accountId: opts.accountId,
+              projectId: opts.projectId,
+              imageBase64: buf.toString('base64'),
+              mimeType,
+              filename: path.basename(filePath),
+            });
+            if (bibResult?.mediaId) {
+              console.info(
+                `[refreshFlowMediaId] BiB local ${mediaId} → ${bibResult.mediaId.slice(0, 8)}`
+              );
+              await waitFlowMediaReady(bibResult.mediaId);
+              return bibResult.mediaId;
+            }
           }
         }
       } catch (bibErr: any) {
-        console.warn('[refreshFlowMediaId] BiB staged upload failed, falling back to Python:', bibErr?.message || bibErr);
+        console.warn(
+          '[refreshFlowMediaId] BiB local staged upload failed, falling back:',
+          bibErr?.message || bibErr
+        );
       }
     }
-    // Promote staged local file into Flow via Python upload (HTTP, not generation CDP)
-    try {
-      if (opts.cookies) {
-        await fetch(`${PYTHON_WORKER_URL}/api/auth/cookies`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cookies: opts.cookies }),
-        }).catch(() => 0);
-      }
-      if (opts.projectId) {
-        await fetch(`${PYTHON_WORKER_URL}/api/projects/switch`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ project_id: opts.projectId }),
-        }).catch(() => 0);
-      }
-      const form = new FormData();
-      form.append('staged_id', mediaId);
-      const upRes = await fetch(`${PYTHON_WORKER_URL}/api/assets/upload`, {
-        method: 'POST',
-        body: form,
-      });
-      if (upRes.ok) {
-        const data = await upRes.json().catch(() => ({}));
-        const newId = data?.asset?.id || data?.id;
-        if (newId && typeof newId === 'string') {
-          console.info(`[refreshFlowMediaId] staged ${mediaId} → ${newId.slice(0, 8)}`);
-          await waitFlowMediaReady(newId);
-          return newId;
+
+    // Python staged_id upload fallback — staged-* only (upload-* is local-only)
+    if (mediaId.startsWith('staged-')) {
+      try {
+        if (opts.cookies) {
+          await fetch(`${PYTHON_WORKER_URL}/api/auth/cookies`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cookies: opts.cookies }),
+          }).catch(() => 0);
         }
-      } else {
-        console.warn('[refreshFlowMediaId] staged upload failed', await upRes.text().then((t) => t.slice(0, 160)));
+        if (opts.projectId) {
+          await fetch(`${PYTHON_WORKER_URL}/api/projects/switch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_id: opts.projectId }),
+          }).catch(() => 0);
+        }
+        const form = new FormData();
+        form.append('staged_id', mediaId);
+        const upRes = await fetch(`${PYTHON_WORKER_URL}/api/assets/upload`, {
+          method: 'POST',
+          body: form,
+        });
+        if (upRes.ok) {
+          const data = await upRes.json().catch(() => ({}));
+          const newId = data?.asset?.id || data?.id;
+          if (newId && typeof newId === 'string') {
+            console.info(`[refreshFlowMediaId] staged ${mediaId} → ${newId.slice(0, 8)}`);
+            await waitFlowMediaReady(newId);
+            return newId;
+          }
+        } else {
+          console.warn(
+            '[refreshFlowMediaId] staged upload failed',
+            await upRes.text().then((t) => t.slice(0, 160))
+          );
+        }
+      } catch (e: any) {
+        console.warn('[refreshFlowMediaId] staged', e?.message || e);
       }
-    } catch (e: any) {
-      console.warn('[refreshFlowMediaId] staged', e?.message || e);
+    }
+
+    if (mediaId.startsWith('upload-')) {
+      throw new Error(
+        `Failed to promote local upload ${mediaId} into Flow — file missing or BiB upload unavailable`
+      );
     }
     return mediaId;
   }

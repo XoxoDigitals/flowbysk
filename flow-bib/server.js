@@ -1061,6 +1061,9 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
     let videoUrl = null;
 
     if (needsSandbox) {
+      // Warm labs/aisandbox bearer before multi-ref sandbox submit
+      await s.ensureLabsSession({ force: true }).catch(() => null);
+      await s.fetchLabsAccessToken({ force: true }).catch(() => null);
       const sandboxModel = String(model).includes('r2v')
         ? model
         : String(model).replace(/t2v_/g, 'r2v_').replace(/i2v_/g, 'r2v_');
@@ -1314,17 +1317,69 @@ app.post('/accounts/:id/upload-image', requireInternalSecret, async (req, res) =
     let resolvedMime = mimeType;
 
     if (!imgB64 && imageUrlInput) {
-      // Fetch remote image
-      const { cookie } = await s.cookieHeaderFor(ctx.origin);
-      const imgRes = await fetch(imageUrlInput, {
-        headers: { Cookie: cookie, 'User-Agent': 'Mozilla/5.0' },
-      });
-      if (!imgRes.ok) {
-        return res.status(502).json({ error: `Failed to fetch image: ${imgRes.status}` });
+      const urlStr = String(imageUrlInput);
+      const isGoogleCdn =
+        /flow-content\.google/i.test(urlStr) || /googleusercontent\.com/i.test(urlStr);
+
+      // Google CDN often 403s from Node; prefer in-page fetch with session cookies first
+      if (isGoogleCdn && s.page) {
+        try {
+          const pageResult = await s.page.evaluate(async (url) => {
+            try {
+              const r = await fetch(url, { credentials: 'include', method: 'GET' });
+              if (!r.ok) return { ok: false, status: r.status };
+              const buf = await r.arrayBuffer();
+              const bytes = new Uint8Array(buf);
+              let binary = '';
+              const chunk = 0x8000;
+              for (let i = 0; i < bytes.length; i += chunk) {
+                binary += String.fromCharCode.apply(
+                  null,
+                  Array.from(bytes.subarray(i, i + chunk))
+                );
+              }
+              return {
+                ok: true,
+                status: r.status,
+                base64: btoa(binary),
+                mime: (r.headers.get('content-type') || '').split(';')[0] || '',
+              };
+            } catch (e) {
+              return { ok: false, status: 0, error: (e && e.message) || String(e) };
+            }
+          }, urlStr);
+          if (pageResult?.ok && pageResult.base64) {
+            imgB64 = pageResult.base64;
+            if (pageResult.mime) resolvedMime = pageResult.mime;
+            console.log(
+              `[${accountId}] upload-image: fetched CDN via page.evaluate (${pageResult.base64.length} b64 chars)`
+            );
+          } else {
+            console.warn(
+              `[${accountId}] upload-image: page.evaluate CDN fetch failed status=${pageResult?.status || 0}`,
+              pageResult?.error || ''
+            );
+          }
+        } catch (pageErr) {
+          console.warn(
+            `[${accountId}] upload-image: page.evaluate CDN fetch error:`,
+            pageErr?.message || pageErr
+          );
+        }
       }
-      const buf = Buffer.from(await imgRes.arrayBuffer());
-      imgB64 = buf.toString('base64');
-      resolvedMime = imgRes.headers.get('content-type')?.split(';')[0] || mimeType;
+
+      if (!imgB64) {
+        const { cookie } = await s.cookieHeaderFor(ctx.origin);
+        const imgRes = await fetch(urlStr, {
+          headers: { Cookie: cookie, 'User-Agent': 'Mozilla/5.0' },
+        });
+        if (!imgRes.ok) {
+          return res.status(502).json({ error: `Failed to fetch image: ${imgRes.status}` });
+        }
+        const buf = Buffer.from(await imgRes.arrayBuffer());
+        imgB64 = buf.toString('base64');
+        resolvedMime = imgRes.headers.get('content-type')?.split(';')[0] || mimeType;
+      }
     }
 
     if (!imgB64) return res.status(400).json({ error: 'imageBase64 or imageUrl required' });

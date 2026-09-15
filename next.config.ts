@@ -64,6 +64,7 @@ const nextConfig: NextConfig = {
       // /api/video/extend — Next (BiB I2V)
       // /api/prompt/enhance — Next
       // /api/whisk/compose — Next (BiB)
+      // /api/whisk/variants — Next (BiB)
       // /api/characters/voices|sync — Next
       {
         source: '/api/video/last-frame/:path*',
@@ -76,10 +77,6 @@ const nextConfig: NextConfig = {
       {
         source: '/api/whisk/caption',
         destination: 'http://127.0.0.1:8000/api/whisk/caption',
-      },
-      {
-        source: '/api/whisk/variants',
-        destination: 'http://127.0.0.1:8000/api/whisk/variants',
       },
       {
         source: '/api/logs',
