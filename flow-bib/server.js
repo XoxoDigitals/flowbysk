@@ -1441,16 +1441,22 @@ app.post('/upsample-video', requireInternalSecret, async (req, res) => {
     }
     const s = pool.get(accountId);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    try {
+      await ensureAccountUsable(s, preferredProject);
+    } catch (e) {
+      return res.status(e.statusCode || 500).json({ error: e.message });
+    }
 
     let ctx = await s.readContext();
-    if (!ctx.at) return res.status(401).json({ error: 'not logged in' });
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'no projectId' });
-    if (!projectFromHref(ctx.href) || projectFromHref(ctx.href) !== projectId) {
+    if (!projectFromHref(ctx.href) || projectFromHref(ctx.href) !== projectId || !ctx.at) {
       await s.navigate(`https://flow.google.com/project/${projectId}`);
-      await sleep(800);
+      await sleep(1000);
       ctx = await s.readContext();
-      if (!ctx.at) return res.status(401).json({ error: 'No WIZ at after project navigate' });
+      if (!ctx.at) {
+        return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
+      }
     }
 
     const sourceMediaId = String(mediaId).replace(/_upsampled$/i, '').trim();
@@ -1535,6 +1541,11 @@ app.post('/video-status', requireInternalSecret, async (req, res) => {
     }
     const s = pool.get(accountId);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    try {
+      await ensureAccountUsable(s, preferredProject);
+    } catch (e) {
+      return res.status(e.statusCode || 500).json({ error: e.message });
+    }
     let ctx;
     try {
       ctx = await s.readContext();
@@ -1543,9 +1554,23 @@ app.post('/video-status', requireInternalSecret, async (req, res) => {
       await sleep(800);
       ctx = await s.readContext();
     }
-    if (!ctx.at) return res.status(401).json({ error: 'not logged in' });
     const projectId =
       preferredProject || s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
+    // Missing WIZ `at` ≠ logout (cookies can still be valid). Recover, then say so clearly.
+    if (!ctx.at) {
+      if (projectId) {
+        try {
+          await s.navigate(`https://flow.google.com/project/${projectId}`);
+          await sleep(1000);
+          ctx = await s.readContext();
+        } catch (e) {
+          console.warn(`[${accountId}] video-status recover WIZ at:`, e.message);
+        }
+      }
+      if (!ctx.at) {
+        return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
+      }
+    }
     if (!projectId) return res.status(400).json({ error: 'no projectId' });
     const { cookie } = await s.cookieHeaderFor(ctx.origin);
     const hdr = ogiHeaders(ctx, cookie);
