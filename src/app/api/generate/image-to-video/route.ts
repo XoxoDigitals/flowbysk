@@ -303,22 +303,27 @@ export async function POST(req: Request) {
 
       const startId =
         frame_mode === 'last_only' ? lastId || firstId : firstId || lastId;
-      const endId =
-        frame_mode === 'first_and_last' || (firstId && lastId && firstId !== lastId)
-          ? lastId && lastId !== startId
-            ? lastId
-            : null
-          : null;
+      // When both frames are present, treat as ingredients-style multi-ref (not StartImage end frame)
+      const ingredientRefs =
+        dualFrames && firstId && lastId && firstId !== lastId
+          ? [firstId, lastId]
+          : ([startId].filter(Boolean) as string[]);
 
       const aspectMap: Record<string, number> = { '16:9': 2, '9:16': 1, '1:1': 1 };
-      const runI2v = async (start: string | null, end: string | null) =>
-        bibGenerateVideo({
+      const runI2v = async (refs: string[]) => {
+        const multi = refs.length > 1;
+        if (multi) {
+          console.info(
+            `[i2v] dual frames → ingredients-style multi-ref (${refs.map((r) => r.slice(0, 8)).join('+')})`
+          );
+        }
+        return bibGenerateVideo({
           accountId: provider.id,
-          mode: end ? 'r2v' : 'i2v',
+          mode: multi ? 'r2v' : 'i2v',
           prompt: job.prompt,
-          imageId: start || undefined,
-          endImageId: end || undefined,
-          imageIds: [start, end].filter(Boolean) as string[],
+          imageId: refs[0] || undefined,
+          // Do not pass endImageId — that triggers StartImage; ingredients use imageIds only
+          imageIds: refs,
           characters: charRefs,
           videoModel: wireModel,
           aspect: aspectMap[String(aspect_ratio)] || 2,
@@ -326,11 +331,12 @@ export async function POST(req: Request) {
           projectId: targetProjectId,
           waitForCompletion: false,
         });
+      };
 
       let bibResult;
       try {
         bibResult = await withSystemErrorRetry(
-          async () => runI2v(startId, endId),
+          async () => runI2v(ingredientRefs),
           { label: `api-i2v-bib:${job.id}`, delayMs: 2000, maxAttempts: 2, providerAccountId: provider.id }
         );
       } catch (err) {
@@ -372,25 +378,26 @@ export async function POST(req: Request) {
             );
           }
         }
-        const repairedStart = startId
-          ? (await refreshFlowMediaId({
+        const repairedRefs: string[] = [];
+        for (const mid of ingredientRefs) {
+          const next =
+            (await refreshFlowMediaId({
               accountId: provider.id,
-              mediaId: startId,
+              mediaId: mid,
               cookies: liveCookies,
               projectId: targetProjectId,
               forceReupload,
-            })) || startId
-          : null;
-        const repairedEnd = endId
-          ? (await refreshFlowMediaId({
-              accountId: provider.id,
-              mediaId: endId,
-              cookies: liveCookies,
-              projectId: targetProjectId,
-              forceReupload,
-            })) || endId
-          : null;
-        bibResult = await runI2v(repairedStart, repairedEnd);
+            })) || mid;
+          if (next && /^[a-f0-9-]{36}$/i.test(next) && !repairedRefs.includes(next)) {
+            repairedRefs.push(next);
+          }
+        }
+        if (dualFrames && repairedRefs.length < 2) {
+          throw new Error(
+            'First and last frames must both be Flow-ready after repair. Re-upload and retry.'
+          );
+        }
+        bibResult = await runI2v(repairedRefs.length ? repairedRefs : ingredientRefs);
       }
 
       const workerAsset = {

@@ -1045,17 +1045,16 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
     const aspectLabel =
       aspectRatio || (aspect === 1 ? '9:16' : aspect === 3 ? '1:1' : '16:9');
 
-    // Multi-ref / first+last → aisandbox. Do NOT merge character portraits into
-    // refMedia (they stay on charRefs / MZZa6b entity slots). Silent MZZa6b
-    // single-frame fallback is forbidden for multi-ref — that drops images.
+    // Multi-ref (ingredients / first+last) → aisandbox ReferenceImages only.
+    // Do NOT use StartImage for dual frames — Studio sends both as ingredient refs.
+    // Do NOT merge character portraits into refMedia.
     const refMedia = [
       ...(imageId ? [imageId] : []),
       ...(endId && endId !== imageId ? [endId] : []),
       ...extraIds,
     ].filter(Boolean);
     const uniqueRefMedia = [...new Set(refMedia)];
-    const hasFirstLast = Boolean(imageId && endId && imageId !== endId);
-    const needsSandbox = uniqueRefMedia.length > 1 || hasFirstLast;
+    const needsSandbox = uniqueRefMedia.length > 1;
 
     let mediaId = null;
     let videoUrl = null;
@@ -1068,101 +1067,33 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
         ? model
         : String(model).replace(/t2v_/g, 'r2v_').replace(/i2v_/g, 'r2v_');
 
-      // True first+last → StartImage first (correct dual-frame API)
-      if (hasFirstLast) {
-        try {
-          const startPayload = buildStartImagePayload(
-            projectId,
-            prompt,
-            sandboxModel,
-            aspectLabel,
-            imageId,
-            endId,
-            ''
-          );
-          const data = await s.aisandboxPost(
-            'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoStartImage',
-            startPayload,
-            'VIDEO_GENERATION'
-          );
-          mediaId = extractSandboxMediaId(data);
-          stages.submit = {
-            rpcid: 'aisandbox_StartImage',
-            model: sandboxModel,
-            mediaId,
-            ms: Date.now() - t0,
-          };
-        } catch (startErr) {
-          stages.startImageError = String(startErr.message || startErr).slice(0, 160);
-          console.warn(
-            `[${accountId}] StartImage failed, trying ReferenceImages:`,
-            stages.startImageError
-          );
-        }
-      }
-
-      if (!mediaId) {
-        const payload = buildReferenceImagesPayload(
-          projectId,
-          prompt,
-          sandboxModel,
-          aspectLabel,
-          uniqueRefMedia,
-          '' // token filled inside aisandboxPost
+      const payload = buildReferenceImagesPayload(
+        projectId,
+        prompt,
+        sandboxModel,
+        aspectLabel,
+        uniqueRefMedia,
+        '' // token filled inside aisandboxPost
+      );
+      try {
+        const data = await s.aisandboxPost(
+          'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages',
+          payload,
+          'VIDEO_GENERATION'
         );
-        try {
-          const data = await s.aisandboxPost(
-            'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages',
-            payload,
-            'VIDEO_GENERATION'
-          );
-          mediaId = extractSandboxMediaId(data);
-          stages.submit = {
-            rpcid: 'aisandbox_ReferenceImages',
-            model: sandboxModel,
-            mediaId,
-            refs: uniqueRefMedia.length,
-            ms: Date.now() - t0,
-            fallbackFrom: stages.startImageError || undefined,
-          };
-        } catch (sandboxErr) {
-          const sandboxMsg = String(sandboxErr.message || sandboxErr);
-          // If StartImage wasn't tried (multi-ref without first+last), try StartImage when we have two ids
-          if (!hasFirstLast && imageId && endId && imageId !== endId) {
-            try {
-              const startPayload = buildStartImagePayload(
-                projectId,
-                prompt,
-                sandboxModel,
-                aspectLabel,
-                imageId,
-                endId,
-                ''
-              );
-              const data = await s.aisandboxPost(
-                'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoStartImage',
-                startPayload,
-                'VIDEO_GENERATION'
-              );
-              mediaId = extractSandboxMediaId(data);
-              stages.submit = {
-                rpcid: 'aisandbox_StartImage',
-                model: sandboxModel,
-                mediaId,
-                ms: Date.now() - t0,
-                fallbackFrom: sandboxMsg.slice(0, 120),
-              };
-            } catch (e2) {
-              stages.sandboxError = String(e2.message || e2).slice(0, 160);
-              throw e2;
-            }
-          }
-          // Multi-ref must fail closed — never silently animate only the first image
-          if (!mediaId) {
-            stages.sandboxError = sandboxMsg.slice(0, 160);
-            throw sandboxErr;
-          }
-        }
+        mediaId = extractSandboxMediaId(data);
+        stages.submit = {
+          rpcid: 'aisandbox_ReferenceImages',
+          model: sandboxModel,
+          mediaId,
+          refs: uniqueRefMedia.length,
+          ms: Date.now() - t0,
+          asIngredients: true,
+        };
+      } catch (sandboxErr) {
+        // Multi-ref must fail closed — never silently animate only the first image
+        stages.sandboxError = String(sandboxErr.message || sandboxErr).slice(0, 160);
+        throw sandboxErr;
       }
     } else {
       const rc2 = await s.mintRecaptcha('VIDEO_GENERATION');
