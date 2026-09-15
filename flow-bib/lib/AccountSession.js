@@ -811,98 +811,140 @@ class AccountSession {
 
   /**
    * Mint reCAPTCHA on Flow, then POST aisandbox with Bearer (stay on flow.google.com).
+   * Retries once on Execution context destroyed / navigation races.
    */
   async aisandboxPost(endpoint, payload, action = 'VIDEO_GENERATION') {
     if (!this.page) throw new Error('no page');
-    const projectId =
-      projectFromHref((await this.readContext()).href) || this.projectIds[0] || '';
 
-    let accessToken = await this.fetchLabsAccessToken({ force: true });
-    if (!accessToken) {
-      await sleep(1500);
-      accessToken = await this.fetchLabsAccessToken({ force: true });
-    }
-    if (!accessToken) {
-      throw new Error(
-        'No aisandbox access_token — open BiB viewer, sign into flow.google.com with the same Google account, then click Refresh aisandbox token'
-      );
-    }
+    const attemptOnce = async () => {
+      const projectId =
+        projectFromHref((await this.readContext()).href) || this.projectIds[0] || '';
 
-    if (projectId && !/flow\.google\.com\/project\//i.test(this.page.url() || '')) {
-      await this.navigate(`https://flow.google.com/project/${projectId}`);
-      await sleep(800);
-    } else if (!/flow\.google\.com/i.test(this.page.url() || '')) {
-      await this.navigate(projectId ? `https://flow.google.com/project/${projectId}` : START_URL);
-      await sleep(800);
-    }
+      let accessToken = await this.fetchLabsAccessToken({ force: true });
+      if (!accessToken) {
+        await sleep(1500);
+        accessToken = await this.fetchLabsAccessToken({ force: true });
+      }
+      if (!accessToken) {
+        throw new Error(
+          'No aisandbox access_token — open BiB viewer, sign into flow.google.com with the same Google account, then click Refresh aisandbox token'
+        );
+      }
 
-    const recaptcha = await this.mintRecaptcha(action);
-    if (!recaptcha || recaptcha.length < 50) {
-      throw new Error('reCAPTCHA mint failed for aisandbox');
-    }
+      if (projectId && !/flow\.google\.com\/project\//i.test(this.page.url() || '')) {
+        await this.navigate(`https://flow.google.com/project/${projectId}`);
+        await sleep(1000);
+      } else if (!/flow\.google\.com/i.test(this.page.url() || '')) {
+        await this.navigate(projectId ? `https://flow.google.com/project/${projectId}` : START_URL);
+        await sleep(1000);
+      }
 
-    const body = JSON.parse(JSON.stringify(payload || {}));
-    const ctx = body.clientContext || (body.clientContext = {});
-    if (projectId) ctx.projectId = projectId;
-    ctx.recaptchaContext = {
-      token: recaptcha,
-      applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
-    };
+      const recaptcha = await this.mintRecaptcha(action);
+      if (!recaptcha || recaptcha.length < 50) {
+        throw new Error('reCAPTCHA mint failed for aisandbox');
+      }
 
-    const runPost = async (bearer) =>
-      this.page.evaluate(
-        async (ep, bodyJson, tok) => {
+      const body = JSON.parse(JSON.stringify(payload || {}));
+      const ctx = body.clientContext || (body.clientContext = {});
+      if (projectId) ctx.projectId = projectId;
+      ctx.recaptchaContext = {
+        token: recaptcha,
+        applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+      };
+
+      const runPost = async (bearer) =>
+        this.page.evaluate(
+          async (ep, bodyJson, tok) => {
+            try {
+              const r = await fetch(ep, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'text/plain;charset=UTF-8',
+                  Authorization: 'Bearer ' + tok,
+                },
+                body: bodyJson,
+                credentials: 'include',
+              });
+              const text = await r.text();
+              return { status: r.status, text };
+            } catch (e) {
+              return { status: 0, text: e && e.message ? e.message : String(e) };
+            }
+          },
+          endpoint,
+          JSON.stringify(body),
+          bearer
+        );
+
+      let result;
+      try {
+        result = await runPost(accessToken);
+      } catch (evalErr) {
+        const msg = evalErr && evalErr.message ? evalErr.message : String(evalErr);
+        if (/Execution context was destroyed|navigation|Target closed/i.test(msg)) {
+          throw Object.assign(new Error(msg), { isContextDestroyed: true });
+        }
+        throw evalErr;
+      }
+
+      if (result.status === 401) {
+        this._labsTokenCache = null;
+        await this.ensureLabsSession({ force: true }).catch(() => null);
+        await this._nudgeAisandboxBearerSniff();
+        accessToken = await this.fetchLabsAccessToken({ force: true });
+        if (accessToken) {
           try {
-            const r = await fetch(ep, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'text/plain;charset=UTF-8',
-                Authorization: 'Bearer ' + tok,
-              },
-              body: bodyJson,
-              credentials: 'include',
-            });
-            const text = await r.text();
-            return { status: r.status, text };
-          } catch (e) {
-            return { status: 0, text: e && e.message ? e.message : String(e) };
+            result = await runPost(accessToken);
+          } catch (evalErr) {
+            const msg = evalErr && evalErr.message ? evalErr.message : String(evalErr);
+            if (/Execution context was destroyed|navigation|Target closed/i.test(msg)) {
+              throw Object.assign(new Error(msg), { isContextDestroyed: true });
+            }
+            throw evalErr;
           }
-        },
-        endpoint,
-        JSON.stringify(body),
-        bearer
-      );
-
-    let result = await runPost(accessToken);
-    if (result.status === 401) {
-      this._labsTokenCache = null;
-      await this.ensureLabsSession({ force: true }).catch(() => null);
-      await this._nudgeAisandboxBearerSniff();
-      accessToken = await this.fetchLabsAccessToken({ force: true });
-      if (accessToken) result = await runPost(accessToken);
-    }
-
-    let data = null;
-    try {
-      data = JSON.parse(result.text || '{}');
-    } catch {
-      data = { raw: String(result.text || '').slice(0, 400) };
-    }
-    if (!result.status || result.status >= 400) {
-      if (result.status === 401) this._labsTokenCache = null;
-      let msg =
-        (data && (data.error || data.message || data.status)) ||
-        String(result.text || '').slice(0, 240);
-      if (msg && typeof msg === 'object') {
-        try {
-          msg = JSON.stringify(msg);
-        } catch {
-          msg = String(msg);
         }
       }
-      throw new Error(`aisandbox ${result.status}: ${msg}`);
+
+      let data = null;
+      try {
+        data = JSON.parse(result.text || '{}');
+      } catch {
+        data = { raw: String(result.text || '').slice(0, 400) };
+      }
+      if (!result.status || result.status >= 400) {
+        if (result.status === 401) this._labsTokenCache = null;
+        let msg =
+          (data && (data.error || data.message || data.status)) ||
+          String(result.text || '').slice(0, 240);
+        if (msg && typeof msg === 'object') {
+          try {
+            msg = JSON.stringify(msg);
+          } catch {
+            msg = String(msg);
+          }
+        }
+        throw new Error(`aisandbox ${result.status}: ${msg}`);
+      }
+      return data;
+    };
+
+    try {
+      return await attemptOnce();
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      const isCtx =
+        e?.isContextDestroyed ||
+        /Execution context was destroyed|navigation|Target closed/i.test(msg);
+      if (!isCtx) throw e;
+      console.warn(`[${this.accountId}] aisandboxPost context destroyed — settle and retry once`);
+      await sleep(1500);
+      const pid = this.projectIds[0];
+      if (pid) {
+        await this.navigate(`https://flow.google.com/project/${pid}`).catch(() => {});
+        await sleep(1000);
+      }
+      return await attemptOnce();
     }
-    return data;
   }
 
   /**

@@ -198,7 +198,7 @@ export async function POST(req: Request) {
         return id;
       };
 
-      const refreshOne = async (id?: string) => {
+      const refreshOne = async (id?: string, forceReupload = false) => {
         const resolved = await resolveMediaId(id);
         if (!resolved) return resolved;
         return (
@@ -207,17 +207,23 @@ export async function POST(req: Request) {
             mediaId: resolved,
             cookies: liveCookies,
             projectId: targetProjectId,
+            forceReupload,
           })) || resolved
         );
       };
 
+      const dualFrames =
+        frame_mode === 'first_and_last' ||
+        Boolean(first_frame_id && last_frame_id) ||
+        Boolean(body.first_frame_staged_id && body.last_frame_staged_id);
+
       const [resFirst, resLast, resImg, resStaged, resFirstStaged, resLastStaged] = await Promise.all([
-        refreshOne(first_frame_id),
-        refreshOne(last_frame_id),
-        refreshOne(image_id),
-        refreshOne(body.staged_id),
-        refreshOne(body.first_frame_staged_id),
-        refreshOne(body.last_frame_staged_id),
+        refreshOne(first_frame_id, dualFrames),
+        refreshOne(last_frame_id, dualFrames),
+        refreshOne(image_id, dualFrames),
+        refreshOne(body.staged_id, dualFrames),
+        refreshOne(body.first_frame_staged_id, dualFrames),
+        refreshOne(body.last_frame_staged_id, dualFrames),
       ]);
 
       const feModel = resolveVideoFrontendModel(model);
@@ -256,6 +262,12 @@ export async function POST(req: Request) {
         [resLast, resLastStaged]
           .map((id) => String(id || '').trim())
           .find((id) => /^[a-f0-9-]{36}$/i.test(id)) || null;
+
+      if (dualFrames && (!firstId || !lastId)) {
+        throw new Error(
+          'First and last frames must both be Flow-ready UUIDs. Re-upload the frames and retry.'
+        );
+      }
 
       const charRefs = Array.isArray(body.characters)
         ? body.characters

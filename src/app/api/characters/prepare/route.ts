@@ -108,7 +108,32 @@ export async function POST(req: Request) {
         traits.image_media_id ||
         null;
       const imageUrl =
-        raw.image_url || raw.portraitUrl || dbChar?.portraitUrl || traits.image_url || null;
+        raw.image_url ||
+        raw.portraitUrl ||
+        dbChar?.portraitUrl ||
+        traits.image_url ||
+        raw.local_image_path ||
+        traits.local_image_path ||
+        null;
+      const wantsPortrait = !!(imageMediaId || imageUrl);
+
+      // Promote portrait into Flow BEFORE create — bare C4BZMd leaves empty characters
+      if (wantsPortrait) {
+        const refreshed = await refreshFlowMediaId({
+          accountId: provider.id,
+          mediaId: imageMediaId || imageUrl,
+          cookies: sessionPrep.cookies,
+          projectId: projectId || undefined,
+          forceReupload: true,
+        });
+        if (refreshed && /^[0-9a-f-]{36}$/i.test(refreshed)) {
+          imageMediaId = refreshed;
+        } else {
+          throw new Error(
+            `Character portrait could not be uploaded to Flow for "${name}". Fix the image, then retry.`
+          );
+        }
+      }
 
       if (looksLocalOnly || !flowEntityId || !/^[0-9a-f-]{36}$/i.test(flowEntityId)) {
         try {
@@ -121,17 +146,8 @@ export async function POST(req: Request) {
           flowEntityId = created.flowEntityId || created.entity_id || flowEntityId;
         } catch (e: any) {
           console.warn('[characters/prepare] create failed:', e?.message || e);
+          if (wantsPortrait) throw e;
         }
-      }
-
-      if (imageMediaId || imageUrl) {
-        const refreshed = await refreshFlowMediaId({
-          accountId: provider.id,
-          mediaId: imageMediaId || imageUrl,
-          cookies: sessionPrep.cookies,
-          projectId: projectId || undefined,
-        });
-        if (refreshed) imageMediaId = refreshed;
       }
 
       // White-bg portrait bind when we have Flow entity + source image

@@ -338,14 +338,43 @@ export async function refreshFlowMediaId(opts: {
       }
     }
 
-    // Prefer local asset URL / stored flow URL for re-upload only when needed
+    // Prefer local asset bytes / stored flow URL for re-upload only when needed
     let sourceUrl: string | null = null;
+    let localFilePath: string | null = null;
     const byUpstream = await prisma.asset.findFirst({
       where: { OR: [{ upstreamAssetId: mediaId }, { id: mediaId }] },
-      select: { url: true, storagePath: true },
+      select: { url: true, storagePath: true, mimeType: true },
     });
     if (byUpstream) {
       sourceUrl = byUpstream.url || byUpstream.storagePath || null;
+      if (byUpstream.storagePath && !String(byUpstream.storagePath).startsWith('http')) {
+        if (fs.existsSync(byUpstream.storagePath)) localFilePath = byUpstream.storagePath;
+      }
+      if (!localFilePath && byUpstream.url) {
+        const m = String(byUpstream.url).match(/^\/api\/assets\/file\/(.+)$/);
+        if (m?.[1]) {
+          const candidate = path.join(UPLOAD_DIR, path.basename(m[1]));
+          if (fs.existsSync(candidate)) localFilePath = candidate;
+        }
+      }
+    }
+    // Character portraits may live on Character.portraitUrl / traits.local_image_path
+    if (!localFilePath && /^[a-f0-9-]{36}$/i.test(mediaId)) {
+      const charRec = await prisma.character
+        .findFirst({
+          where: { id: mediaId },
+          select: { portraitUrl: true, traits: true },
+        })
+        .catch(() => null);
+      if (charRec) {
+        const traits =
+          charRec.traits && typeof charRec.traits === 'object'
+            ? (charRec.traits as Record<string, any>)
+            : {};
+        const localPath = String(traits.local_image_path || '').trim();
+        if (localPath && fs.existsSync(localPath)) localFilePath = localPath;
+        else if (charRec.portraitUrl && !sourceUrl) sourceUrl = charRec.portraitUrl;
+      }
     }
     if (!sourceUrl && /^https?:\/\//i.test(mediaId)) {
       sourceUrl = mediaId;
@@ -353,16 +382,70 @@ export async function refreshFlowMediaId(opts: {
     if (!sourceUrl && /^[a-f0-9-]{36}$/i.test(mediaId)) {
       sourceUrl = `https://flow-content.google/image/${mediaId}`;
     }
-    if (!sourceUrl) return mediaId;
+    if (!sourceUrl && !localFilePath) return mediaId;
 
-    // Prefer BiB upload when accountId and projectId are provided
-    if (opts.accountId && opts.projectId) {
+    // Prefer BiB base64 from local disk — avoids CDN 403
+    if (opts.accountId && opts.projectId && localFilePath) {
       try {
         const { bibUploadImage } = await import('@/lib/bib');
+        const buf = fs.readFileSync(localFilePath);
+        if (buf.length >= 100) {
+          const bibResult = await bibUploadImage({
+            accountId: opts.accountId,
+            projectId: opts.projectId,
+            imageBase64: buf.toString('base64'),
+            mimeType: byUpstream?.mimeType || mimeFromPath(localFilePath),
+            filename: path.basename(localFilePath),
+          });
+          if (bibResult?.mediaId) {
+            console.info(
+              `[refreshFlowMediaId] BiB local-file ${mediaId.slice(0, 8)} → ${bibResult.mediaId.slice(0, 8)}`
+            );
+            await waitFlowMediaReady(bibResult.mediaId);
+            return bibResult.mediaId;
+          }
+        }
+      } catch (bibErr: any) {
+        console.warn(
+          '[refreshFlowMediaId] BiB local-file upload failed:',
+          bibErr?.message || bibErr
+        );
+      }
+    }
+
+    // Prefer BiB upload when accountId and projectId are provided
+    if (opts.accountId && opts.projectId && sourceUrl) {
+      try {
+        const { bibUploadImage } = await import('@/lib/bib');
+        // If CDN URL, pull via same-origin proxy into base64 first
+        let imageBase64: string | undefined;
+        let imageUrl: string | undefined = sourceUrl;
+        if (/flow-content\.google|googleusercontent\.com/i.test(sourceUrl)) {
+          try {
+            const origin =
+              process.env.NEXTAUTH_URL ||
+              process.env.APP_URL ||
+              'http://127.0.0.1:3000';
+            const proxyUrl = `${origin.replace(/\/$/, '')}/api/assets/proxy?url=${encodeURIComponent(sourceUrl)}`;
+            const proxied = await fetch(proxyUrl, {
+              headers: opts.cookies ? { Cookie: opts.cookies } : undefined,
+            }).catch(() => null);
+            if (proxied?.ok) {
+              const buf = Buffer.from(await proxied.arrayBuffer());
+              if (buf.length >= 100) {
+                imageBase64 = buf.toString('base64');
+                imageUrl = undefined;
+              }
+            }
+          } catch {
+            /* keep imageUrl */
+          }
+        }
         const bibResult = await bibUploadImage({
           accountId: opts.accountId,
           projectId: opts.projectId,
-          imageUrl: sourceUrl,
+          imageUrl,
+          imageBase64,
         });
         if (bibResult?.mediaId) {
           console.info(`[refreshFlowMediaId] BiB reupload ${mediaId.slice(0, 8)} → ${bibResult.mediaId.slice(0, 8)}`);
@@ -374,15 +457,55 @@ export async function refreshFlowMediaId(opts: {
       }
     }
 
+    if (!sourceUrl) {
+      if (opts.forceReupload) {
+        throw new Error(`Failed to re-upload media ${mediaId} into Flow (no fetchable source)`);
+      }
+      return mediaId;
+    }
+
     const imgRes = await fetch(sourceUrl, {
       headers: opts.cookies ? { Cookie: opts.cookies } : undefined,
     });
     if (!imgRes.ok) {
       console.warn('[refreshFlowMediaId] download failed', imgRes.status, sourceUrl.slice(0, 80));
+      if (opts.forceReupload) {
+        throw new Error(
+          `Failed to re-upload media ${mediaId} into Flow (download ${imgRes.status})`
+        );
+      }
       return mediaId;
     }
     const buf = Buffer.from(await imgRes.arrayBuffer());
-    if (buf.length < 100) return mediaId;
+    if (buf.length < 100) {
+      if (opts.forceReupload) {
+        throw new Error(`Failed to re-upload media ${mediaId} into Flow (empty download)`);
+      }
+      return mediaId;
+    }
+
+    // If BiB available, upload bytes as base64 instead of Python when CDN path already failed
+    if (opts.accountId && opts.projectId) {
+      try {
+        const { bibUploadImage } = await import('@/lib/bib');
+        const bibResult = await bibUploadImage({
+          accountId: opts.accountId,
+          projectId: opts.projectId,
+          imageBase64: buf.toString('base64'),
+          mimeType: imgRes.headers.get('content-type') || 'image/png',
+          filename: `refresh-${mediaId.slice(0, 8)}.png`,
+        });
+        if (bibResult?.mediaId) {
+          console.info(
+            `[refreshFlowMediaId] BiB bytes ${mediaId.slice(0, 8)} → ${bibResult.mediaId.slice(0, 8)}`
+          );
+          await waitFlowMediaReady(bibResult.mediaId);
+          return bibResult.mediaId;
+        }
+      } catch (bibErr: any) {
+        console.warn('[refreshFlowMediaId] BiB bytes upload failed:', bibErr?.message || bibErr);
+      }
+    }
 
     const form = new FormData();
     const blob = new Blob([new Uint8Array(buf)], {
@@ -396,6 +519,9 @@ export async function refreshFlowMediaId(opts: {
     });
     if (!upRes.ok) {
       console.warn('[refreshFlowMediaId] upload failed', await upRes.text().then((t) => t.slice(0, 160)));
+      if (opts.forceReupload) {
+        throw new Error(`Failed to re-upload media ${mediaId} into Flow (Python upload failed)`);
+      }
       return mediaId;
     }
     const data = await upRes.json().catch(() => ({}));
@@ -407,6 +533,10 @@ export async function refreshFlowMediaId(opts: {
     }
   } catch (e: any) {
     console.warn('[refreshFlowMediaId]', e?.message || e);
+    if (opts.forceReupload) throw e;
+  }
+  if (opts.forceReupload) {
+    throw new Error(`Failed to re-upload media ${mediaId} into Flow`);
   }
   return mediaId;
 }

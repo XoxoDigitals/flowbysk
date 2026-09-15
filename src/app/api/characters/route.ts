@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { WalletType } from '@prisma/client';
+import fs from 'fs';
+import path from 'path';
 import { getOrCreateStudioUser } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import {
@@ -205,21 +207,75 @@ export async function POST(req: Request) {
         const sessionPrep = await prepareProviderWorkerSession(provider, session.userId);
         flowProjectId = sessionPrep.projectId || undefined;
 
-        try {
-          const bibChar = await bibCreateCharacter({
-            accountId: provider.id,
-            name: charName,
-            projectId: flowProjectId,
-            imageMediaId: body.image_media_id || null,
-          });
-          flowEntityId = bibChar.flowEntityId || bibChar.entity_id || null;
-          if (flowEntityId) {
-            console.info(
-              `[characters] BiB Flow entity ${flowEntityId.slice(0, 8)}… for "${charName}"`
-            );
+        // Upload portrait into Flow first so C4BZMd attaches media (avoid empty character)
+        let flowImageMediaId: string | null = body.image_media_id || null;
+        const portraitCandidate =
+          flowImageMediaId ||
+          (persisted?.localPath ? `upload-${path.basename(persisted.localPath)}` : null) ||
+          portraitUrl ||
+          sourcePortrait;
+        if (portraitCandidate && flowProjectId) {
+          try {
+            const { refreshFlowMediaId } = await import('@/lib/providerSession');
+            // If we have a local file path, prefer that id shape via upload-* / absolute path
+            let mediaKey = portraitCandidate;
+            if (persisted?.localPath && fs.existsSync(persisted.localPath)) {
+              // Register as local upload-style by uploading bytes through refresh via character traits path
+              const { bibUploadImage } = await import('@/lib/bib');
+              const buf = fs.readFileSync(persisted.localPath);
+              const bibUp = await bibUploadImage({
+                accountId: provider.id,
+                projectId: flowProjectId,
+                imageBase64: buf.toString('base64'),
+                mimeType: 'image/jpeg',
+                filename: path.basename(persisted.localPath),
+              });
+              if (bibUp?.mediaId) {
+                flowImageMediaId = bibUp.mediaId;
+                mediaKey = bibUp.mediaId;
+              }
+            }
+            if (!flowImageMediaId || !/^[0-9a-f-]{36}$/i.test(flowImageMediaId)) {
+              const refreshed = await refreshFlowMediaId({
+                accountId: provider.id,
+                mediaId: mediaKey,
+                cookies: sessionPrep.cookies,
+                projectId: flowProjectId,
+                forceReupload: true,
+              });
+              if (refreshed && /^[0-9a-f-]{36}$/i.test(refreshed)) {
+                flowImageMediaId = refreshed;
+              }
+            }
+          } catch (upErr: any) {
+            console.warn('[characters] portrait upload before create failed:', upErr?.message || upErr);
           }
-        } catch (bibErr: any) {
-          console.warn('[characters] BiB create-character failed:', bibErr?.message || bibErr);
+        }
+
+        if (portraitCandidate && !flowImageMediaId) {
+          console.warn(
+            `[characters] refusing bare Flow create for "${charName}" — portrait not uploaded`
+          );
+        } else {
+          try {
+            const bibChar = await bibCreateCharacter({
+              accountId: provider.id,
+              name: charName,
+              projectId: flowProjectId,
+              imageMediaId: flowImageMediaId,
+            });
+            flowEntityId = bibChar.flowEntityId || bibChar.entity_id || null;
+            if (flowEntityId) {
+              console.info(
+                `[characters] BiB Flow entity ${flowEntityId.slice(0, 8)}… for "${charName}" media=${flowImageMediaId?.slice(0, 8) || 'none'}`
+              );
+            }
+            if (flowImageMediaId) {
+              nextTraits = { ...nextTraits, image_media_id: flowImageMediaId };
+            }
+          } catch (bibErr: any) {
+            console.warn('[characters] BiB create-character failed:', bibErr?.message || bibErr);
+          }
         }
       }
 

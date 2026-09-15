@@ -1198,6 +1198,9 @@
           });
         }
         gridEl.appendChild(card);
+      }
+    });
+  }
 
   function toggleImagesDock(forceState) {
     if (typeof forceState === 'boolean') {

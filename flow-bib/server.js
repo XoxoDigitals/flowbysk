@@ -573,22 +573,22 @@ app.post('/create-character', requireInternalSecret, async (req, res) => {
     const stext = await sr.text();
     let flowEntityId = extractCharacterEntityId(stext, projectId);
 
-    // Retry bare create if create-with-media failed to parse
+    // Do not bare-create when media was requested — that yields empty Flow characters
     if (!flowEntityId && mediaIds.length) {
-      const sub2 = buildBatch(ctx, projectId, 'C4BZMd', payloadC4BZMd(projectId, charName, []));
-      const sr2 = await fetch(sub2.url, {
-        method: 'POST',
-        headers: ogiHeaders(ctx, cookie),
-        body: sub2.body,
+      console.warn(`[${accountId}] create-character with media failed to parse`, {
+        http: sr.status,
+        preview: stext.slice(0, 400),
       });
-      const text2 = await sr2.text();
-      flowEntityId = extractCharacterEntityId(text2, projectId);
-      if (!flowEntityId) {
-        console.warn(`[${accountId}] create-character bare retry failed`, {
-          http: sr2.status,
-          preview: text2.slice(0, 400),
-        });
-      }
+      return res.status(502).json({
+        success: false,
+        error:
+          'Character create with portrait failed — Flow entity id could not be parsed. Re-upload the image and retry.',
+        httpStatus: sr.status,
+        projectId,
+        accountId,
+        rawPreview: stext.slice(0, 500),
+        ms: Date.now() - t0,
+      });
     }
 
     if (!flowEntityId) {
@@ -1067,64 +1067,101 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
       const sandboxModel = String(model).includes('r2v')
         ? model
         : String(model).replace(/t2v_/g, 'r2v_').replace(/i2v_/g, 'r2v_');
-      const payload = buildReferenceImagesPayload(
-        projectId,
-        prompt,
-        sandboxModel,
-        aspectLabel,
-        uniqueRefMedia,
-        '' // token filled inside aisandboxPost
-      );
-      try {
-        const data = await s.aisandboxPost(
-          'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages',
-          payload,
-          'VIDEO_GENERATION'
-        );
-        mediaId = extractSandboxMediaId(data);
-        stages.submit = {
-          rpcid: 'aisandbox_ReferenceImages',
-          model: sandboxModel,
-          mediaId,
-          refs: uniqueRefMedia.length,
-          ms: Date.now() - t0,
-        };
-      } catch (sandboxErr) {
-        const sandboxMsg = String(sandboxErr.message || sandboxErr);
-        // First+last: try StartImage+endImage once (still multi-frame, not single MZZa6b)
-        if (imageId && endId && imageId !== endId) {
-          try {
-            const startPayload = buildStartImagePayload(
-              projectId,
-              prompt,
-              sandboxModel,
-              aspectLabel,
-              imageId,
-              endId,
-              ''
-            );
-            const data = await s.aisandboxPost(
-              'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoStartImage',
-              startPayload,
-              'VIDEO_GENERATION'
-            );
-            mediaId = extractSandboxMediaId(data);
-            stages.submit = {
-              rpcid: 'aisandbox_StartImage',
-              model: sandboxModel,
-              mediaId,
-              ms: Date.now() - t0,
-              fallbackFrom: sandboxMsg.slice(0, 120),
-            };
-          } catch (e2) {
-            stages.sandboxError = String(e2.message || e2).slice(0, 160);
-            throw e2;
-          }
+
+      // True first+last → StartImage first (correct dual-frame API)
+      if (hasFirstLast) {
+        try {
+          const startPayload = buildStartImagePayload(
+            projectId,
+            prompt,
+            sandboxModel,
+            aspectLabel,
+            imageId,
+            endId,
+            ''
+          );
+          const data = await s.aisandboxPost(
+            'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoStartImage',
+            startPayload,
+            'VIDEO_GENERATION'
+          );
+          mediaId = extractSandboxMediaId(data);
+          stages.submit = {
+            rpcid: 'aisandbox_StartImage',
+            model: sandboxModel,
+            mediaId,
+            ms: Date.now() - t0,
+          };
+        } catch (startErr) {
+          stages.startImageError = String(startErr.message || startErr).slice(0, 160);
+          console.warn(
+            `[${accountId}] StartImage failed, trying ReferenceImages:`,
+            stages.startImageError
+          );
         }
-        // Multi-ref must fail closed — never silently animate only the first image
-        if (!mediaId) {
-          stages.sandboxError = sandboxMsg.slice(0, 160);
-          throw sandboxErr;
+      }
+
+      if (!mediaId) {
+        const payload = buildReferenceImagesPayload(
+          projectId,
+          prompt,
+          sandboxModel,
+          aspectLabel,
+          uniqueRefMedia,
+          '' // token filled inside aisandboxPost
+        );
+        try {
+          const data = await s.aisandboxPost(
+            'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages',
+            payload,
+            'VIDEO_GENERATION'
+          );
+          mediaId = extractSandboxMediaId(data);
+          stages.submit = {
+            rpcid: 'aisandbox_ReferenceImages',
+            model: sandboxModel,
+            mediaId,
+            refs: uniqueRefMedia.length,
+            ms: Date.now() - t0,
+            fallbackFrom: stages.startImageError || undefined,
+          };
+        } catch (sandboxErr) {
+          const sandboxMsg = String(sandboxErr.message || sandboxErr);
+          // If StartImage wasn't tried (multi-ref without first+last), try StartImage when we have two ids
+          if (!hasFirstLast && imageId && endId && imageId !== endId) {
+            try {
+              const startPayload = buildStartImagePayload(
+                projectId,
+                prompt,
+                sandboxModel,
+                aspectLabel,
+                imageId,
+                endId,
+                ''
+              );
+              const data = await s.aisandboxPost(
+                'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoStartImage',
+                startPayload,
+                'VIDEO_GENERATION'
+              );
+              mediaId = extractSandboxMediaId(data);
+              stages.submit = {
+                rpcid: 'aisandbox_StartImage',
+                model: sandboxModel,
+                mediaId,
+                ms: Date.now() - t0,
+                fallbackFrom: sandboxMsg.slice(0, 120),
+              };
+            } catch (e2) {
+              stages.sandboxError = String(e2.message || e2).slice(0, 160);
+              throw e2;
+            }
+          }
+          // Multi-ref must fail closed — never silently animate only the first image
+          if (!mediaId) {
+            stages.sandboxError = sandboxMsg.slice(0, 160);
+            throw sandboxErr;
+          }
         }
       }
     } else {
