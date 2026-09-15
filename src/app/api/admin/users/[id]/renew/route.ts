@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
 import { applyCustomDeal } from '@/lib/customDeals';
-import { claimUserForAdmin } from '@/lib/adminScope';
+import { claimUserForAdmin, isSuperAdmin } from '@/lib/adminScope';
 
 export async function POST(
   req: Request,
@@ -12,16 +12,18 @@ export async function POST(
     const { id } = await params;
     const body = await req.json();
 
-    try {
-      await claimUserForAdmin(id, admin.userId);
-    } catch (e: any) {
-      if (e.message === 'USER_OWNED_BY_OTHER_ADMIN') {
-        return NextResponse.json(
-          { error: 'This user belongs to another admin' },
-          { status: 403 }
-        );
+    if (!isSuperAdmin(admin.role)) {
+      try {
+        await claimUserForAdmin(id, admin.userId);
+      } catch (e: any) {
+        if (e.message === 'USER_OWNED_BY_OTHER_ADMIN') {
+          return NextResponse.json(
+            { error: 'This user belongs to another admin' },
+            { status: 403 }
+          );
+        }
+        throw e;
       }
-      throw e;
     }
 
     const days = Math.max(1, Math.floor(Number(body.days) || 1));

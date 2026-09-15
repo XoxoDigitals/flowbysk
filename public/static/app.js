@@ -4920,8 +4920,18 @@
         });
         renderPickerAssetsList();
         setPickerUploadUi(false);
-        showToast(`Uploaded "${file.name}"!`, 'success');
+        showToast(
+          stageData && stageData.localOnly
+            ? `Uploaded "${file.name}" (local — worker offline)`
+            : `Uploaded "${file.name}"!`,
+          'success'
+        );
         e.target.value = '';
+        try {
+          if (typeof loadAssets === 'function') loadAssets({ silent: true });
+        } catch {
+          /* ignore */
+        }
 
         // If the picker modal was opened with a callback (e.g. for Start Frame or End Frame or Ingredient), auto-select!
         if (state.refPickerCallback) {
@@ -5042,10 +5052,14 @@
     } else if (_currentPickerCategory === 'upload') {
       filtered = allItems.filter(i =>
         i.source === 'upload' ||
+        i.category === 'upload' ||
         i._uploading ||
         String(i.id || '').startsWith('upload-') ||
         String(i.id || '').startsWith('staged-') ||
-        String(i.id || '').startsWith('uploading-')
+        String(i.id || '').startsWith('uploading-') ||
+        String(i.staged_id || '').startsWith('upload-') ||
+        String(i.staged_id || '').startsWith('staged-') ||
+        String(i.url || '').includes('/api/assets/file/')
       );
     }
 

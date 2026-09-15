@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
-import { claimUserForAdmin } from '@/lib/adminScope';
+import { claimUserForAdmin, isSuperAdmin } from '@/lib/adminScope';
 
 export async function POST(
   req: Request,
@@ -13,16 +13,38 @@ export async function POST(
     const body = await req.json();
     const { planName, reason } = body;
 
-    try {
-      await claimUserForAdmin(id, admin.userId);
-    } catch (e: any) {
-      if (e.message === 'USER_OWNED_BY_OTHER_ADMIN') {
+    const target = await prisma.user.findUnique({
+      where: { id },
+      select: { id: true, role: true, email: true },
+    });
+    if (!target) {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+
+    // Only SUPER_ADMIN may change plans for ADMIN / RESELLER / other staff-owned users
+    if (!isSuperAdmin(admin.role)) {
+      if (target.role !== 'CUSTOMER') {
         return NextResponse.json(
-          { error: 'This user belongs to another admin' },
+          { error: 'Only Super Admin can change plans for admin or reseller accounts' },
           { status: 403 }
         );
       }
-      throw e;
+      try {
+        await claimUserForAdmin(id, admin.userId);
+      } catch (e: any) {
+        if (e.message === 'USER_OWNED_BY_OTHER_ADMIN') {
+          return NextResponse.json(
+            { error: 'This user belongs to another admin' },
+            { status: 403 }
+          );
+        }
+        throw e;
+      }
+    } else if (target.role === 'SUPER_ADMIN' && target.id !== admin.userId) {
+      return NextResponse.json(
+        { error: 'Cannot change another Super Admin plan from this screen' },
+        { status: 403 }
+      );
     }
 
     const plan = await prisma.plan.findUnique({
@@ -56,7 +78,7 @@ export async function POST(
         action: 'PLAN_CHANGE',
         targetType: 'USER',
         targetId: id,
-        details: { planName, reason },
+        details: { planName, reason, targetRole: target.role },
       },
     });
 

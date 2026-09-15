@@ -216,6 +216,11 @@ export async function GET(req: Request) {
         const matchingMeta = (matchingJob?.outputMetadata as any) || {};
         const matchingParams = (matchingJob?.parameters as any) || {};
         const resolvedExpires = resolveMediaExpiresAt(safeUrl, a.expiresAt);
+        const upstream = String(a.upstreamAssetId || '');
+        const isUpload =
+          upstream.startsWith('staged-') ||
+          upstream.startsWith('upload-') ||
+          String(a.url || '').includes('/api/assets/file/');
         return {
           id: a.id,
           jobId: matchingJob?.id || undefined,
@@ -236,6 +241,9 @@ export async function GET(req: Request) {
           ),
           // Keep raw key for retries
           model_key: matchingParams.model || matchingJob?.modelKey || undefined,
+          source: isUpload ? 'upload' : matchingParams.source || undefined,
+          staged_id: isUpload ? upstream || undefined : undefined,
+          category: isUpload ? 'upload' : undefined,
           upscaled_url: matchingMeta.upscaled_url || undefined,
           upscaled_download_url: matchingMeta.upscaled_download_url || undefined,
           upscaled_resolution: matchingMeta.upscaled_resolution || undefined,

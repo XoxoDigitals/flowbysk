@@ -221,13 +221,12 @@ export default function AdminUsersPage() {
           reason: planReason,
         }),
       });
-
-      if (res.ok) {
-        setPlanUser(null);
-        fetchUsers();
-      }
-    } catch (err) {
-      console.error(err);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Plan update failed');
+      setPlanUser(null);
+      fetchUsers();
+    } catch (err: any) {
+      alert(err.message || 'Plan update failed');
     } finally {
       setPlanLoading(false);
     }
@@ -484,6 +483,11 @@ export default function AdminUsersPage() {
                         <ArrowUpRight className="h-3 w-3 text-[var(--ink3)] group-hover:text-[var(--a1)]" />
                       </Link>
                       <div className="font-mono text-[11px] text-[var(--ink3)]">{u.email}</div>
+                      {u.role && u.role !== 'CUSTOMER' ? (
+                        <div className="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--a2)]">
+                          {u.role}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-medium text-[var(--ink)]">{u.ownerLabel || '—'}</div>

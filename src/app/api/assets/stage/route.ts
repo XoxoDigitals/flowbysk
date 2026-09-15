@@ -63,7 +63,8 @@ export async function POST(req: Request) {
     const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24-hour expiry
     const isVideo = file.type.startsWith('video');
 
-    // Upstream staging on Python worker — required so Generate can resolve staged-* ids
+    // Upstream staging on Python worker — preferred so Generate can resolve staged-* ids.
+    // If worker is down, keep a local upload-* id so Studio Upload media still works.
     let pythonStagedId: string | null = null;
     let upstreamError = '';
     try {
@@ -87,19 +88,10 @@ export async function POST(req: Request) {
       upstreamError = e?.message || 'Worker stage unreachable';
     }
 
+    const localStagedId = `upload-${diskFileName}`;
+    const stagedId = pythonStagedId || localStagedId;
     if (!pythonStagedId) {
-      try {
-        fs.unlinkSync(filePath);
-      } catch {
-        /* ignore */
-      }
-      return NextResponse.json(
-        {
-          error: upstreamError || 'Failed to stage image on worker',
-          detail: upstreamError || 'Failed to stage image on worker',
-        },
-        { status: 502 }
-      );
+      console.warn('[assets/stage] Python stage failed, using local id:', upstreamError);
     }
 
     const asset = await prisma.asset.create({
@@ -112,7 +104,7 @@ export async function POST(req: Request) {
         fileSize: file.size,
         storagePath: filePath,
         url: `/api/assets/file/${diskFileName}`,
-        upstreamAssetId: pythonStagedId,
+        upstreamAssetId: stagedId,
         expiresAt,
       },
     });
@@ -121,13 +113,16 @@ export async function POST(req: Request) {
       success: true,
       asset: {
         id: asset.id,
-        staged_id: pythonStagedId,
+        staged_id: stagedId,
         url: asset.url,
         name: asset.fileName,
         type: asset.fileType,
+        source: 'upload',
       },
-      staged_id: pythonStagedId,
-      media_id: pythonStagedId,
+      staged_id: stagedId,
+      media_id: stagedId,
+      localOnly: !pythonStagedId,
+      warning: pythonStagedId ? undefined : upstreamError || 'Staged locally (worker offline)',
     });
   } catch (error: any) {
     console.error('Asset stage error:', error);

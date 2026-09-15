@@ -18,10 +18,15 @@ export async function POST(
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
     if (target.role === 'ADMIN' || target.role === 'SUPER_ADMIN' || target.role === 'RESELLER') {
-      return NextResponse.json(
-        { error: 'Cannot ban staff or reseller accounts from Users' },
-        { status: 403 }
-      );
+      if (admin.role !== 'SUPER_ADMIN') {
+        return NextResponse.json(
+          { error: 'Only Super Admin can ban staff or reseller accounts' },
+          { status: 403 }
+        );
+      }
+      if (target.role === 'SUPER_ADMIN') {
+        return NextResponse.json({ error: 'Cannot ban Super Admin' }, { status: 403 });
+      }
     }
 
     const user = await prisma.user.update({

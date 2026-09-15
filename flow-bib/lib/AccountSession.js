@@ -16,7 +16,7 @@ const {
   projectFromHref,
   sleep,
 } = require('./helpers');
-const { resolveEgressProxyUrl, parseProxyForChrome } = require('./egressProxy');
+const { resolveEgressProxyUrl, parseProxyForChrome, rotateAccountProxy, clearEgressProxyCache } = require('./egressProxy');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
@@ -114,6 +114,9 @@ class AccountSession {
     this.egressCountryCode = null;
     this.egressError = null;
     this._mintLock = null;
+    this._proxyFailStreak = 0;
+    this._proxyCheckTick = 0;
+    this._proxyRecovering = false;
   }
 
   /** Safely update profileDir post-construction (e.g. re-launch with a new opts.profileDir). */
@@ -1545,7 +1548,59 @@ class AccountSession {
           }
         })
         .catch(() => {});
+
+      // Every ~60s probe egress; if proxy tunnel is dead, rotate + relaunch
+      this._proxyCheckTick = (this._proxyCheckTick || 0) + 1;
+      if (this._proxyCheckTick % 4 === 0) {
+        this._recoverDeadProxy().catch(() => {});
+      }
     }, 15000);
+  }
+
+  /**
+   * Detect mid-session proxy drop (tunnel dead / no exit IP) and self-heal:
+   * assign a different unique proxy, then relaunch Chrome on the same profile.
+   */
+  async _recoverDeadProxy() {
+    if (this._proxyRecovering || this.status === 'STARTING' || this.status === 'STOPPED') return;
+    if (!this.browser) return;
+
+    let assigned = null;
+    try {
+      assigned = await resolveEgressProxyUrl({ accountId: this.accountId, force: true });
+    } catch {
+      assigned = null;
+    }
+    if (!assigned) return;
+
+    const info = await this.refreshEgressIp().catch(() => null);
+    if (info && info.ip) {
+      this._proxyFailStreak = 0;
+      return;
+    }
+
+    this._proxyFailStreak = (this._proxyFailStreak || 0) + 1;
+    console.warn(
+      `[${this.accountId}] egress proxy looks dead (${this._proxyFailStreak}/2) — ${this.egressError || 'no exit IP'}`
+    );
+    if (this._proxyFailStreak < 2) return;
+
+    this._proxyRecovering = true;
+    try {
+      clearEgressProxyCache();
+      const next = rotateAccountProxy(this.accountId);
+      console.warn(
+        `[${this.accountId}] rotating dead proxy → ${next || 'none'} and relaunching (keep login)`
+      );
+      await this.disconnect({ clearProfile: false });
+      await sleep(800);
+      await this.launch();
+      this._proxyFailStreak = 0;
+    } catch (e) {
+      console.warn(`[${this.accountId}] proxy recover failed:`, e.message || e);
+    } finally {
+      this._proxyRecovering = false;
+    }
   }
 
   _stopHealthLoop() {

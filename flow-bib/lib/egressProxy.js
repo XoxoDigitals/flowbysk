@@ -112,7 +112,7 @@ function readMirror() {
  * Assign / return a unique proxy for this BiB account.
  * Prefers unused proxies; if short, reuses least-used.
  */
-function ensureAccountProxy(accountId) {
+function ensureAccountProxy(accountId, { forceNew = false } = {}) {
   if (!accountId) return readMirror();
   const raw = readMirrorFile() || { proxies: [], assignments: {} };
   const enabled = enabledProxies(raw);
@@ -122,7 +122,7 @@ function ensureAccountProxy(accountId) {
     raw.assignments && typeof raw.assignments === 'object' ? { ...raw.assignments } : {};
 
   const existingId = assignments[accountId];
-  if (existingId) {
+  if (existingId && !forceNew) {
     const hit = enabled.find((p) => p.id === existingId);
     if (hit) return hit.url;
   }
@@ -133,7 +133,23 @@ function ensureAccountProxy(accountId) {
     if (usedCounts.has(pid)) usedCounts.set(pid, (usedCounts.get(pid) || 0) + 1);
   }
 
-  let pick = enabled.find((p) => (usedCounts.get(p.id) || 0) === 0);
+  // When forcing a new proxy (dead tunnel), prefer next unused / different id
+  let pick = null;
+  if (forceNew && existingId && enabled.length > 1) {
+    const curIdx = Math.max(0, enabled.findIndex((p) => p.id === existingId));
+    for (let i = 1; i < enabled.length; i++) {
+      const cand = enabled[(curIdx + i) % enabled.length];
+      if ((usedCounts.get(cand.id) || 0) === 0) {
+        pick = cand;
+        break;
+      }
+    }
+    if (!pick) pick = enabled[(curIdx + 1) % enabled.length];
+  }
+
+  if (!pick) {
+    pick = enabled.find((p) => (usedCounts.get(p.id) || 0) === 0);
+  }
   if (!pick) {
     pick = [...enabled].sort(
       (a, b) => (usedCounts.get(a.id) || 0) - (usedCounts.get(b.id) || 0)
@@ -142,7 +158,9 @@ function ensureAccountProxy(accountId) {
       `[egress-proxy] not enough unique proxies — reusing ${pick.id} for account ${accountId.slice(0, 8)} (add more proxies)`
     );
   } else {
-    console.log(`[egress-proxy] assigned unique proxy ${pick.id} → account ${accountId.slice(0, 8)}`);
+    console.log(
+      `[egress-proxy] assigned ${forceNew ? 'rotated' : 'unique'} proxy ${pick.id} → account ${accountId.slice(0, 8)}`
+    );
   }
 
   assignments[accountId] = pick.id;
@@ -153,6 +171,10 @@ function ensureAccountProxy(accountId) {
     assignments,
   });
   return pick.url;
+}
+
+function rotateAccountProxy(accountId) {
+  return ensureAccountProxy(accountId, { forceNew: true });
 }
 
 function clearEgressProxyCache() {
@@ -228,5 +250,6 @@ module.exports = {
   normalizeProxyUrl,
   readMirror,
   ensureAccountProxy,
+  rotateAccountProxy,
   clearEgressProxyCache,
 };

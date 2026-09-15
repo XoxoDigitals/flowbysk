@@ -14,13 +14,17 @@ export function calendarMonthKey(d = new Date()): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
-/** Claim customer for this admin if unowned or already owned by them. */
+/** Claim customer for this admin if unowned or already owned by them.
+ * Super-admins should not call this for ownership gating — they can manage anyone.
+ */
 export async function claimUserForAdmin(customerId: string, adminId: string) {
   const user = await prisma.user.findUnique({
     where: { id: customerId },
     select: { id: true, ownedByAdminId: true, role: true },
   });
-  if (!user || user.role !== UserRole.CUSTOMER) return null;
+  if (!user) throw new Error('USER_NOT_FOUND');
+  // Staff / reseller accounts are not claimed into an admin pool
+  if (user.role !== UserRole.CUSTOMER) return user;
   if (user.ownedByAdminId && user.ownedByAdminId !== adminId) {
     throw new Error('USER_OWNED_BY_OTHER_ADMIN');
   }
@@ -34,13 +38,15 @@ export async function claimUserForAdmin(customerId: string, adminId: string) {
   });
 }
 
-/** Where clause for customers visible to this staff session. */
+/** Where clause for users visible to this staff session. */
 export function customerScopeWhere(session: AuthSession): Record<string, unknown> {
   if (isSuperAdmin(session.role)) {
-    // Super admin sees everyone; still filter to customers for user lists by default
-    return { role: UserRole.CUSTOMER };
+    // Super admin can manage customers, resellers, and sub-admins (plans, bans, etc.)
+    return {
+      role: { in: [UserRole.CUSTOMER, UserRole.RESELLER, UserRole.ADMIN] },
+    };
   }
-  // Sub-admin: owned by me OR unclaimed pool
+  // Sub-admin: owned by me OR unclaimed pool (customers only)
   return {
     role: UserRole.CUSTOMER,
     OR: [{ ownedByAdminId: session.userId }, { ownedByAdminId: null }],
