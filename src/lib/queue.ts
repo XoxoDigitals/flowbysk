@@ -13,6 +13,8 @@ import {
   resolveImageWireModel,
   resolveVideoFrontendModel,
   resolveVideoWireModel,
+  nextImageWireModel,
+  isImageModelQuotaError,
 } from './modelWire';
 import { resolveTargetFlowProject } from './flowProjects';
 import {
@@ -174,6 +176,7 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
   });
 
   // Call the Python FastAPI execution engine (one automatic retry on System Error)
+  let attemptImageModel: string | null = null;
   try {
     await withSystemErrorRetry(
       async () => {
@@ -232,7 +235,14 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
           provider.browserStatus === BrowserStatus.READY ||
           (Array.isArray(provider.flowProjectIds) && (provider.flowProjectIds as string[]).length > 0);
         // BiB needs remapped wire keys for all BiB paths (including I2V)
-        const workerModel = useBib ? wireModel : feModel;
+        if (!isVideo) {
+          if (!attemptImageModel) attemptImageModel = useBib ? wireModel : feModel;
+        }
+        const workerModel = isVideo
+          ? useBib
+            ? wireModel
+            : feModel
+          : attemptImageModel || wireModel;
 
         if (targetProjectId) {
           await prisma.generationJob.update({
@@ -463,7 +473,14 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
         delayMs: 1800,
         providerAccountId: provider.id,
         shouldContinue: async () => !(await isJobCancelled(job.id)),
-        onRetry: async () => {
+        onRetry: async (err) => {
+          if (isImageModelQuotaError(err) && attemptImageModel) {
+            const prev = attemptImageModel;
+            attemptImageModel = nextImageWireModel(attemptImageModel);
+            console.warn(
+              `[queue-job:${job.id}] daily quota on ${prev} — retry with next image model ${attemptImageModel}`
+            );
+          }
           if (await isJobCancelled(job.id)) return;
           await prisma.generationJob.update({
             where: { id: job.id },

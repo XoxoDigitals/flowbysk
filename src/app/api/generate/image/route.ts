@@ -12,7 +12,7 @@ import { resolveMediaExpiresAt } from '@/lib/mediaExpiry';
 import { bibGenerateImage, ensureBibAccountReady } from '@/lib/bib';
 import { createStudioLog } from '@/lib/studioLogs';
 import { resolveTargetFlowProject } from '@/lib/flowProjects';
-import { resolveImageFrontendModel, resolveImageWireModel } from '@/lib/modelWire';
+import { resolveImageFrontendModel, resolveImageWireModel, nextImageWireModel, isImageModelQuotaError } from '@/lib/modelWire';
 // image remaps: Python remaps FE→wire once; BiB needs wire keys directly.
 
 export async function POST(req: Request) {
@@ -247,6 +247,7 @@ export async function POST(req: Request) {
         });
       }
 
+      let attemptModel = wireModel;
       const { primaryUrl } = await withSystemErrorRetry(
         async () => {
           if (useBib) {
@@ -266,7 +267,7 @@ export async function POST(req: Request) {
               accountId: provider.id,
               prompt: job.prompt!,
               aspectRatio: aspect_ratio,
-              model: wireModel,
+              model: attemptModel,
               projectId: targetProjectId,
               characters: charPayload,
             });
@@ -285,7 +286,19 @@ export async function POST(req: Request) {
 
           throw new Error('BiB provider required for image generation — Launch account in Admin');
         },
-        { label: `api-image:${job.id}`, delayMs: 1800, providerAccountId: provider.id }
+        {
+          label: `api-image:${job.id}`,
+          delayMs: 1800,
+          providerAccountId: provider.id,
+          onRetry: async (err) => {
+            if (!isImageModelQuotaError(err)) return;
+            const prev = attemptModel;
+            attemptModel = nextImageWireModel(attemptModel);
+            console.warn(
+              `[api-image:${job.id}] daily quota on ${prev} — retry with next image model ${attemptModel}`
+            );
+          },
+        }
       );
 
       // User may have pressed Stop while worker was running

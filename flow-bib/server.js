@@ -744,67 +744,110 @@ app.post('/generate', requireInternalSecret, async (req, res) => {
         `[${accountId}] T2I characters=${charRefs.map((c) => `${c.name}:${String(c.entity_id).slice(0, 8)}`).join(',')} refs=${uniqueRefs.length}`
       );
     }
-    const { url, body, seed } = buildOgiRequest(
-      freshCtx,
-      projectId,
-      prompt,
-      String(model || 'GEM_PIX_2').toUpperCase(),
-      aspectRatio,
-      recaptcha,
-      uniqueRefs,
-      destCharId ? [] : charRefs,
-      destCharId || undefined
-    );
-    const r = await fetch(url, { method: 'POST', headers: ogiHeaders(freshCtx, cookie), body });
-    const text = await r.text();
-    const imageUrl = extractImageUrl(text);
-    const mediaId =
-      (imageUrl && (imageUrl.match(/image\/([0-9a-f-]{36})/i) || [])[1]) ||
-      extractPollId(text, projectId);
-    if (!imageUrl && !mediaId) {
-      // Surface Flow/WIZ errors instead of opaque "No image URL"
-      const quota =
-        /PER_MODEL_DAILY_QUOTA|QUOTA_REACHED|RESOURCE_EXHAUSTED/i.test(text) &&
-        'Google daily quota reached for this image model';
+    const IMAGE_WIRE_MODELS = ['NARWHAL', 'HARBOR_SEAL', 'GEM_PIX_2'];
+    const startModel = String(model || 'GEM_PIX_2').toUpperCase().replace(/-/g, '_');
+    const startIdx = Math.max(0, IMAGE_WIRE_MODELS.indexOf(startModel));
+    const modelChain = [0, 1, 2].map((off) => IMAGE_WIRE_MODELS[(startIdx + off) % IMAGE_WIRE_MODELS.length]);
+
+    let imageUrl = null;
+    let mediaId = null;
+    let usedModel = modelChain[0];
+    let lastErrMsg = 'No image URL in response';
+    let lastRaw = '';
+    let lastHttp = 0;
+
+    for (let mi = 0; mi < modelChain.length; mi++) {
+      const tryModel = modelChain[mi];
+      usedModel = tryModel;
+      // Fresh mint each attempt — quota retries can be seconds apart
+      const mint = mi === 0 ? recaptcha : await s.mintRecaptcha('IMAGE_GENERATION');
+      if (!mint || mint.length < 50) {
+        lastErrMsg = 'reCAPTCHA mint failed';
+        break;
+      }
+      const attemptCtx = mi === 0 ? freshCtx : await s.readContext();
+      const { cookie: attemptCookie } =
+        mi === 0 ? { cookie } : await s.cookieHeaderFor(attemptCtx.origin);
+      const { url, body } = buildOgiRequest(
+        attemptCtx,
+        projectId,
+        prompt,
+        tryModel,
+        aspectRatio,
+        mint,
+        uniqueRefs,
+        destCharId ? [] : charRefs,
+        destCharId || undefined
+      );
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: ogiHeaders(attemptCtx, attemptCookie),
+        body,
+      });
+      const text = await r.text();
+      lastHttp = r.status;
+      lastRaw = text.slice(0, 600);
+      imageUrl = extractImageUrl(text);
+      mediaId =
+        (imageUrl && (imageUrl.match(/image\/([0-9a-f-]{36})/i) || [])[1]) ||
+        extractPollId(text, projectId);
+      if (imageUrl || mediaId) break;
+
+      const isQuota = /PER_MODEL_DAILY_QUOTA|QUOTA_REACHED|RESOURCE_EXHAUSTED/i.test(text);
       const wrbErr = /\[\[\"e\",\s*(\d+)/.exec(text);
       const throttled = /USER_REQUESTS_THROTTLED|REQUESTS_THROTTLED/i.test(text);
       const emptyChar =
         charRefs.length > 0 && /wrb\.fr","ogiZ0b",null/.test(text)
           ? 'Flow rejected character image request — check character is synced in this project'
           : null;
-      const errMsg =
-        quota ||
+      lastErrMsg =
+        (isQuota && 'Google daily quota reached for this image model') ||
         emptyChar ||
         (throttled
           ? `PUBLIC_ERROR_USER_REQUESTS_THROTTLED (batchexecute e=${wrbErr ? wrbErr[1] : '4'})`
           : null) ||
         (wrbErr ? `Flow batchexecute error e=${wrbErr[1]}` : null) ||
         'No image URL in response';
+
       console.warn(
-        `[${accountId}] image generate: ${errMsg} chars=${charRefs.length} refs=${uniqueRefs.length} http=${r.status}`,
+        `[${accountId}] image generate: ${lastErrMsg} model=${tryModel} chars=${charRefs.length} refs=${uniqueRefs.length} http=${r.status}`,
         text.slice(0, 400)
       );
+
+      if (isQuota && mi < modelChain.length - 1) {
+        const next = modelChain[mi + 1];
+        console.warn(
+          `[${accountId}] per-model daily quota on ${tryModel} — auto-routing to next image model ${next}`
+        );
+        await sleep(400);
+        continue;
+      }
+      break;
+    }
+
+    if (!imageUrl && !mediaId) {
       return res.status(502).json({
         success: false,
-        httpStatus: r.status,
-        error: errMsg,
-        raw: text.slice(0, 600),
+        httpStatus: lastHttp,
+        error: lastErrMsg,
+        raw: lastRaw,
         durationMs: Date.now() - t0,
         projectId,
+        model: usedModel,
         characterCount: charRefs.length,
         characterIds: charRefs.map((c) => c.entity_id),
       });
     }
     res.json({
       success: true,
+      model: usedModel,
       status: imageUrl ? 'COMPLETED' : 'PROCESSING',
       imageUrl: imageUrl || null,
       url: imageUrl || null,
       mediaId: mediaId || null,
-      seed,
       projectId,
       accountId,
-      httpStatus: r.status,
+      httpStatus: lastHttp || 200,
       durationMs: Date.now() - t0,
       assets: imageUrl
         ? [{ url: imageUrl, id: mediaId, status: 'COMPLETED' }]

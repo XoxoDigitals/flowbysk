@@ -124,3 +124,39 @@ export function resolveImageFrontendModel(frontendModel: string): string {
   }
   return u || 'GEM_PIX_2';
 }
+
+/** Flow wire keys for Nano Banana image models (cycle order for quota fallback). */
+export const IMAGE_WIRE_MODELS = ['NARWHAL', 'HARBOR_SEAL', 'GEM_PIX_2'] as const;
+
+export function isImageModelQuotaError(raw: unknown): boolean {
+  const text = String(raw ?? '');
+  return /PER_MODEL_DAILY_QUOTA|DAILY_QUOTA_REACHED|daily quota reached for this image model|QUOTA_REACHED|RESOURCE_EXHAUSTED/i.test(
+    text
+  );
+}
+
+/** Normalize to a known image wire key. */
+export function normalizeImageWireModel(model: string): string {
+  const u = String(model || '')
+    .toUpperCase()
+    .replace(/-/g, '_')
+    .replace(/\s+/g, '_');
+  if (IMAGE_WIRE_MODELS.includes(u as (typeof IMAGE_WIRE_MODELS)[number])) return u;
+  return resolveImageWireModel(model);
+}
+
+/** Next image wire model after a per-model daily quota hit. */
+export function nextImageWireModel(current: string): string {
+  const cur = normalizeImageWireModel(current);
+  const idx = IMAGE_WIRE_MODELS.indexOf(cur as (typeof IMAGE_WIRE_MODELS)[number]);
+  const i = idx >= 0 ? idx : 0;
+  return IMAGE_WIRE_MODELS[(i + 1) % IMAGE_WIRE_MODELS.length];
+}
+
+/** Ordered list starting at current, then remaining models (for in-request fallback). */
+export function imageWireModelFallbackChain(start: string): string[] {
+  const first = normalizeImageWireModel(start);
+  const idx = IMAGE_WIRE_MODELS.indexOf(first as (typeof IMAGE_WIRE_MODELS)[number]);
+  const i = idx >= 0 ? idx : 0;
+  return [0, 1, 2].map((off) => IMAGE_WIRE_MODELS[(i + off) % IMAGE_WIRE_MODELS.length]);
+}

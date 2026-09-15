@@ -7,7 +7,7 @@ import { selectProviderAccountForJobDetailed } from '@/lib/routing';
 import { checkAndDispatchNextJobs } from '@/lib/queue';
 import { JobStatus } from '@prisma/client';
 import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
-import { resolveImageFrontendModel, resolveImageWireModel } from '@/lib/modelWire';
+import { resolveImageFrontendModel, resolveImageWireModel, nextImageWireModel, isImageModelQuotaError } from '@/lib/modelWire';
 import { createStudioLog } from '@/lib/studioLogs';
 import { prepareProviderWorkerSession, refreshFlowMediaId } from '@/lib/providerSession';
 import { bibGenerateImage, ensureBibAccountReady } from '@/lib/bib';
@@ -268,13 +268,14 @@ export async function POST(req: Request) {
         profileDir: provider.profileDir,
       });
 
+      let attemptModel = wireModel;
       const { primary, primaryUrl, workerData } = await withSystemErrorRetry(
         async () => {
           const data = await bibGenerateImage({
             accountId: provider.id,
             prompt: job.prompt,
             aspectRatio: aspect_ratio,
-            model: wireModel,
+            model: attemptModel,
             projectId: targetProjectId,
             imageIds: flowRefs,
             imageId: flowRefs[0],
@@ -290,7 +291,7 @@ export async function POST(req: Request) {
           const url = p.url || data.imageUrl || data.url || '';
           const st = String(p.status || data.status || '').toUpperCase();
           if (!url && !data.mediaId && st !== 'PROCESSING' && st !== 'PENDING') {
-            throw new Error('BiB returned no image URL or media id');
+            throw new Error(data.error || 'BiB returned no image URL or media id');
           }
           return {
             primary: { ...p, id: p.id || data.mediaId, media_id: data.mediaId },
@@ -298,7 +299,20 @@ export async function POST(req: Request) {
             workerData: data,
           };
         },
-        { label: `api-i2i-bib:${job.id}`, delayMs: 2000, maxAttempts: 3, providerAccountId: provider.id }
+        {
+          label: `api-i2i-bib:${job.id}`,
+          delayMs: 2000,
+          maxAttempts: 3,
+          providerAccountId: provider.id,
+          onRetry: async (err) => {
+            if (!isImageModelQuotaError(err)) return;
+            const prev = attemptModel;
+            attemptModel = nextImageWireModel(attemptModel);
+            console.warn(
+              `[api-i2i:${job.id}] daily quota on ${prev} — retry with next image model ${attemptModel}`
+            );
+          },
+        }
       );
 
       const latest = await prisma.generationJob.findUnique({ where: { id: job.id } });
