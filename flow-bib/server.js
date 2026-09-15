@@ -567,6 +567,23 @@ app.post('/create-character', requireInternalSecret, async (req, res) => {
       .map((x) => String(x || '').trim())
       .filter(Boolean);
 
+    // Caller intended a portrait but sent a non-UUID — refuse silent empty create
+    const rawPortraitHint = imageMediaId || (Array.isArray(imageMediaIds) && imageMediaIds[0]);
+    if (rawPortraitHint && !mediaIds.length) {
+      return res.status(400).json({
+        error: 'imageMediaId must be a Flow media UUID when creating a character with a portrait',
+        ms: Date.now() - t0,
+      });
+    }
+    for (const mid of mediaIds) {
+      if (!/^[0-9a-f-]{36}$/i.test(mid)) {
+        return res.status(400).json({
+          error: `Invalid portrait media id (expected UUID): ${String(mid).slice(0, 48)}`,
+          ms: Date.now() - t0,
+        });
+      }
+    }
+
     // Fresh uploads often need a beat before C4BZMd will accept them
     if (mediaIds.length) await sleep(1500);
 

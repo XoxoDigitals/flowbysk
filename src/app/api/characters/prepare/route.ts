@@ -1,14 +1,20 @@
 import { NextResponse } from 'next/server';
 import { WalletType } from '@prisma/client';
+import fs from 'fs';
+import path from 'path';
 import { getOrCreateStudioUser } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { selectProviderAccountForJobDetailed } from '@/lib/routing';
-import { prepareProviderWorkerSession, refreshFlowMediaId } from '@/lib/providerSession';
-import { bibCreateCharacter, bibGenerateImage, ensureBibAccountReady } from '@/lib/bib';
+import { prepareProviderWorkerSession, refreshFlowMediaId, waitFlowMediaReady } from '@/lib/providerSession';
+import { bibCreateCharacter, bibGenerateImage, bibUploadImage, ensureBibAccountReady } from '@/lib/bib';
 import { PYTHON_WORKER_URL } from '@/lib/worker';
 import { resolveImageWireModel } from '@/lib/modelWire';
 
 const CHARACTER_PORTRAIT_PROMPT = 'Make the same picture in white background';
+
+function isFlowMediaUuid(id: string | null | undefined): boolean {
+  return !!id && /^[0-9a-f-]{36}$/i.test(id);
+}
 
 type CharIn = {
   entity_id?: string;
@@ -107,40 +113,71 @@ export async function POST(req: Request) {
         raw.image_media_id ||
         traits.image_media_id ||
         null;
+      const localPathRaw =
+        raw.local_image_path ||
+        traits.local_image_path ||
+        null;
+      const localPath =
+        typeof localPathRaw === 'string' && localPathRaw && fs.existsSync(localPathRaw)
+          ? localPathRaw
+          : null;
       const imageUrl =
         raw.image_url ||
         raw.portraitUrl ||
         dbChar?.portraitUrl ||
         traits.image_url ||
-        raw.local_image_path ||
-        traits.local_image_path ||
+        localPathRaw ||
         null;
-      const wantsPortrait = !!(imageMediaId || imageUrl);
+      const wantsPortrait = !!(imageMediaId || imageUrl || localPath);
 
-      // Promote portrait into Flow when possible; keep UUID even if reupload fails (may already be in project)
+      // Promote portrait into Flow; refuse empty entity create when portrait is required
       if (wantsPortrait) {
         try {
-          const refreshed = await refreshFlowMediaId({
-            accountId: provider.id,
-            mediaId: imageMediaId || imageUrl,
-            cookies: sessionPrep.cookies,
-            projectId: projectId || undefined,
-            forceReupload: !/^[0-9a-f-]{36}$/i.test(String(imageMediaId || '')),
-          });
-          if (refreshed && /^[0-9a-f-]{36}$/i.test(refreshed)) {
-            imageMediaId = refreshed;
+          if (localPath && projectId) {
+            const buf = fs.readFileSync(localPath);
+            const bibUp = await bibUploadImage({
+              accountId: provider.id,
+              projectId,
+              imageBase64: buf.toString('base64'),
+              mimeType: 'image/jpeg',
+              filename: path.basename(localPath),
+            });
+            if (isFlowMediaUuid(bibUp?.mediaId)) {
+              imageMediaId = bibUp.mediaId;
+            }
+          }
+          if (!isFlowMediaUuid(imageMediaId)) {
+            const refreshed = await refreshFlowMediaId({
+              accountId: provider.id,
+              mediaId: imageMediaId || imageUrl,
+              cookies: sessionPrep.cookies,
+              projectId: projectId || undefined,
+              forceReupload: !isFlowMediaUuid(imageMediaId),
+            });
+            if (isFlowMediaUuid(refreshed)) {
+              imageMediaId = refreshed!;
+            }
+          }
+          if (isFlowMediaUuid(imageMediaId)) {
+            await waitFlowMediaReady(String(imageMediaId));
           }
         } catch (e: any) {
           console.warn('[characters/prepare] portrait promote:', e?.message || e);
         }
-        if (!imageMediaId || !/^[0-9a-f-]{36}$/i.test(String(imageMediaId))) {
-          console.warn(
-            `[characters/prepare] no Flow portrait UUID for "${name}" yet — creating entity anyway`
+        if (!isFlowMediaUuid(imageMediaId)) {
+          throw new Error(
+            `Character "${name}" has no Flow portrait UUID — re-upload the image or recreate the character`
           );
         }
       }
 
+      let portraitBindNeeded = false;
       if (looksLocalOnly || !flowEntityId || !/^[0-9a-f-]{36}$/i.test(flowEntityId)) {
+        if (wantsPortrait && !isFlowMediaUuid(imageMediaId)) {
+          throw new Error(
+            `Refusing to create empty Flow character "${name}" without portrait UUID`
+          );
+        }
         try {
           const created = await bibCreateCharacter({
             accountId: provider.id,
@@ -152,22 +189,31 @@ export async function POST(req: Request) {
           if ((created as any)?.imageMediaId && !imageMediaId) {
             imageMediaId = (created as any).imageMediaId;
           }
+          portraitBindNeeded =
+            !!(created as any)?.portraitBindNeeded ||
+            (wantsPortrait && !(created as any)?.createdWithMedia);
           // Force portrait bind when BiB fell back to bare create
-          if ((created as any)?.portraitBindNeeded) {
+          if (portraitBindNeeded) {
             traits.portrait_bound = false;
             traits.flow_portrait_bound = false;
+          } else if ((created as any)?.createdWithMedia) {
+            traits.portrait_bound = true;
+            traits.flow_portrait_bound = true;
           }
         } catch (e: any) {
           console.warn('[characters/prepare] create failed:', e?.message || e);
+          throw new Error(
+            `Failed to create Flow character "${name}": ${e?.message || 'unknown error'}`
+          );
         }
       }
 
       // White-bg portrait bind when we have Flow entity + source image
       const needsPortrait =
         !!flowEntityId &&
-        !!imageMediaId &&
-        !traits.portrait_bound &&
-        !traits.flow_portrait_bound;
+        isFlowMediaUuid(imageMediaId) &&
+        (!traits.portrait_bound || portraitBindNeeded) &&
+        (!traits.flow_portrait_bound || portraitBindNeeded);
       if (needsPortrait) {
         try {
           const wireModel = resolveImageWireModel('GEM_PIX_2');
@@ -189,6 +235,7 @@ export async function POST(req: Request) {
         } catch (e: any) {
           console.warn('[characters/prepare] portrait bind failed:', e?.message || e);
           // Fallback: Python attach (same prompt)
+          let bound = false;
           try {
             await fetch(`${PYTHON_WORKER_URL}/api/characters/${encodeURIComponent(flowEntityId)}`, {
               method: 'PATCH',
@@ -200,8 +247,14 @@ export async function POST(req: Request) {
               }),
             });
             traits.portrait_bound = true;
+            bound = true;
           } catch {
-            /* keep going — entity + media still usable */
+            /* fall through */
+          }
+          if (!bound && portraitBindNeeded) {
+            throw new Error(
+              `Portrait bind failed for "${name}": ${e?.message || 'unknown error'}`
+            );
           }
         }
       }

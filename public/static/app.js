@@ -3092,15 +3092,13 @@
             const err = await res.json().catch(() => ({}));
             throw new Error(err.error || `Delete failed (${res.status})`);
           }
-          // Also drop from Python local character store (best-effort)
-          if (flowId) {
-            fetch(`http://127.0.0.1:8000/api/characters/${encodeURIComponent(flowId)}`, {
+          // Best-effort: also drop Python local store via Next proxy (never hit localhost from browser)
+          if (flowId && flowId !== id) {
+            fetch(`${API_BASE}/api/characters/${encodeURIComponent(flowId)}`, {
               method: 'DELETE',
+              headers: { 'X-Flow-Entity-Id': flowId },
             }).catch(() => 0);
           }
-          fetch(`http://127.0.0.1:8000/api/characters/${encodeURIComponent(id)}`, {
-            method: 'DELETE',
-          }).catch(() => 0);
           if (state.selectedCharacterIds.has(id)) {
             state.selectedCharacterIds.delete(id);
             removeCharacterFromPrompt(name);
@@ -3487,11 +3485,16 @@
             (a.flow_ready ? a.id : null) ||
             undefined,
           image_url: a.url || undefined,
+          local_image_path: a.local_path || a.path || a.storagePath || undefined,
         };
       } else if (source === 'upload') {
         setCharacterCreateBusy(true, 'Uploading image to Flow…');
         showToast('Uploading image to Flow…', 'info');
         imageFields = await uploadCharacterImage(state.charUploadFile);
+        // Server can BiB-upload from local path even if Flow UUID is not ready yet
+        if (!imageFields.image_media_id && !imageFields.local_image_path && !imageFields.image_url) {
+          throw new Error('Character image upload returned no media id or local path');
+        }
       } else if (source === 'generate' && state.charGeneratedAsset) {
         const a = state.charGeneratedAsset;
         imageFields = {
@@ -3502,6 +3505,7 @@
             (a.flow_ready ? a.id : null) ||
             undefined,
           image_url: a.url || undefined,
+          local_image_path: a.local_path || a.path || a.storagePath || undefined,
         };
       }
 

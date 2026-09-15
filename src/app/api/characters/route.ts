@@ -11,12 +11,18 @@ import {
   persistCharacterPortrait,
 } from '@/lib/characterPortrait';
 import { selectProviderAccountForJobDetailed } from '@/lib/routing';
-import { prepareProviderWorkerSession } from '@/lib/providerSession';
-import { bibCreateCharacter, bibGenerateImage, ensureBibAccountReady } from '@/lib/bib';
+import { prepareProviderWorkerSession, refreshFlowMediaId, waitFlowMediaReady } from '@/lib/providerSession';
+import { bibCreateCharacter, bibGenerateImage, bibUploadImage, ensureBibAccountReady } from '@/lib/bib';
 import { formatWorkerFetchError, PYTHON_WORKER_URL } from '@/lib/worker';
 import { resolveImageWireModel } from '@/lib/modelWire';
 
 const CHARACTER_PORTRAIT_PROMPT = 'Make the same picture in white background';
+const PLACEHOLDER_PORTRAIT =
+  'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80';
+
+function isFlowMediaUuid(id: string | null | undefined): boolean {
+  return !!id && /^[0-9a-f-]{36}$/i.test(id);
+}
 
 export async function GET(req: Request) {
   try {
@@ -185,9 +191,34 @@ export async function POST(req: Request) {
       });
     }
 
-    // Best-effort: create Flow entity via BiB (live WIZ), then store + attach image in Python
+    // Create Flow entity via BiB (live WIZ), then best-effort Python attach
     let flowCharacterId = character.id;
     let flowEntityId: string | null = null;
+    // Hoisted so Python sync + response can read it (fixes ReferenceError)
+    let flowImageMediaId: string | null =
+      typeof body.image_media_id === 'string' ? body.image_media_id : null;
+
+    const userPortraitUrl =
+      (typeof body.portraitUrl === 'string' && body.portraitUrl) ||
+      (typeof body.image_url === 'string' && body.image_url) ||
+      null;
+    const wantsPortrait = !!(
+      body.image_media_id ||
+      body.local_image_path ||
+      persisted?.localPath ||
+      (userPortraitUrl && userPortraitUrl !== PLACEHOLDER_PORTRAIT)
+    );
+
+    const failPortrait = async (message: string, status = 502) => {
+      try {
+        deleteCharacterPortraitFiles(session.userId, character.id, nextTraits);
+        await prisma.character.delete({ where: { id: character.id } });
+      } catch {
+        /* orphan local row is acceptable */
+      }
+      return NextResponse.json({ error: message }, { status });
+    };
+
     try {
       const studioUser = await prisma.user.findUnique({
         where: { id: session.userId },
@@ -211,55 +242,70 @@ export async function POST(req: Request) {
         flowProjectId = sessionPrep.projectId || undefined;
 
         // Upload portrait into Flow first so C4BZMd attaches media (avoid empty character)
-        let flowImageMediaId: string | null = body.image_media_id || null;
+        const localPath =
+          (persisted?.localPath && fs.existsSync(persisted.localPath)
+            ? persisted.localPath
+            : null) ||
+          (typeof body.local_image_path === 'string' &&
+          body.local_image_path &&
+          fs.existsSync(body.local_image_path)
+            ? body.local_image_path
+            : null);
         const portraitCandidate =
           flowImageMediaId ||
-          (persisted?.localPath ? `upload-${path.basename(persisted.localPath)}` : null) ||
-          portraitUrl ||
-          sourcePortrait;
-        if (portraitCandidate && flowProjectId) {
+          (localPath ? `upload-${path.basename(localPath)}` : null) ||
+          (userPortraitUrl && userPortraitUrl !== PLACEHOLDER_PORTRAIT
+            ? userPortraitUrl
+            : null) ||
+          null;
+
+        if (wantsPortrait && flowProjectId) {
           try {
-            const { refreshFlowMediaId } = await import('@/lib/providerSession');
-            // If we have a local file path, prefer that id shape via upload-* / absolute path
-            let mediaKey = portraitCandidate;
-            if (persisted?.localPath && fs.existsSync(persisted.localPath)) {
-              // Register as local upload-style by uploading bytes through refresh via character traits path
-              const { bibUploadImage } = await import('@/lib/bib');
-              const buf = fs.readFileSync(persisted.localPath);
+            if (localPath) {
+              const buf = fs.readFileSync(localPath);
               const bibUp = await bibUploadImage({
                 accountId: provider.id,
                 projectId: flowProjectId,
                 imageBase64: buf.toString('base64'),
                 mimeType: 'image/jpeg',
-                filename: path.basename(persisted.localPath),
+                filename: path.basename(localPath),
               });
-              if (bibUp?.mediaId) {
+              if (bibUp?.mediaId && isFlowMediaUuid(bibUp.mediaId)) {
                 flowImageMediaId = bibUp.mediaId;
-                mediaKey = bibUp.mediaId;
               }
             }
-            if (!flowImageMediaId || !/^[0-9a-f-]{36}$/i.test(flowImageMediaId)) {
+            if (!isFlowMediaUuid(flowImageMediaId) && portraitCandidate) {
               const refreshed = await refreshFlowMediaId({
                 accountId: provider.id,
-                mediaId: mediaKey,
+                mediaId: portraitCandidate,
                 cookies: sessionPrep.cookies,
                 projectId: flowProjectId,
                 forceReupload: true,
               });
-              if (refreshed && /^[0-9a-f-]{36}$/i.test(refreshed)) {
-                flowImageMediaId = refreshed;
+              if (isFlowMediaUuid(refreshed)) {
+                flowImageMediaId = refreshed!;
               }
             }
+            if (isFlowMediaUuid(flowImageMediaId)) {
+              await waitFlowMediaReady(flowImageMediaId!);
+            }
           } catch (upErr: any) {
-            console.warn('[characters] portrait upload before create failed:', upErr?.message || upErr);
+            console.warn(
+              '[characters] portrait upload before create failed:',
+              upErr?.message || upErr
+            );
           }
         }
 
-        if (portraitCandidate && !flowImageMediaId) {
+        if (wantsPortrait && !isFlowMediaUuid(flowImageMediaId)) {
           console.warn(
-            `[characters] creating Flow entity without portrait UUID for "${charName}" — will bind if media appears later`
+            `[characters] refusing bare Flow create for "${charName}" — no portrait UUID`
+          );
+          return await failPortrait(
+            'Character portrait could not be uploaded to Flow. Retry with BiB online, or re-upload the image.'
           );
         }
+
         try {
           const bibChar = await bibCreateCharacter({
             accountId: provider.id,
@@ -270,7 +316,7 @@ export async function POST(req: Request) {
           flowEntityId = bibChar.flowEntityId || bibChar.entity_id || null;
           const bindNeeded =
             !!(bibChar as any)?.portraitBindNeeded ||
-            (!!(bibChar as any)?.imageMediaId && !(bibChar as any)?.createdWithMedia);
+            (wantsPortrait && !(bibChar as any)?.createdWithMedia);
           if (flowImageMediaId) {
             nextTraits = { ...nextTraits, image_media_id: flowImageMediaId };
           } else if ((bibChar as any)?.imageMediaId) {
@@ -283,7 +329,11 @@ export async function POST(req: Request) {
             );
           }
           // White-bg sheet bind when create-with-media was rejected (e=4) or bind flagged
-          if (flowEntityId && flowImageMediaId && (bindNeeded || !(bibChar as any)?.createdWithMedia)) {
+          if (
+            flowEntityId &&
+            isFlowMediaUuid(flowImageMediaId) &&
+            (bindNeeded || !(bibChar as any)?.createdWithMedia)
+          ) {
             try {
               const wireModel = resolveImageWireModel('GEM_PIX_2');
               const portrait = await bibGenerateImage({
@@ -292,8 +342,8 @@ export async function POST(req: Request) {
                 aspectRatio: '1:1',
                 model: wireModel,
                 projectId: flowProjectId,
-                imageId: flowImageMediaId,
-                imageIds: [flowImageMediaId],
+                imageId: flowImageMediaId!,
+                imageIds: [flowImageMediaId!],
                 destinationCharacterId: flowEntityId,
               });
               if (portrait?.mediaId) {
@@ -304,14 +354,60 @@ export async function POST(req: Request) {
                   portrait_bound: true,
                   flow_portrait_bound: true,
                 };
+              } else if (wantsPortrait && bindNeeded) {
+                return await failPortrait(
+                  'Character created in Flow but portrait bind returned no media. Retry Sync with Flow.'
+                );
               }
             } catch (bindErr: any) {
-              console.warn('[characters] portrait bind after create failed:', bindErr?.message || bindErr);
+              console.warn(
+                '[characters] portrait bind after create failed:',
+                bindErr?.message || bindErr
+              );
+              if (wantsPortrait && bindNeeded) {
+                return await failPortrait(
+                  `Character portrait bind failed: ${bindErr?.message || 'unknown error'}`
+                );
+              }
             }
+          } else if (
+            wantsPortrait &&
+            flowEntityId &&
+            (bibChar as any)?.createdWithMedia &&
+            !nextTraits.portrait_bound
+          ) {
+            nextTraits = {
+              ...nextTraits,
+              portrait_bound: true,
+              flow_portrait_bound: true,
+            };
+          }
+          if (flowEntityId) {
+            nextTraits = {
+              ...nextTraits,
+              flow_entity_id: flowEntityId,
+              flow_character_id: flowEntityId,
+              image_media_id: flowImageMediaId || nextTraits.image_media_id || null,
+            };
+            await prisma.character
+              .update({
+                where: { id: character.id },
+                data: { traits: nextTraits },
+              })
+              .catch(() => null);
           }
         } catch (bibErr: any) {
           console.warn('[characters] BiB create-character failed:', bibErr?.message || bibErr);
+          if (wantsPortrait) {
+            return await failPortrait(
+              `Flow character create failed: ${bibErr?.message || 'unknown error'}`
+            );
+          }
         }
+      } else if (wantsPortrait) {
+        return await failPortrait(
+          'No Google Flow provider ready — launch BiB account in Admin, then recreate the character.'
+        );
       }
 
       try {
@@ -369,6 +465,11 @@ export async function POST(req: Request) {
         'Character Flow sync skipped:',
         formatWorkerFetchError(syncErr, { workerLabel: 'Flow sync' })
       );
+      if (wantsPortrait && !flowEntityId) {
+        return await failPortrait(
+          formatWorkerFetchError(syncErr, { workerLabel: 'Flow sync' })
+        );
+      }
     }
 
     const returnedChar = {
