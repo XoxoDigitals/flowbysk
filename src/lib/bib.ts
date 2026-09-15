@@ -326,6 +326,8 @@ export async function bibCreateCharacter(payload: {
     entity_id?: string;
     displayName?: string;
     imageMediaId?: string | null;
+    portraitBindNeeded?: boolean;
+    createdWithMedia?: boolean;
     projectId?: string;
     accountId?: string;
   };
