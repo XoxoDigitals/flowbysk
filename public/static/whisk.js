@@ -1177,7 +1177,7 @@
           <img class="whisk-result-img" src="${item.url}" alt="${item.name || 'Whisk Creation'}" loading="lazy" />
           <div class="whisk-result-hover-overlay">
             <div class="whisk-result-title">${item.name || 'Whisk Creation'}</div>
-            <a href="${item.url}" target="_blank" download class="whisk-result-download-btn">⬇ Download</a>
+            <button type="button" class="whisk-result-download-btn" data-whisk-dl="${item.url}">⬇ Download</button>
           </div>
         `;
         card.querySelector('.whisk-result-remove-btn').addEventListener('click', (e) => {
@@ -1185,10 +1185,19 @@
           e.stopPropagation();
           removeWhiskResult(item.id);
         });
+        const dlBtn = card.querySelector('.whisk-result-download-btn');
+        if (dlBtn) {
+          dlBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const url = dlBtn.getAttribute('data-whisk-dl') || item.url;
+            const name = `whisk-${(item.name || 'creation').replace(/\s+/g, '_').toLowerCase()}.png`;
+            if (typeof window.forceDownloadMedia === 'function') {
+              window.forceDownloadMedia(url, name).catch(() => {});
+            }
+          });
+        }
         gridEl.appendChild(card);
-      }
-    });
-  }
 
   function toggleImagesDock(forceState) {
     if (typeof forceState === 'boolean') {

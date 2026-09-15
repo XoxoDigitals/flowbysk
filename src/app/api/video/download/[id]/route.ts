@@ -2,9 +2,37 @@ import { NextResponse } from 'next/server';
 import { getOrCreateStudioUser } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 
+function dispositionFilename(name: string) {
+  const safe = String(name || 'download').replace(/[^\w.\-]+/g, '_');
+  return `attachment; filename="${safe}"`;
+}
+
+async function streamRemoteAsAttachment(remoteUrl: string, filename: string) {
+  const upstream = await fetch(remoteUrl, {
+    headers: { Accept: '*/*', 'User-Agent': 'Mozilla/5.0' },
+    redirect: 'follow',
+  });
+  if (!upstream.ok) {
+    return NextResponse.json(
+      { error: `Upstream fetch failed (${upstream.status})` },
+      { status: 502 }
+    );
+  }
+  const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
+  const buf = await upstream.arrayBuffer();
+  return new NextResponse(buf, {
+    status: 200,
+    headers: {
+      'Content-Type': contentType,
+      'Content-Disposition': dispositionFilename(filename),
+      'Cache-Control': 'private, no-store',
+    },
+  });
+}
+
 /**
  * Download original or 1080p upscaled video.
- * Prefers Flow cloud https URLs from job metadata — never requires a local Python file.
+ * Streams bytes with Content-Disposition: attachment (never redirect — that opens a tab).
  */
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
@@ -26,7 +54,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       where: { id, userId: session.userId },
     });
 
-    // Upscale often keys by gallery asset id — link back to the generation job by URL/media
     let meta = (job?.outputMetadata as Record<string, any>) || {};
     let linkedJob = job;
     if ((!meta.upscaled_url && asset?.url) || (!job && asset)) {
@@ -61,6 +88,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
 
     const original =
       linkedJob?.outputMediaUrl || asset?.url || job?.outputMediaUrl || '';
+    const baseName = `google-flow-${id}${wantUpscaled ? '-1080p' : ''}.mp4`;
 
     if (wantUpscaled) {
       const hdCandidates = [
@@ -69,7 +97,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       ].filter(Boolean) as string[];
       let hdHttps = hdCandidates.find((u) => /^https?:\/\//i.test(String(u)));
 
-      // Recover when metadata was corrupted (e.g. local path) but Flow upsample id exists
       if (!hdHttps && meta.upscaleMediaId && (meta.bibAccountId || linkedJob?.providerAccountId)) {
         try {
           const { bibVideoStatus } = await import('@/lib/bib');
@@ -100,7 +127,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       }
 
       if (hdHttps) {
-        return NextResponse.redirect(hdHttps, 302);
+        return streamRemoteAsAttachment(hdHttps, baseName);
       }
       return NextResponse.json(
         {
@@ -112,11 +139,11 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     }
 
     if (original && /^https?:\/\//i.test(original)) {
-      return NextResponse.redirect(original, 302);
+      return streamRemoteAsAttachment(original, baseName);
     }
     if (original && original.startsWith('/')) {
       const origin = new URL(req.url).origin;
-      return NextResponse.redirect(`${origin}${original}`, 302);
+      return streamRemoteAsAttachment(`${origin}${original}`, baseName);
     }
 
     return NextResponse.json({ error: 'Video file not found' }, { status: 404 });

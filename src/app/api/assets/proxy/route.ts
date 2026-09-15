@@ -42,12 +42,20 @@ export async function GET(req: Request) {
 
     const contentType = upstream.headers.get('content-type') || 'image/png';
     const buf = await upstream.arrayBuffer();
+    const wantDownload = ['1', 'true', 'yes'].includes(
+      String(searchParams.get('download') || '').toLowerCase()
+    );
+    const filename = String(searchParams.get('filename') || 'download').replace(/[^\w.\-]+/g, '_') || 'download';
+    const headers: Record<string, string> = {
+      'Content-Type': contentType,
+      'Cache-Control': 'private, max-age=300',
+    };
+    if (wantDownload) {
+      headers['Content-Disposition'] = `attachment; filename="${filename}"`;
+    }
     return new NextResponse(buf, {
       status: 200,
-      headers: {
-        'Content-Type': contentType,
-        'Cache-Control': 'private, max-age=300',
-      },
+      headers,
     });
   } catch (err: any) {
     const msg = err?.message || 'Proxy failed';

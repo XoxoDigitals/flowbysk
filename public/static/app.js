@@ -4719,15 +4719,9 @@
     if (!state.activeItem || !state.activeItem.url) return;
     const ext = state.activeItem.type === 'video' ? 'mp4' : 'png';
     const filename = `google-flow-${state.activeItem.id}.${ext}`;
-    
-    const a = document.createElement('a');
-    a.href = state.activeItem.url;
-    a.download = filename;
-    a.target = '_blank';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    showToast('Download started', 'info');
+    forceDownloadMedia(state.activeItem.url, filename).catch((e) => {
+      showToast(e?.message || 'Download failed', 'error');
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -6397,6 +6391,40 @@
   // ---------------------------------------------------------------------------
   let _mediaViewerControlsInited = false;
 
+  /**
+   * Force a real file download. Cross-origin CDN URLs ignore <a download>
+   * and open a new tab — fetch via same-origin proxy, then save as blob.
+   */
+  async function forceDownloadMedia(url, filename) {
+    if (!url) throw new Error('Nothing to download');
+    const name = String(filename || 'download').replace(/[^\w.\-]+/g, '_');
+    const origin = window.location.origin;
+    let fetchUrl = String(url);
+    if (/^https?:\/\//i.test(fetchUrl) && !fetchUrl.startsWith(origin)) {
+      fetchUrl = `${API_BASE}/api/assets/proxy?url=${encodeURIComponent(fetchUrl)}`;
+    } else if (fetchUrl.startsWith('/') && !fetchUrl.startsWith(API_BASE) && API_BASE) {
+      // keep relative app paths as-is (same origin)
+    }
+
+    const res = await fetch(fetchUrl, { credentials: 'include' });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(errText.slice(0, 120) || `Download failed (${res.status})`);
+    }
+    const blob = await res.blob();
+    if (!blob || blob.size < 32) throw new Error('Downloaded file was empty');
+    const obj = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = obj;
+    a.download = name;
+    // Never use target=_blank — that opens the media in a tab
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(obj), 4000);
+    showToast('Download started', 'info');
+  }
+
   // Download asset helper (normal or 1080p upscaled)
   function downloadMediaAsset(item, upscaled = false) {
     if (!item) return;
@@ -6411,21 +6439,16 @@
       );
       url = hd || `${API_BASE}/api/video/download/${encodeURIComponent(item.id)}?upscaled=true`;
     } else if (isVid) {
-      const orig = /^https?:\/\//i.test(String(item.url || ''))
-        ? item.url
-        : `${API_BASE}/api/video/download/${encodeURIComponent(item.id)}?upscaled=false`;
-      url = orig;
+      // Prefer same-origin download API (streams with Content-Disposition)
+      url = `${API_BASE}/api/video/download/${encodeURIComponent(item.id)}?upscaled=false`;
+      if (!item.id && /^https?:\/\//i.test(String(item.url || ''))) {
+        url = item.url;
+      }
     }
 
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.target = '_blank';
-    a.rel = 'noopener';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    showToast(`Downloading ${upscaled ? '1080p upscaled' : 'original'} version...`, 'info');
+    forceDownloadMedia(url, filename).catch((e) => {
+      showToast(e?.message || 'Download failed', 'error');
+    });
   }
 
   /** Absolute URL safe to paste — prefers 1080p when the clip is upscaled. */
@@ -8886,6 +8909,8 @@
   window.isThrottleGenerationError = isThrottleGenerationError;
   window.openRefPickerModal = openRefPickerModal;
   window.openMediaViewerModal = openMediaViewerModal;
+  window.forceDownloadMedia = forceDownloadMedia;
+  window.downloadMediaAsset = downloadMediaAsset;
   window.closeMediaViewerModal = closeMediaViewerModal;
 
   // Start app

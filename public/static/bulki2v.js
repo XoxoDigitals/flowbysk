@@ -1446,14 +1446,10 @@
       if (dl) {
         dl.addEventListener('click', () => {
           if (!scene.url) return;
-          const a = document.createElement('a');
-          a.href = scene.url;
-          a.download = `${scene.title.replace(/\s+/g, '_').toLowerCase()}.mp4`;
-          a.target = '_blank';
-          a.rel = 'noopener';
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
+          const name = `${scene.title.replace(/\s+/g, '_').toLowerCase()}.mp4`;
+          if (typeof window.forceDownloadMedia === 'function') {
+            window.forceDownloadMedia(scene.url, name).catch(() => {});
+          }
         });
       }
       const retry = card.querySelector('[data-act="retry"]');
