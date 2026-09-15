@@ -271,17 +271,29 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
           });
           if (isVideo) {
             const aspectMap: Record<string, number> = { '16:9': 2, '9:16': 1, '1:1': 1 };
+            const first =
+              params.first_frame_id || params.image_id || params.staged_id || undefined;
+            const last = params.last_frame_id || undefined;
+            const dual =
+              first &&
+              last &&
+              String(first) !== String(last) &&
+              (params.frame_mode === 'first_and_last' || !!params.last_frame_id);
+            // Dual frames → ingredients-style multi-ref (imageIds), never StartImage endImageId
+            const imageIds = dual
+              ? [String(first), String(last)]
+              : Array.isArray(params.image_ids)
+                ? params.image_ids
+                : undefined;
             const bibData = await bibGenerateVideo({
               accountId: provider.id,
-              mode: isI2V ? 'i2v' : 't2v',
+              mode: dual || isI2V ? (dual ? 'r2v' : 'i2v') : 't2v',
               prompt: job.prompt,
               videoModel: workerModel,
               aspect: aspectMap[String(params.aspect_ratio || '16:9')] || 2,
               projectId: targetProjectId,
-              imageId: params.image_id || params.first_frame_id || undefined,
-              startImageId: params.first_frame_id || params.image_id || undefined,
-              endImageId: params.last_frame_id || undefined,
-              imageIds: Array.isArray(params.image_ids) ? params.image_ids : undefined,
+              imageId: dual ? String(first) : first || undefined,
+              imageIds,
               waitForCompletion: false,
             });
             const mediaUrl = bibData.videoUrl || bibData.url;
