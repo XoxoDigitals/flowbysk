@@ -18,6 +18,7 @@ const {
   extractVideoUrl,
   extractPollId,
   extractCharacterEntityId,
+  batchexecuteErrorCode,
   buildOgiRequest,
   buildBatch,
   payloadC4BZMd,
@@ -566,49 +567,66 @@ app.post('/create-character', requireInternalSecret, async (req, res) => {
       .map((x) => String(x || '').trim())
       .filter(Boolean);
 
-    const { cookie } = await s.cookieHeaderFor(ctx.origin);
-    const payload = payloadC4BZMd(projectId, charName, mediaIds);
-    const sub = buildBatch(ctx, projectId, 'C4BZMd', payload);
-    const sr = await fetch(sub.url, { method: 'POST', headers: ogiHeaders(ctx, cookie), body: sub.body });
-    const stext = await sr.text();
-    let flowEntityId = extractCharacterEntityId(stext, projectId);
+    // Fresh uploads often need a beat before C4BZMd will accept them
+    if (mediaIds.length) await sleep(1500);
 
-    // Do not bare-create when media was requested — that yields empty Flow characters
-    if (!flowEntityId && mediaIds.length) {
-      console.warn(`[${accountId}] create-character with media failed to parse`, {
-        http: sr.status,
-        preview: stext.slice(0, 400),
-      });
-      return res.status(502).json({
-        success: false,
-        error:
-          'Character create with portrait failed — Flow entity id could not be parsed. Re-upload the image and retry.',
-        httpStatus: sr.status,
-        projectId,
-        accountId,
-        rawPreview: stext.slice(0, 500),
-        ms: Date.now() - t0,
-      });
+    const { cookie } = await s.cookieHeaderFor(ctx.origin);
+    let stext = '';
+    let flowEntityId = null;
+    let createdWithMedia = false;
+
+    if (mediaIds.length) {
+      const payload = payloadC4BZMd(projectId, charName, mediaIds);
+      const sub = buildBatch(ctx, projectId, 'C4BZMd', payload);
+      const sr = await fetch(sub.url, { method: 'POST', headers: ogiHeaders(ctx, cookie), body: sub.body });
+      stext = await sr.text();
+      flowEntityId = extractCharacterEntityId(stext, projectId);
+      createdWithMedia = !!flowEntityId;
+      if (!flowEntityId) {
+        const eCode = batchexecuteErrorCode(stext);
+        console.warn(`[${accountId}] create-character with media failed`, {
+          http: sr.status,
+          e: eCode,
+          preview: stext.slice(0, 280),
+        });
+      }
     }
 
+    // Flow often rejects C4BZMd+media (e=4). Create bare entity, then portrait-bind in Studio.
+    let portraitBindNeeded = false;
     if (!flowEntityId) {
-      console.warn(`[${accountId}] create-character no entity`, {
-        http: sr.status,
-        preview: stext.slice(0, 500),
+      const payload2 = payloadC4BZMd(projectId, charName, []);
+      const sub2 = buildBatch(ctx, projectId, 'C4BZMd', payload2);
+      const sr2 = await fetch(sub2.url, {
+        method: 'POST',
+        headers: ogiHeaders(ctx, cookie),
+        body: sub2.body,
       });
-      return res.status(502).json({
-        success: false,
-        error: 'Character submitted but Flow entity id could not be parsed',
-        httpStatus: sr.status,
-        projectId,
-        accountId,
-        rawPreview: stext.slice(0, 500),
-        ms: Date.now() - t0,
-      });
+      const text2 = await sr2.text();
+      stext = text2;
+      flowEntityId = extractCharacterEntityId(text2, projectId);
+      if (flowEntityId && mediaIds.length) portraitBindNeeded = true;
+      if (!flowEntityId) {
+        console.warn(`[${accountId}] create-character bare also failed`, {
+          http: sr2.status,
+          e: batchexecuteErrorCode(text2),
+          preview: text2.slice(0, 400),
+        });
+        return res.status(502).json({
+          success: false,
+          error:
+            'Character create failed — Flow entity id could not be parsed. Open BiB Flow project and retry.',
+          httpStatus: sr2.status,
+          projectId,
+          accountId,
+          rawPreview: text2.slice(0, 500),
+          ms: Date.now() - t0,
+        });
+      }
     }
 
     console.log(
-      `[${accountId}] create-character OK ${charName} → ${flowEntityId.slice(0, 8)}… media=${mediaIds[0] || 'none'}`
+      `[${accountId}] create-character OK ${charName} → ${flowEntityId.slice(0, 8)}… media=${mediaIds[0] || 'none'} bind=${portraitBindNeeded} withMedia=${createdWithMedia}`
     );
     res.json({
       success: true,
@@ -617,9 +635,11 @@ app.post('/create-character', requireInternalSecret, async (req, res) => {
       entity_id: flowEntityId,
       displayName: charName,
       imageMediaId: mediaIds[0] || null,
+      portraitBindNeeded,
+      createdWithMedia,
       projectId,
       accountId,
-      httpStatus: sr.status,
+      httpStatus: 200,
       ms: Date.now() - t0,
     });
   } catch (e) {

@@ -117,20 +117,25 @@ export async function POST(req: Request) {
         null;
       const wantsPortrait = !!(imageMediaId || imageUrl);
 
-      // Promote portrait into Flow BEFORE create — bare C4BZMd leaves empty characters
+      // Promote portrait into Flow when possible; keep UUID even if reupload fails (may already be in project)
       if (wantsPortrait) {
-        const refreshed = await refreshFlowMediaId({
-          accountId: provider.id,
-          mediaId: imageMediaId || imageUrl,
-          cookies: sessionPrep.cookies,
-          projectId: projectId || undefined,
-          forceReupload: true,
-        });
-        if (refreshed && /^[0-9a-f-]{36}$/i.test(refreshed)) {
-          imageMediaId = refreshed;
-        } else {
-          throw new Error(
-            `Character portrait could not be uploaded to Flow for "${name}". Fix the image, then retry.`
+        try {
+          const refreshed = await refreshFlowMediaId({
+            accountId: provider.id,
+            mediaId: imageMediaId || imageUrl,
+            cookies: sessionPrep.cookies,
+            projectId: projectId || undefined,
+            forceReupload: !/^[0-9a-f-]{36}$/i.test(String(imageMediaId || '')),
+          });
+          if (refreshed && /^[0-9a-f-]{36}$/i.test(refreshed)) {
+            imageMediaId = refreshed;
+          }
+        } catch (e: any) {
+          console.warn('[characters/prepare] portrait promote:', e?.message || e);
+        }
+        if (!imageMediaId || !/^[0-9a-f-]{36}$/i.test(String(imageMediaId))) {
+          console.warn(
+            `[characters/prepare] no Flow portrait UUID for "${name}" yet — creating entity anyway`
           );
         }
       }
@@ -144,9 +149,16 @@ export async function POST(req: Request) {
             imageMediaId: imageMediaId || null,
           });
           flowEntityId = created.flowEntityId || created.entity_id || flowEntityId;
+          if ((created as any)?.imageMediaId && !imageMediaId) {
+            imageMediaId = (created as any).imageMediaId;
+          }
+          // Force portrait bind when BiB fell back to bare create
+          if ((created as any)?.portraitBindNeeded) {
+            traits.portrait_bound = false;
+            traits.flow_portrait_bound = false;
+          }
         } catch (e: any) {
           console.warn('[characters/prepare] create failed:', e?.message || e);
-          if (wantsPortrait) throw e;
         }
       }
 

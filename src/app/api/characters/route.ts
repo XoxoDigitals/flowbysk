@@ -12,8 +12,11 @@ import {
 } from '@/lib/characterPortrait';
 import { selectProviderAccountForJobDetailed } from '@/lib/routing';
 import { prepareProviderWorkerSession } from '@/lib/providerSession';
-import { bibCreateCharacter, ensureBibAccountReady } from '@/lib/bib';
-import { PYTHON_WORKER_URL } from '@/lib/worker';
+import { bibCreateCharacter, bibGenerateImage, ensureBibAccountReady } from '@/lib/bib';
+import { formatWorkerFetchError, PYTHON_WORKER_URL } from '@/lib/worker';
+import { resolveImageWireModel } from '@/lib/modelWire';
+
+const CHARACTER_PORTRAIT_PROMPT = 'Make the same picture in white background';
 
 export async function GET(req: Request) {
   try {
@@ -254,75 +257,118 @@ export async function POST(req: Request) {
 
         if (portraitCandidate && !flowImageMediaId) {
           console.warn(
-            `[characters] refusing bare Flow create for "${charName}" — portrait not uploaded`
+            `[characters] creating Flow entity without portrait UUID for "${charName}" — will bind if media appears later`
           );
-        } else {
-          try {
-            const bibChar = await bibCreateCharacter({
-              accountId: provider.id,
-              name: charName,
-              projectId: flowProjectId,
-              imageMediaId: flowImageMediaId,
-            });
-            flowEntityId = bibChar.flowEntityId || bibChar.entity_id || null;
-            if (flowEntityId) {
-              console.info(
-                `[characters] BiB Flow entity ${flowEntityId.slice(0, 8)}… for "${charName}" media=${flowImageMediaId?.slice(0, 8) || 'none'}`
-              );
-            }
-            if (flowImageMediaId) {
-              nextTraits = { ...nextTraits, image_media_id: flowImageMediaId };
-            }
-          } catch (bibErr: any) {
-            console.warn('[characters] BiB create-character failed:', bibErr?.message || bibErr);
+        }
+        try {
+          const bibChar = await bibCreateCharacter({
+            accountId: provider.id,
+            name: charName,
+            projectId: flowProjectId,
+            imageMediaId: flowImageMediaId,
+          });
+          flowEntityId = bibChar.flowEntityId || bibChar.entity_id || null;
+          const bindNeeded =
+            !!(bibChar as any)?.portraitBindNeeded ||
+            (!!(bibChar as any)?.imageMediaId && !(bibChar as any)?.createdWithMedia);
+          if (flowImageMediaId) {
+            nextTraits = { ...nextTraits, image_media_id: flowImageMediaId };
+          } else if ((bibChar as any)?.imageMediaId) {
+            flowImageMediaId = (bibChar as any).imageMediaId;
+            nextTraits = { ...nextTraits, image_media_id: flowImageMediaId };
           }
+          if (flowEntityId) {
+            console.info(
+              `[characters] BiB Flow entity ${flowEntityId.slice(0, 8)}… for "${charName}" media=${flowImageMediaId?.slice(0, 8) || 'none'} bind=${!!bindNeeded}`
+            );
+          }
+          // White-bg sheet bind when create-with-media was rejected (e=4) or bind flagged
+          if (flowEntityId && flowImageMediaId && (bindNeeded || !(bibChar as any)?.createdWithMedia)) {
+            try {
+              const wireModel = resolveImageWireModel('GEM_PIX_2');
+              const portrait = await bibGenerateImage({
+                accountId: provider.id,
+                prompt: CHARACTER_PORTRAIT_PROMPT,
+                aspectRatio: '1:1',
+                model: wireModel,
+                projectId: flowProjectId,
+                imageId: flowImageMediaId,
+                imageIds: [flowImageMediaId],
+                destinationCharacterId: flowEntityId,
+              });
+              if (portrait?.mediaId) {
+                flowImageMediaId = portrait.mediaId;
+                nextTraits = {
+                  ...nextTraits,
+                  image_media_id: flowImageMediaId,
+                  portrait_bound: true,
+                  flow_portrait_bound: true,
+                };
+              }
+            } catch (bindErr: any) {
+              console.warn('[characters] portrait bind after create failed:', bindErr?.message || bindErr);
+            }
+          }
+        } catch (bibErr: any) {
+          console.warn('[characters] BiB create-character failed:', bibErr?.message || bibErr);
         }
       }
 
-      const workerRes = await fetch(`${PYTHON_WORKER_URL}/api/characters`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          display_name: charName,
-          name: charName,
-          voice_presets: voiceName && voiceName !== 'A' ? [voiceName] : body.voice_presets || [],
-          image_media_id: body.image_media_id || undefined,
-          image_url: sourcePortrait,
-          local_image_path: persisted?.localPath || body.local_image_path || undefined,
-          flow_entity_id: flowEntityId || undefined,
-        }),
-      });
-      if (workerRes.ok) {
-        const workerData = await workerRes.json();
-        flowCharacterId =
-          workerData.character_id ||
-          workerData.character?.character_id ||
-          workerData.flow_entity_id ||
-          character.id;
-        flowEntityId =
-          flowEntityId ||
-          workerData.flow_entity_id ||
-          workerData.character?.flow_entity_id ||
-          null;
-        nextTraits = {
-          ...nextTraits,
-          flow_character_id: flowCharacterId,
-          flow_entity_id: flowEntityId,
-          image_media_id:
-            workerData.image_media_id ||
-            workerData.character?.image_media_id ||
-            body.image_media_id ||
-            null,
-          local_mode: !flowEntityId || !!workerData.local_mode,
-          sync_pending: !flowEntityId || !!workerData.sync_pending,
-        };
-        await prisma.character.update({
-          where: { id: character.id },
-          data: { traits: nextTraits },
+      try {
+        const workerRes = await fetch(`${PYTHON_WORKER_URL}/api/characters`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            display_name: charName,
+            name: charName,
+            voice_presets: voiceName && voiceName !== 'A' ? [voiceName] : body.voice_presets || [],
+            image_media_id: flowImageMediaId || body.image_media_id || undefined,
+            image_url: sourcePortrait,
+            local_image_path: persisted?.localPath || body.local_image_path || undefined,
+            flow_entity_id: flowEntityId || undefined,
+          }),
         });
+        if (workerRes.ok) {
+          const workerData = await workerRes.json();
+          flowCharacterId =
+            workerData.character_id ||
+            workerData.character?.character_id ||
+            workerData.flow_entity_id ||
+            character.id;
+          flowEntityId =
+            flowEntityId ||
+            workerData.flow_entity_id ||
+            workerData.character?.flow_entity_id ||
+            null;
+          nextTraits = {
+            ...nextTraits,
+            flow_character_id: flowCharacterId,
+            flow_entity_id: flowEntityId,
+            image_media_id:
+              workerData.image_media_id ||
+              workerData.character?.image_media_id ||
+              flowImageMediaId ||
+              body.image_media_id ||
+              null,
+            local_mode: !flowEntityId || !!workerData.local_mode,
+            sync_pending: !flowEntityId || !!workerData.sync_pending,
+          };
+          await prisma.character.update({
+            where: { id: character.id },
+            data: { traits: nextTraits },
+          });
+        }
+      } catch (pyErr: any) {
+        console.warn(
+          'Python character sync skipped:',
+          formatWorkerFetchError(pyErr, { workerLabel: 'Python Flow worker' })
+        );
       }
-    } catch (syncErr) {
-      console.warn('Python character sync skipped:', syncErr);
+    } catch (syncErr: any) {
+      console.warn(
+        'Character Flow sync skipped:',
+        formatWorkerFetchError(syncErr, { workerLabel: 'Flow sync' })
+      );
     }
 
     const returnedChar = {

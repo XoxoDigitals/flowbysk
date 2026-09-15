@@ -595,6 +595,14 @@ function extractCharacterEntityId(text, projectId) {
   return null;
 }
 
+/** batchexecute error frame — e=4 is Flow reject / unusual activity */
+function batchexecuteErrorCode(text) {
+  const m = String(text || '').match(/\[\s*"e"\s*,\s*(\d+)/);
+  if (m) return Number(m[1]);
+  const m2 = String(text || '').match(/\[\["e",(\d+)/);
+  return m2 ? Number(m2[1]) : null;
+}
+
 /**
  * Build maseQ image-upload batchexecute payload (mirrors Python build_maseq_payload).
  * @param {object} ctx  - { at, bl, sid, origin }
@@ -680,6 +688,7 @@ module.exports = {
   extractVideoUrl,
   extractPollId,
   extractCharacterEntityId,
+  batchexecuteErrorCode,
   normalizeCharacters,
   buildStructuredPromptParts,
   buildOgiRequest,

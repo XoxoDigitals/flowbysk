@@ -1,4 +1,13 @@
-const PYTHON_WORKER_URL = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
+const _rawPythonWorkerUrl = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
+/** Misconfigured deploys often still point at old :5001 — remap to FastAPI :8000. */
+const PYTHON_WORKER_URL = /:5001(?:\/|$)/.test(_rawPythonWorkerUrl)
+  ? _rawPythonWorkerUrl.replace(':5001', ':8000')
+  : _rawPythonWorkerUrl;
+if (PYTHON_WORKER_URL !== _rawPythonWorkerUrl) {
+  console.warn(
+    `[worker] PYTHON_WORKER_URL remapped ${_rawPythonWorkerUrl} → ${PYTHON_WORKER_URL}`
+  );
+}
 
 /** Map low-level fetch failures to an actionable Studio error. */
 export function formatWorkerFetchError(
