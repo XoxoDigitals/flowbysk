@@ -17,9 +17,11 @@ async function tick() {
   if (!due) return;
 
   try {
+    // Setting on = periodic unique shuffle: every live account gets a new proxy,
+    // still 1:1 when possible; BiB + Python both read the same assignments map.
     await performEgressProxyRotateAndRelaunch({
       reason: `auto (${minutes}m)`,
-      sticky: true,
+      sticky: false,
     });
   } catch (e) {
     console.warn('[proxy-auto-rotate]', e);
