@@ -200,8 +200,10 @@ function getProxyUrlSafe(accountId: string): string | null {
 }
 
 /**
- * Manual / auto-timer: rotate pool order, reassign unique proxies to live accounts, relaunch all.
- * Pass sticky:true to preserve existing unique assignments (auto-rotate) — only fill gaps / fix collisions.
+ * Rotate pool + reassign unique proxies to live accounts, then relaunch BiB.
+ * - sticky:false (default / auto-rotate setting on): shuffle — each account gets a new unique proxy.
+ * - sticky:true: keep existing unique assignments; only fill gaps / fix collisions.
+ * BiB Chrome and Python both resolve via assignments[accountId] after relaunch.
  */
 export async function performEgressProxyRotateAndRelaunch(opts?: {
   reason?: string;
