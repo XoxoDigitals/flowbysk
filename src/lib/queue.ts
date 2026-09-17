@@ -483,6 +483,7 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
       {
         label: `queue-job:${job.id}`,
         delayMs: 1800,
+        throttleDelaysMs: [10000, 20000],
         providerAccountId: provider.id,
         shouldContinue: async () => !(await isJobCancelled(job.id)),
         onRetry: async (err) => {

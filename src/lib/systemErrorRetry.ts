@@ -56,8 +56,10 @@ export function isThrottleGenerationError(raw: unknown): boolean {
 
 export type SystemRetryOptions = {
   delayMs?: number;
-  /** Override wait specifically for throttle errors (default 10000). */
+  /** @deprecated Prefer throttleDelaysMs — single wait applied to every throttle retry. */
   throttleDelayMs?: number;
+  /** Waits after each throttle failure before the next attempt. Default [10000, 20000]. */
+  throttleDelaysMs?: number[];
   /** Total attempts including the first for normal system errors (default 5). */
   maxAttempts?: number;
   label?: string;
@@ -73,19 +75,26 @@ export type SystemRetryOptions = {
  * Run `fn`. On system-class errors, retry up to maxAttempts-1 more times.
  * Policy errors propagate immediately.
  * Unusual: retry → rotate account proxy → retry → then fail.
+ * Throttle: wait 10s then 20s (default), then stop — no endless throttle retries.
  */
 export async function withSystemErrorRetry<T>(
   fn: () => Promise<T>,
   opts: SystemRetryOptions = {}
 ): Promise<T> {
   const delayMs = opts.delayMs ?? 2500;
-  const throttleDelayMs = opts.throttleDelayMs ?? 10000;
+  const throttleDelaysMs =
+    Array.isArray(opts.throttleDelaysMs) && opts.throttleDelaysMs.length
+      ? opts.throttleDelaysMs.map((n) => Math.max(0, Number(n) || 0))
+      : opts.throttleDelayMs != null
+        ? [Math.max(0, Number(opts.throttleDelayMs) || 10000)]
+        : [10000, 20000];
   const maxAttempts = Math.max(1, opts.maxAttempts ?? 5);
   const label = opts.label || 'generation';
 
   let lastErr: unknown;
   let unusualHits = 0;
   let normalAttempts = 0;
+  let throttleAttempts = 0;
 
   while (true) {
     try {
@@ -151,13 +160,35 @@ export async function withSystemErrorRetry<T>(
         break;
       }
 
+      // Throttle: fixed schedule (default 10s then 20s), then stop
+      if (isThrottleGenerationError(msg)) {
+        throttleAttempts += 1;
+        if (throttleAttempts > throttleDelaysMs.length) {
+          console.warn(
+            `[system-retry] ${label}: throttle retries exhausted (${throttleAttempts - 1}/${throttleDelaysMs.length}) — giving up`
+          );
+          break;
+        }
+        const waitMs = throttleDelaysMs[throttleAttempts - 1] ?? 10000;
+        console.warn(
+          `[system-retry] ${label}: throttle attempt ${throttleAttempts}/${throttleDelaysMs.length} failed — ${msg.slice(0, 180)}; retrying in ${waitMs}ms…`
+        );
+        if (opts.onRetry) await opts.onRetry(err, throttleAttempts);
+        if (opts.shouldContinue && !(await opts.shouldContinue())) {
+          throw new Error('Stop by user');
+        }
+        await new Promise((r) => setTimeout(r, waitMs));
+        if (opts.shouldContinue && !(await opts.shouldContinue())) {
+          throw new Error('Stop by user');
+        }
+        continue;
+      }
+
       // Normal system errors
       normalAttempts += 1;
       if (normalAttempts >= maxAttempts) break;
 
-      const waitMs = isThrottleGenerationError(msg)
-        ? Math.max(delayMs, throttleDelayMs)
-        : delayMs;
+      const waitMs = delayMs;
       console.warn(
         `[system-retry] ${label}: attempt ${normalAttempts}/${maxAttempts} failed — ${msg.slice(0, 180)}; retrying in ${waitMs}ms…`
       );

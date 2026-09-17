@@ -92,6 +92,39 @@ const AUTO_RESTORE = process.env.BIB_AUTO_RESTORE !== 'false';
 
 const pool = new Map(); // accountId -> AccountSession
 
+/** Per Flow project: serialize video submits and enforce 3–7s gap after last submit. */
+const videoSubmitGateByProject = new Map(); // projectId -> { lastAt, chain }
+
+/**
+ * Wait 3–7s since the previous video submit for this project, then mark submit time.
+ * Concurrent callers for the same project run one after another via a promise chain.
+ */
+async function awaitVideoSubmitGap(projectId, accountId) {
+  const key = String(projectId || '').trim() || '_none';
+  let gate = videoSubmitGateByProject.get(key);
+  if (!gate) {
+    gate = { lastAt: 0, chain: Promise.resolve() };
+    videoSubmitGateByProject.set(key, gate);
+  }
+  const run = gate.chain.then(async () => {
+    const gapMs = 3000 + Math.floor(Math.random() * 4001); // 3000–7000 inclusive
+    const waitMs = Math.max(0, gate.lastAt + gapMs - Date.now());
+    if (waitMs > 0) {
+      console.log(
+        `[${accountId}] video submit gap project=${key.slice(0, 8)}… waited=${waitMs}ms (target=${gapMs}ms)`
+      );
+      await sleep(waitMs);
+    } else {
+      console.log(
+        `[${accountId}] video submit gap project=${key.slice(0, 8)}… waited=0ms (target=${gapMs}ms)`
+      );
+    }
+    gate.lastAt = Date.now();
+  });
+  gate.chain = run.catch(() => {});
+  await run;
+}
+
 function getOrCreate(accountId, opts = {}) {
   if (!accountId) throw new Error('accountId required');
   let s = pool.get(accountId);
@@ -1112,6 +1145,7 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
         uniqueRefMedia,
         '' // token filled inside aisandboxPost
       );
+      await awaitVideoSubmitGap(projectId, accountId);
       try {
         const data = await s.aisandboxPost(
           'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages',
@@ -1141,6 +1175,7 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
           ? payloadI2V(projectId, prompt, imageId, model, aspect, rc2, charRefs)
           : payloadT2V(projectId, prompt, model, aspect, rc2, charRefs);
       const sub = buildBatch(ctx, projectId, rpcid, payload);
+      await awaitVideoSubmitGap(projectId, accountId);
       const sr = await fetch(sub.url, { method: 'POST', headers: hdr, body: sub.body });
       const stext = await sr.text();
       mediaId = extractPollId(stext, projectId);
@@ -1160,17 +1195,22 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
     if (!mediaId && !videoUrl) {
       console.warn(`[${accountId}] video submit: no mediaId`, stages);
       const stagesBlob = JSON.stringify(stages || {});
+      const throttleMatch = stagesBlob.match(
+        /PUBLIC_ERROR_USER_REQUESTS_THROTTLED|USER_REQUESTS_THROTTLED|REQUESTS_THROTTLED/i
+      );
       const unusualMatch = stagesBlob.match(/PUBLIC_ERROR_[A-Z0-9_]*UNUSUAL_ACTIVITY[A-Z0-9_]*/i);
-      const unusualHint = unusualMatch
-        ? unusualMatch[0]
-        : /UNUSUAL_ACTIVITY|RECAPTCHA|TOO_MUCH_TRAFFIC/i.test(stagesBlob)
-          ? 'UNUSUAL_ACTIVITY'
-          : '';
+      const errHint = throttleMatch
+        ? 'PUBLIC_ERROR_USER_REQUESTS_THROTTLED'
+        : unusualMatch
+          ? unusualMatch[0]
+          : /UNUSUAL_ACTIVITY|RECAPTCHA|TOO_MUCH_TRAFFIC/i.test(stagesBlob)
+            ? 'UNUSUAL_ACTIVITY'
+            : '';
       return res.status(502).json({
         success: false,
         stage: 'submit',
-        error: unusualHint
-          ? `Video submitted but mediaId could not be parsed (${unusualHint})`
+        error: errHint
+          ? `Video submitted but mediaId could not be parsed (${errHint})`
           : 'Video submitted but mediaId could not be parsed — check Flow project',
         imageUrl,
         stages,

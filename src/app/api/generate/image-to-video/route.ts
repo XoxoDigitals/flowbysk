@@ -337,7 +337,7 @@ export async function POST(req: Request) {
       try {
         bibResult = await withSystemErrorRetry(
           async () => runI2v(ingredientRefs),
-          { label: `api-i2v-bib:${job.id}`, delayMs: 2000, maxAttempts: 2, providerAccountId: provider.id }
+          { label: `api-i2v-bib:${job.id}`, delayMs: 2000, maxAttempts: 3, throttleDelaysMs: [10000, 20000], providerAccountId: provider.id }
         );
       } catch (err) {
         if (!isMediaRepairableError(err)) throw err;

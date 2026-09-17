@@ -182,6 +182,10 @@ export async function bibScrapeProjects(accountId: string) {
 
 function unusualHintFromBibData(data: Record<string, unknown>): string {
   const blob = JSON.stringify(data?.stages ?? data ?? {});
+  const throttle = blob.match(
+    /PUBLIC_ERROR_USER_REQUESTS_THROTTLED|USER_REQUESTS_THROTTLED|REQUESTS_THROTTLED/i
+  );
+  if (throttle) return 'PUBLIC_ERROR_USER_REQUESTS_THROTTLED';
   const m = blob.match(/PUBLIC_ERROR_[A-Z0-9_]*UNUSUAL_ACTIVITY[A-Z0-9_]*/i);
   if (m) return m[0];
   if (/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC|RECAPTCHA/i.test(blob)) return 'UNUSUAL_ACTIVITY';
@@ -214,7 +218,7 @@ export async function bibGenerateImage(payload: {
     const base = data.error || data.raw || `BiB generate failed (${res.status})`;
     const hint = unusualHintFromBibData(data);
     throw new Error(
-      hint && !/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC/i.test(String(base))
+      hint && !/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC|USER_REQUESTS_THROTTLED|THROTTLED/i.test(String(base))
         ? `${base} (${hint})`
         : String(base)
     );
@@ -243,7 +247,7 @@ export async function bibGenerateVideo(payload: Record<string, unknown>) {
       data.error || data.raw || `BiB video failed (${res.status})${stage}`;
     const hint = unusualHintFromBibData(data);
     throw new Error(
-      hint && !/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC/i.test(String(base))
+      hint && !/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC|USER_REQUESTS_THROTTLED|THROTTLED/i.test(String(base))
         ? `${base} (${hint})`
         : String(base)
     );

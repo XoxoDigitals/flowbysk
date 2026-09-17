@@ -344,7 +344,8 @@ export async function POST(req: Request) {
         bibResult = await withSystemErrorRetry(() => runOnce(flowRefs), {
           label: `api-ingredients-bib:${job.id}`,
           delayMs: 2000,
-          maxAttempts: 2,
+          maxAttempts: isVid ? 3 : 2,
+          throttleDelaysMs: [10000, 20000],
           providerAccountId: provider.id,
           onRetry: async (err) => {
             if (isVid || !isImageModelQuotaError(err) || !attemptImageModel) return;

@@ -135,9 +135,11 @@
   async function withSystemErrorRetry(fn, label) {
     const maxAttempts = 5;
     const delayMs = 2500;
-    const throttleDelayMs = 10000;
+    const throttleDelaysMs = [10000, 20000];
     let lastErr;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let throttleAttempts = 0;
+    let normalAttempts = 0;
+    while (true) {
       try {
         return await fn();
       } catch (err) {
@@ -145,16 +147,28 @@
         const msg = err && err.message ? err.message : String(err);
         if (/stop by user|cancelled by user/i.test(msg)) throw err;
         if (!isSystemGenerationError(msg)) throw err;
-        if (attempt >= maxAttempts) break;
-        const waitMs = isThrottleGenerationError(msg)
-          ? Math.max(delayMs, throttleDelayMs)
-          : delayMs;
+
+        if (isThrottleGenerationError(msg)) {
+          throttleAttempts += 1;
+          if (throttleAttempts > throttleDelaysMs.length) break;
+          const waitMs = throttleDelaysMs[throttleAttempts - 1];
+          console.warn(
+            `[system-retry] ${label || 'generation'}: throttle attempt ${throttleAttempts}/${throttleDelaysMs.length} failed —`,
+            msg,
+            `(retry in ${waitMs}ms)`
+          );
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+
+        normalAttempts += 1;
+        if (normalAttempts >= maxAttempts) break;
         console.warn(
-          `[system-retry] ${label || 'generation'}: attempt ${attempt}/${maxAttempts} failed —`,
+          `[system-retry] ${label || 'generation'}: attempt ${normalAttempts}/${maxAttempts} failed —`,
           msg,
-          `(retry in ${waitMs}ms)`
+          `(retry in ${delayMs}ms)`
         );
-        await new Promise((r) => setTimeout(r, waitMs));
+        await new Promise((r) => setTimeout(r, delayMs));
       }
     }
     throw lastErr;

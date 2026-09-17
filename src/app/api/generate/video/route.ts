@@ -253,6 +253,7 @@ export async function POST(req: Request) {
               label: `api-video-bib:${job.id}`,
               delayMs: 2000,
               maxAttempts: 3,
+              throttleDelaysMs: [10000, 20000],
               providerAccountId: provider.id,
             }
           );
