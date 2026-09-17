@@ -110,19 +110,94 @@ function readMirror() {
   return activeFromMirror(readMirrorFile());
 }
 
+function normalizeCycleUsed(raw, enabled) {
+  const enabledIds = new Set(enabled.map((p) => p.id));
+  const out = [];
+  if (Array.isArray(raw)) {
+    for (const id of raw) {
+      if (typeof id === 'string' && enabledIds.has(id) && !out.includes(id)) out.push(id);
+    }
+  }
+  return out;
+}
+
 /**
- * Assign / return a sticky unique proxy for this BiB account.
- * Prefers unused proxies; if short, reuses least-used (with warn).
- * Never falls back to "first proxy" for a different account's slot.
+ * Next proxy in list order not held by another account and not yet used this cycle.
+ * When every enabled proxy has been used once, cycle resets and starts again.
+ */
+function pickNextPoolProxy(enabled, assignments, cycleUsedIn, accountId, opts = {}) {
+  if (!enabled.length) return { pick: null, cycleUsed: [] };
+
+  const heldByOthers = new Set(
+    Object.entries(assignments)
+      .filter(([acc]) => acc !== accountId)
+      .map(([, pid]) => pid)
+  );
+
+  let cycle = new Set(normalizeCycleUsed(cycleUsedIn, enabled));
+  const forceNew = !!opts.forceNew;
+  const startAfterId = opts.startAfterId || null;
+
+  const resetCycle = () => {
+    cycle = new Set(heldByOthers);
+    if (forceNew && startAfterId) cycle.add(startAfterId);
+  };
+
+  const tryPick = () => {
+    const startIdx = startAfterId
+      ? Math.max(0, enabled.findIndex((p) => p.id === startAfterId))
+      : -1;
+    for (let i = 1; i <= enabled.length; i++) {
+      const cand = enabled[(startIdx + i + enabled.length) % enabled.length];
+      if (forceNew && cand.id === startAfterId) continue;
+      if (heldByOthers.has(cand.id)) continue;
+      if (cycle.has(cand.id)) continue;
+      return cand;
+    }
+    return null;
+  };
+
+  if (enabled.every((p) => cycle.has(p.id))) resetCycle();
+
+  let pick = tryPick();
+  if (!pick) {
+    resetCycle();
+    pick = tryPick();
+  }
+  if (!pick) {
+    const counts = new Map(enabled.map((p) => [p.id, 0]));
+    for (const pid of heldByOthers) {
+      if (counts.has(pid)) counts.set(pid, (counts.get(pid) || 0) + 1);
+    }
+    pick =
+      [...enabled]
+        .filter((p) => !forceNew || p.id !== startAfterId)
+        .sort((a, b) => (counts.get(a.id) || 0) - (counts.get(b.id) || 0))[0] || null;
+  }
+
+  if (pick) cycle.add(pick.id);
+  return { pick, cycleUsed: [...cycle] };
+}
+
+/**
+ * Assign / return sticky proxy for this BiB account.
+ * Pool cycle: a used proxy is not given to another account until the full pool
+ * has been consumed once, then the cycle starts again.
  */
 function ensureAccountProxySync(accountId, { forceNew = false } = {}) {
   if (!accountId) return null;
-  const raw = readMirrorFile() || { proxies: [], assignments: {} };
+  const raw = readMirrorFile() || { proxies: [], assignments: {}, cycleUsed: [] };
   const enabled = enabledProxies(raw);
   if (!enabled.length) return null;
 
   const assignments =
     raw.assignments && typeof raw.assignments === 'object' ? { ...raw.assignments } : {};
+  let cycleUsed = normalizeCycleUsed(raw.cycleUsed, enabled);
+  if (!cycleUsed.length) {
+    for (const pid of Object.values(assignments)) {
+      if (enabled.some((p) => p.id === pid) && !cycleUsed.includes(pid)) cycleUsed.push(pid);
+    }
+  }
 
   const existingId = assignments[accountId];
   if (existingId && !forceNew) {
@@ -130,40 +205,18 @@ function ensureAccountProxySync(accountId, { forceNew = false } = {}) {
     if (hit) return hit.url;
   }
 
-  const usedCounts = new Map(enabled.map((p) => [p.id, 0]));
-  for (const [acc, pid] of Object.entries(assignments)) {
-    if (acc === accountId) continue;
-    if (usedCounts.has(pid)) usedCounts.set(pid, (usedCounts.get(pid) || 0) + 1);
-  }
+  const { pick, cycleUsed: nextCycle } = pickNextPoolProxy(
+    enabled,
+    assignments,
+    cycleUsed,
+    accountId,
+    { forceNew, startAfterId: forceNew ? existingId || null : null }
+  );
+  if (!pick) return null;
 
-  let pick = null;
-  if (forceNew && existingId && enabled.length > 1) {
-    const curIdx = Math.max(0, enabled.findIndex((p) => p.id === existingId));
-    for (let i = 1; i < enabled.length; i++) {
-      const cand = enabled[(curIdx + i) % enabled.length];
-      if ((usedCounts.get(cand.id) || 0) === 0) {
-        pick = cand;
-        break;
-      }
-    }
-    if (!pick) pick = enabled[(curIdx + 1) % enabled.length];
-  }
-
-  if (!pick) {
-    pick = enabled.find((p) => (usedCounts.get(p.id) || 0) === 0);
-  }
-  if (!pick) {
-    pick = [...enabled].sort(
-      (a, b) => (usedCounts.get(a.id) || 0) - (usedCounts.get(b.id) || 0)
-    )[0];
-    console.warn(
-      `[egress-proxy] not enough unique proxies — reusing ${pick.id} for account ${accountId.slice(0, 8)} (add more proxies)`
-    );
-  } else {
-    console.log(
-      `[egress-proxy] assigned ${forceNew ? 'rotated' : 'unique'} proxy ${pick.id} → account ${accountId.slice(0, 8)}`
-    );
-  }
+  console.log(
+    `[egress-proxy] assigned ${forceNew ? 'rotated' : 'unique'} proxy ${pick.id} → account ${accountId.slice(0, 8)} (cycle ${nextCycle.length}/${enabled.length})`
+  );
 
   assignments[accountId] = pick.id;
   const proxies = Array.isArray(raw.proxies) ? raw.proxies : enabled;
@@ -171,6 +224,7 @@ function ensureAccountProxySync(accountId, { forceNew = false } = {}) {
     url: activeFromMirror({ proxies: enabled }),
     proxies,
     assignments,
+    cycleUsed: nextCycle,
   });
   return pick.url;
 }

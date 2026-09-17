@@ -154,7 +154,8 @@ export function rotateActiveEgressProxy(): {
 
 export function writeEgressProxyMirror(
   proxies: EgressProxyEntry[],
-  assignments?: Record<string, string>
+  assignments?: Record<string, string>,
+  cycleUsed?: string[]
 ): void {
   const dir = path.dirname(EGRESS_PROXY_MIRROR_PATH);
   fs.mkdirSync(dir, { recursive: true });
@@ -162,10 +163,19 @@ export function writeEgressProxyMirror(
   const url = activeEgressProxyUrl(proxies) || '';
   const nextAssignments =
     assignments !== undefined ? { ...assignments } : { ...prev.assignments };
-  // Drop assignments pointing at removed proxy ids
-  const ids = new Set(proxies.filter((p) => p.enabled && p.url).map((p) => p.id));
+  const enabledIds = new Set(proxies.filter((p) => p.enabled && p.url).map((p) => p.id));
   for (const [acc, pid] of Object.entries(nextAssignments)) {
-    if (!ids.has(pid)) delete nextAssignments[acc];
+    if (!enabledIds.has(pid)) delete nextAssignments[acc];
+  }
+  const rawCycle = cycleUsed !== undefined ? cycleUsed : prev.cycleUsed;
+  const nextCycle = [
+    ...new Set(
+      (rawCycle || []).filter((id) => typeof id === 'string' && enabledIds.has(id))
+    ),
+  ];
+  // Still-held proxies must stay marked used so vacated slots aren't reused mid-cycle
+  for (const pid of Object.values(nextAssignments)) {
+    if (enabledIds.has(pid) && !nextCycle.includes(pid)) nextCycle.push(pid);
   }
   fs.writeFileSync(
     EGRESS_PROXY_MIRROR_PATH,
@@ -174,6 +184,7 @@ export function writeEgressProxyMirror(
         url,
         proxies,
         assignments: nextAssignments,
+        cycleUsed: nextCycle,
         updatedAt: new Date().toISOString(),
       },
       null,
@@ -187,10 +198,12 @@ export function readEgressProxyMirror(): {
   url: string | null;
   proxies: EgressProxyEntry[];
   assignments: Record<string, string>;
+  /** Proxy ids already consumed this pool pass — not reused until every enabled proxy is used once. */
+  cycleUsed: string[];
 } {
   try {
     if (!fs.existsSync(EGRESS_PROXY_MIRROR_PATH)) {
-      return { url: null, proxies: [], assignments: {} };
+      return { url: null, proxies: [], assignments: {}, cycleUsed: [] };
     }
     const raw = JSON.parse(fs.readFileSync(EGRESS_PROXY_MIRROR_PATH, 'utf8'));
     const proxies = normalizeEgressProxyList(raw?.proxies);
@@ -206,10 +219,103 @@ export function readEgressProxyMirror(): {
         }
       }
     }
-    return { url: activeEgressProxyUrl(proxies), proxies, assignments };
+    const enabledIds = new Set(proxies.filter((p) => p.enabled && p.url).map((p) => p.id));
+    const cycleUsed: string[] = [];
+    if (Array.isArray(raw?.cycleUsed)) {
+      for (const id of raw.cycleUsed) {
+        if (typeof id === 'string' && enabledIds.has(id) && !cycleUsed.includes(id)) {
+          cycleUsed.push(id);
+        }
+      }
+    }
+    // Seed cycle from live assignments if file had none (upgrade path)
+    if (!cycleUsed.length) {
+      for (const pid of Object.values(assignments)) {
+        if (enabledIds.has(pid) && !cycleUsed.includes(pid)) cycleUsed.push(pid);
+      }
+    }
+    return {
+      url: activeEgressProxyUrl(proxies),
+      proxies,
+      assignments,
+      cycleUsed,
+    };
   } catch {
-    return { url: null, proxies: [], assignments: {} };
+    return { url: null, proxies: [], assignments: {}, cycleUsed: [] };
   }
+}
+
+/**
+ * Next proxy in pool order that is not held by another account and not yet
+ * used this cycle. When every enabled proxy has been used once, cycle resets
+ * (still-held proxies stay reserved) and counting starts again.
+ */
+function pickNextPoolProxy(
+  enabled: EgressProxyEntry[],
+  assignments: Record<string, string>,
+  cycleUsedIn: string[],
+  accountId: string,
+  opts?: { forceNew?: boolean; startAfterId?: string | null }
+): { pick: EgressProxyEntry | null; cycleUsed: string[]; recycled: boolean } {
+  if (!enabled.length) return { pick: null, cycleUsed: [], recycled: false };
+
+  const heldByOthers = new Set(
+    Object.entries(assignments)
+      .filter(([acc]) => acc !== accountId)
+      .map(([, pid]) => pid)
+  );
+
+  let cycle = new Set(
+    cycleUsedIn.filter((id) => enabled.some((p) => p.id === id))
+  );
+  let recycled = false;
+
+  const resetCycle = () => {
+    cycle = new Set(heldByOthers);
+    // Keep this account's current proxy marked if we're rotating away from it
+    if (opts?.forceNew && opts.startAfterId) cycle.add(opts.startAfterId);
+    recycled = true;
+  };
+
+  const tryPick = (): EgressProxyEntry | null => {
+    const startIdx = opts?.startAfterId
+      ? Math.max(0, enabled.findIndex((p) => p.id === opts.startAfterId))
+      : -1;
+    for (let i = 1; i <= enabled.length; i++) {
+      const cand = enabled[(startIdx + i + enabled.length) % enabled.length];
+      if (opts?.forceNew && cand.id === opts.startAfterId) continue;
+      if (heldByOthers.has(cand.id)) continue;
+      if (cycle.has(cand.id)) continue;
+      return cand;
+    }
+    return null;
+  };
+
+  // Pool exhausted this cycle → start again
+  if (enabled.every((p) => cycle.has(p.id))) {
+    resetCycle();
+  }
+
+  let pick = tryPick();
+  if (!pick) {
+    // No fresh slot left (e.g. all remaining held) → reset and retry
+    resetCycle();
+    pick = tryPick();
+  }
+  if (!pick) {
+    // More live accounts than proxies — allow simultaneous reuse of least-held
+    const counts = new Map(enabled.map((p) => [p.id, 0]));
+    for (const pid of heldByOthers) {
+      if (counts.has(pid)) counts.set(pid, (counts.get(pid) || 0) + 1);
+    }
+    pick =
+      [...enabled]
+        .filter((p) => !opts?.forceNew || p.id !== opts.startAfterId)
+        .sort((a, b) => (counts.get(a.id) || 0) - (counts.get(b.id) || 0))[0] || null;
+  }
+
+  if (pick) cycle.add(pick.id);
+  return { pick, cycleUsed: [...cycle], recycled };
 }
 
 /** Proxy URL assigned to a BiB account (unique when enough proxies exist). */
@@ -224,8 +330,8 @@ export function getProxyUrlForAccount(accountId: string): string | null {
 }
 
 /**
- * Assign a unique enabled proxy to this account (prefer unused).
- * If more accounts than proxies, reuses the least-used proxy.
+ * Assign a sticky proxy: keep existing; otherwise take next unused-in-cycle.
+ * Vacated proxies stay off-limits until the full pool has been consumed once.
  */
 export function ensureUniqueProxyForAccount(accountId: string): {
   url: string | null;
@@ -233,7 +339,7 @@ export function ensureUniqueProxyForAccount(accountId: string): {
   reused: boolean;
 } {
   if (!accountId) return { url: null, proxyId: null, reused: false };
-  const { proxies, assignments } = readEgressProxyMirror();
+  const { proxies, assignments, cycleUsed } = readEgressProxyMirror();
   const enabled = proxies.filter((p) => p.enabled && p.url);
   if (!enabled.length) return { url: null, proxyId: null, reused: false };
 
@@ -243,30 +349,25 @@ export function ensureUniqueProxyForAccount(accountId: string): {
     if (hit) return { url: hit.url, proxyId: hit.id, reused: false };
   }
 
-  const usedCounts = new Map<string, number>();
-  for (const p of enabled) usedCounts.set(p.id, 0);
-  for (const [acc, pid] of Object.entries(assignments)) {
-    if (acc === accountId) continue;
-    if (usedCounts.has(pid)) usedCounts.set(pid, (usedCounts.get(pid) || 0) + 1);
-  }
+  const { pick, cycleUsed: nextCycle, recycled } = pickNextPoolProxy(
+    enabled,
+    assignments,
+    cycleUsed,
+    accountId
+  );
+  if (!pick) return { url: null, proxyId: null, reused: false };
 
-  const unused = enabled.find((p) => (usedCounts.get(p.id) || 0) === 0);
-  let pick = unused || null;
-  let reused = false;
-  if (!pick) {
-    reused = true;
-    pick = [...enabled].sort(
-      (a, b) => (usedCounts.get(a.id) || 0) - (usedCounts.get(b.id) || 0)
-    )[0];
-  }
-
-  const next = { ...assignments, [accountId]: pick.id };
-  writeEgressProxyMirror(proxies, next);
-  return { url: pick.url, proxyId: pick.id, reused };
+  writeEgressProxyMirror(
+    proxies,
+    { ...assignments, [accountId]: pick.id },
+    nextCycle
+  );
+  return { url: pick.url, proxyId: pick.id, reused: recycled };
 }
 
 /**
- * Move this account to the next enabled proxy (prefer one not used by others).
+ * Move this account to the next pool proxy not used this cycle (and not held by others).
+ * Example: A=1 B=2, B→3, then A→4 (not 2) until the whole pool is used once.
  */
 export function rotateProxyForAccount(accountId: string): {
   ok: boolean;
@@ -278,7 +379,7 @@ export function rotateProxyForAccount(accountId: string): {
   if (!accountId) {
     return { ok: false, from: null, to: null, proxyId: null, error: 'accountId required' };
   }
-  const { proxies, assignments } = readEgressProxyMirror();
+  const { proxies, assignments, cycleUsed } = readEgressProxyMirror();
   const enabled = proxies.filter((p) => p.enabled && p.url);
   if (enabled.length < 2) {
     const only = enabled[0] || null;
@@ -292,62 +393,64 @@ export function rotateProxyForAccount(accountId: string): {
   }
 
   const curId = assignments[accountId] || enabled[0].id;
-  const curIdx = Math.max(
-    0,
-    enabled.findIndex((p) => p.id === curId)
-  );
-  const from = enabled[curIdx]?.url || null;
+  const from = enabled.find((p) => p.id === curId)?.url || null;
 
-  const usedByOthers = new Set(
-    Object.entries(assignments)
-      .filter(([acc]) => acc !== accountId)
-      .map(([, pid]) => pid)
+  const { pick, cycleUsed: nextCycle } = pickNextPoolProxy(
+    enabled,
+    assignments,
+    cycleUsed,
+    accountId,
+    { forceNew: true, startAfterId: curId }
   );
-
-  // Prefer next unused proxy walking the ring
-  let pick = enabled[(curIdx + 1) % enabled.length];
-  for (let i = 1; i < enabled.length; i++) {
-    const cand = enabled[(curIdx + i) % enabled.length];
-    if (!usedByOthers.has(cand.id)) {
-      pick = cand;
-      break;
-    }
+  if (!pick) {
+    return { ok: false, from, to: from, proxyId: curId, error: 'No proxy available' };
   }
 
-  writeEgressProxyMirror(proxies, { ...assignments, [accountId]: pick.id });
+  writeEgressProxyMirror(
+    proxies,
+    { ...assignments, [accountId]: pick.id },
+    nextCycle
+  );
   return { ok: true, from, to: pick.url, proxyId: pick.id };
 }
 
 /**
- * Reassign every given account to a unique proxy (round-robin if short).
- * Used after manual global rotate / bulk relaunch.
+ * Reassign every live account to the next unused-in-cycle proxies (pool order).
+ * Does not reuse earlier-cycle proxies until the pool has been fully consumed.
  */
 export function reassignUniqueProxies(accountIds: string[]): Record<string, string> {
-  const { proxies } = readEgressProxyMirror();
+  const { proxies, cycleUsed } = readEgressProxyMirror();
   const enabled = proxies.filter((p) => p.enabled && p.url);
   const assignments: Record<string, string> = {};
   if (!enabled.length || !accountIds.length) {
-    writeEgressProxyMirror(proxies, assignments);
+    writeEgressProxyMirror(proxies, assignments, cycleUsed);
     return assignments;
   }
   const ids = [...new Set(accountIds.filter(Boolean))];
-  ids.forEach((acc, i) => {
-    assignments[acc] = enabled[i % enabled.length].id;
-  });
-  writeEgressProxyMirror(proxies, assignments);
+  let cycle = [...cycleUsed];
+  for (const acc of ids) {
+    const { pick, cycleUsed: next } = pickNextPoolProxy(
+      enabled,
+      assignments,
+      cycle,
+      acc
+    );
+    cycle = next;
+    if (pick) assignments[acc] = pick.id;
+  }
+  writeEgressProxyMirror(proxies, assignments, cycle);
   return assignments;
 }
 
 /**
- * Keep sticky assignments where still unique+valid; fill gaps; fix collisions.
- * Does not reshuffle accounts that already have a unique proxy.
+ * Keep sticky assignments where still unique+valid; fill gaps from pool cycle.
  * @returns accountIds whose assignment changed
  */
 export function ensureStickyUniqueAssignments(accountIds: string[]): {
   assignments: Record<string, string>;
   changed: string[];
 } {
-  const { proxies, assignments: prev } = readEgressProxyMirror();
+  const { proxies, assignments: prev, cycleUsed } = readEgressProxyMirror();
   const enabled = proxies.filter((p) => p.enabled && p.url);
   const ids = [...new Set(accountIds.filter(Boolean))];
   if (!enabled.length || !ids.length) {
@@ -357,8 +460,8 @@ export function ensureStickyUniqueAssignments(accountIds: string[]): {
   const assignments: Record<string, string> = { ...prev };
   const changed: string[] = [];
   const claimed = new Set<string>();
+  let cycle = [...cycleUsed];
 
-  // Pass 1: keep existing unique sticky assignments for requested accounts
   for (const acc of ids) {
     const pid = assignments[acc];
     const hit = pid ? enabled.find((p) => p.id === pid) : null;
@@ -369,35 +472,26 @@ export function ensureStickyUniqueAssignments(accountIds: string[]): {
     }
   }
 
-  // Pass 2: assign unused proxies to accounts still missing
   for (const acc of ids) {
     if (assignments[acc] && enabled.some((p) => p.id === assignments[acc])) {
       const pid = assignments[acc];
       if (!claimed.has(pid)) claimed.add(pid);
       continue;
     }
-    const unused = enabled.find((p) => !claimed.has(p.id));
-    let pick = unused || null;
-    if (!pick) {
-      // Short pool: least-used among all
-      const counts = new Map(enabled.map((p) => [p.id, 0]));
-      for (const pid of Object.values(assignments)) {
-        if (counts.has(pid)) counts.set(pid, (counts.get(pid) || 0) + 1);
-      }
-      pick = [...enabled].sort(
-        (a, b) => (counts.get(a.id) || 0) - (counts.get(b.id) || 0)
-      )[0];
-    }
+    const { pick, cycleUsed: next } = pickNextPoolProxy(
+      enabled,
+      assignments,
+      cycle,
+      acc
+    );
+    cycle = next;
     if (!pick) continue;
-    if (assignments[acc] !== pick.id) {
-      assignments[acc] = pick.id;
-      changed.push(acc);
-    }
+    assignments[acc] = pick.id;
     claimed.add(pick.id);
+    changed.push(acc);
   }
 
-  // Drop stale assignments for accounts not in the live set? Keep them sticky for offline.
-  writeEgressProxyMirror(proxies, assignments);
+  writeEgressProxyMirror(proxies, assignments, cycle);
   return { assignments, changed };
 }
 
