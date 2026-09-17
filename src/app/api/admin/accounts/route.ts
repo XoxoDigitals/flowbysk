@@ -12,6 +12,12 @@ import {
   buildStickyAssignments,
   type FlowProjectRow,
 } from '@/lib/flowProjects';
+import {
+  ensureUniqueProxyForAccount,
+  getProxyUrlForAccount,
+  maskProxyUrl,
+  readEgressProxyMirror,
+} from '@/lib/egressProxy';
 
 function extractProjectDetails(input?: string | null): { projectId: string; projectUrl: string } {
   if (!input || !input.trim()) return { projectId: '', projectUrl: '' };
@@ -77,6 +83,7 @@ export async function GET(req: Request) {
       projMap.set(key, list);
     }
 
+    const mirror = readEgressProxyMirror();
     const sanitized = accounts.map((acc) => {
       const s = statsMap.get(acc.id);
       const supportedObj = acc.supportedModels as any;
@@ -103,6 +110,22 @@ export async function GET(req: Request) {
         assignedUser: sticky.get(id.toLowerCase()) || null,
         usedBy: usageMap.get(id.toLowerCase()) || [],
       }));
+
+      // Sticky egress: ensure assignment exists for accounts with a BiB profile / live status
+      let egressUrl = getProxyUrlForAccount(acc.id);
+      if (
+        !egressUrl &&
+        (acc.profileDir ||
+          acc.browserStatus === 'READY' ||
+          acc.browserStatus === 'NEEDS_LOGIN' ||
+          acc.browserStatus === 'STARTING')
+      ) {
+        egressUrl = ensureUniqueProxyForAccount(acc.id).url;
+      }
+      const proxiesNow = egressUrl ? readEgressProxyMirror().proxies : mirror.proxies;
+      const egressEntry = egressUrl
+        ? proxiesNow.find((p) => p.enabled !== false && p.url === egressUrl)
+        : null;
 
       return {
         id: acc.id,
@@ -136,6 +159,11 @@ export async function GET(req: Request) {
         flowProjects,
         bibLastSeenAt: acc.bibLastSeenAt,
         bibLastError: acc.bibLastError,
+        egressProxyUrl: egressUrl,
+        egressProxyMasked: egressUrl ? maskProxyUrl(egressUrl) : null,
+        egressIp: egressEntry?.ip ?? null,
+        egressCountry: egressEntry?.country ?? null,
+        egressProxyId: egressEntry?.id ?? null,
       };
     });
 

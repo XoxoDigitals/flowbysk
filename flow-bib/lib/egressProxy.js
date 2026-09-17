@@ -8,6 +8,8 @@ const NEXT_URL = process.env.NEXT_PUBLIC_APP_URL || process.env.NEXT_URL || 'htt
 const INTERNAL_SECRET = process.env.INTERNAL_API_SECRET || process.env.JWT_SECRET || '';
 
 let _cache = { key: '', url: null, at: 0 };
+/** Serialize assignment writes so concurrent launches do not collide. */
+let _assignChain = Promise.resolve();
 
 /**
  * Accept:
@@ -109,11 +111,12 @@ function readMirror() {
 }
 
 /**
- * Assign / return a unique proxy for this BiB account.
- * Prefers unused proxies; if short, reuses least-used.
+ * Assign / return a sticky unique proxy for this BiB account.
+ * Prefers unused proxies; if short, reuses least-used (with warn).
+ * Never falls back to "first proxy" for a different account's slot.
  */
-function ensureAccountProxy(accountId, { forceNew = false } = {}) {
-  if (!accountId) return readMirror();
+function ensureAccountProxySync(accountId, { forceNew = false } = {}) {
+  if (!accountId) return null;
   const raw = readMirrorFile() || { proxies: [], assignments: {} };
   const enabled = enabledProxies(raw);
   if (!enabled.length) return null;
@@ -133,7 +136,6 @@ function ensureAccountProxy(accountId, { forceNew = false } = {}) {
     if (usedCounts.has(pid)) usedCounts.set(pid, (usedCounts.get(pid) || 0) + 1);
   }
 
-  // When forcing a new proxy (dead tunnel), prefer next unused / different id
   let pick = null;
   if (forceNew && existingId && enabled.length > 1) {
     const curIdx = Math.max(0, enabled.findIndex((p) => p.id === existingId));
@@ -173,8 +175,24 @@ function ensureAccountProxy(accountId, { forceNew = false } = {}) {
   return pick.url;
 }
 
+function ensureAccountProxy(accountId, opts = {}) {
+  if (!accountId) return null;
+  // Sync path is fine when called from a single-threaded await chain;
+  // mutex below covers concurrent resolveEgressProxyUrl calls.
+  return ensureAccountProxySync(accountId, opts);
+}
+
+function withAssignLock(fn) {
+  const run = _assignChain.then(fn, fn);
+  _assignChain = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
 function rotateAccountProxy(accountId) {
-  return ensureAccountProxy(accountId, { forceNew: true });
+  return ensureAccountProxySync(accountId, { forceNew: true });
 }
 
 function clearEgressProxyCache() {
@@ -182,8 +200,9 @@ function clearEgressProxyCache() {
 }
 
 /**
- * Resolve egress proxy for an account (unique when possible).
- * Mirror assignments → mirror active → env → Next internal API.
+ * Resolve egress proxy for an account (sticky unique when accountId set).
+ * With accountId: assignments only — never global first-proxy fallback.
+ * Without accountId: mirror active → env → Next internal API.
  * @returns {Promise<string|null>}
  */
 async function resolveEgressProxyUrl(opts = {}) {
@@ -197,9 +216,14 @@ async function resolveEgressProxyUrl(opts = {}) {
 
   let url = null;
   if (accountId) {
-    url = ensureAccountProxy(accountId);
+    url = await withAssignLock(() => ensureAccountProxySync(accountId));
+    // Per-account: do not fall back to global first proxy (that caused sharing).
+    if (!url) url = normalizeProxyUrl(process.env.EGRESS_PROXY_URL);
+    _cache = { key: cacheKey, url, at: Date.now() };
+    return url;
   }
-  if (!url) url = readMirror();
+
+  url = readMirror();
   if (!url) url = normalizeProxyUrl(process.env.EGRESS_PROXY_URL);
 
   if (!url) {

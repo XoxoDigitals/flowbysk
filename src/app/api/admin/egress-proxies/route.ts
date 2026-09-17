@@ -144,9 +144,42 @@ export async function POST(req: Request) {
         relaunched: result.relaunched,
         error: result.error,
         proxies: mirror.proxies,
+        assignments: mirror.assignments,
         lastProxyRotateAt: rt.lastProxyRotateAt,
         lastProxyRotateReason: rt.lastProxyRotateReason,
       }, { status: result.ok ? 200 : 400 });
+    }
+
+    if (body.action === 'rotate-account') {
+      const accountId = String(body.accountId || body.account_id || '').trim();
+      if (!accountId) {
+        return NextResponse.json({ error: 'accountId required' }, { status: 400 });
+      }
+      const { rotateProxyAndRelaunchForAccount } = await import(
+        '@/lib/unusualActivityProxyRotate'
+      );
+      const { maskProxyUrl } = await import('@/lib/egressProxy');
+      const result = await rotateProxyAndRelaunchForAccount(accountId, {
+        reason: 'manual account',
+      });
+      const mirror = readEgressProxyMirror();
+      const rt = readSiteRuntime();
+      return NextResponse.json(
+        {
+          success: result.ok,
+          rotated: result.rotated,
+          from: result.from ? maskProxyUrl(result.from) : null,
+          to: result.to ? maskProxyUrl(result.to) : null,
+          accountId,
+          relaunched: result.relaunched,
+          error: result.error,
+          proxies: mirror.proxies,
+          assignments: mirror.assignments,
+          lastProxyRotateAt: rt.lastProxyRotateAt,
+          lastProxyRotateReason: rt.lastProxyRotateReason,
+        },
+        { status: result.ok ? 200 : 400 }
+      );
     }
 
     const mirror = readEgressProxyMirror();

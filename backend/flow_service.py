@@ -508,6 +508,8 @@ class FlowService:
         self.cookies: str = ""
         self.access_token: str = ""
         self.token_expires: str = ""
+        # Provider account id — selects data/egress-proxy.json assignments for HTTP
+        self.egress_account_id: str = ""
         self.user_info: Dict[str, Any] = {}
         self.simulation_mode: bool = False
         self.active_project_id: str = ""
@@ -3523,7 +3525,7 @@ class FlowService:
         aisandbox rejects generation with 403 when the token is empty.
         """
         try:
-            sync_egress_proxy_env()
+            sync_egress_proxy_env(account_id=self.egress_account_id or None)
         except Exception:
             pass
         self._ensure_aisandbox_auth()
@@ -3569,7 +3571,7 @@ class FlowService:
         )
         if method.upper() == "GET":
             resp = requests.get(
-                endpoint, headers=headers, timeout=timeout, **apply_proxies_kwargs(endpoint, {})
+                endpoint, headers=headers, timeout=timeout, **apply_proxies_kwargs(endpoint, {}, account_id=self.egress_account_id or None)
             )
         else:
             resp = requests.post(
@@ -3577,7 +3579,7 @@ class FlowService:
                 headers=headers,
                 data=json.dumps(body or {}),
                 timeout=timeout,
-                **apply_proxies_kwargs(endpoint, {}),
+                **apply_proxies_kwargs(endpoint, {}, account_id=self.egress_account_id or None),
             )
 
         text = resp.text or ""
@@ -3599,7 +3601,7 @@ class FlowService:
                         endpoint,
                         headers=headers,
                         timeout=timeout,
-                        **apply_proxies_kwargs(endpoint, {}),
+                        **apply_proxies_kwargs(endpoint, {}, account_id=self.egress_account_id or None),
                     )
                 else:
                     retry_resp = requests.post(
@@ -3607,7 +3609,7 @@ class FlowService:
                         headers=headers,
                         data=json.dumps(body or {}),
                         timeout=timeout,
-                        **apply_proxies_kwargs(endpoint, {}),
+                        **apply_proxies_kwargs(endpoint, {}, account_id=self.egress_account_id or None),
                     )
                 if retry_resp.status_code == 200:
                     try:
@@ -5557,7 +5559,7 @@ class FlowService:
                 url,
                 headers=headers,
                 timeout=timeout,
-                **apply_proxies_kwargs(url, {}),
+                **apply_proxies_kwargs(url, {}, account_id=self.egress_account_id or None),
             )
             resp.raise_for_status()
         except Exception as first_err:

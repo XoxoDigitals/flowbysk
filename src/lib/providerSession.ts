@@ -81,11 +81,12 @@ export async function prepareProviderWorkerSession(
       .catch(() => 0);
 
     // Push cookies into Python worker session so uploads/I2I share the BiB Google login
+    // (accountId selects that account's sticky egress proxy for Python HTTP)
     if (cookies) {
       await fetch(`${PYTHON_WORKER_URL}/api/auth/cookies`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cookies }),
+        body: JSON.stringify({ cookies, accountId: provider.id, account_id: provider.id }),
       }).catch(() => 0);
     }
     // Push live WIZ SNlM0e so Python batchexecute works even when labs OAuth is stale
@@ -98,6 +99,8 @@ export async function prepareProviderWorkerSession(
           bl: exported.bl || undefined,
           sid: exported.sid || undefined,
           preferred_base: 'https://flow.google.com',
+          accountId: provider.id,
+          account_id: provider.id,
         }),
       }).catch(() => 0);
     }
@@ -259,7 +262,11 @@ export async function refreshFlowMediaId(opts: {
           await fetch(`${PYTHON_WORKER_URL}/api/auth/cookies`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cookies: opts.cookies }),
+            body: JSON.stringify({
+              cookies: opts.cookies,
+              accountId: opts.accountId,
+              account_id: opts.accountId,
+            }),
           }).catch(() => 0);
         }
         if (opts.projectId) {
@@ -307,7 +314,11 @@ export async function refreshFlowMediaId(opts: {
       await fetch(`${PYTHON_WORKER_URL}/api/auth/cookies`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cookies: opts.cookies }),
+        body: JSON.stringify({
+          cookies: opts.cookies,
+          accountId: opts.accountId,
+          account_id: opts.accountId,
+        }),
       }).catch(() => 0);
     }
     if (opts.projectId) {

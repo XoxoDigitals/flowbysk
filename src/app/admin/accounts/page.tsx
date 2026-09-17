@@ -69,6 +69,11 @@ interface AccountItem {
     assignedUser?: { id: string; name: string | null; email: string } | null;
     usedBy: { id: string; name: string | null; email: string }[];
   }[];
+  egressProxyUrl?: string | null;
+  egressProxyMasked?: string | null;
+  egressIp?: string | null;
+  egressCountry?: string | null;
+  egressProxyId?: string | null;
 }
 
 export default function AdminAccountsPage() {
@@ -92,41 +97,21 @@ export default function AdminAccountsPage() {
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
   const [creatingProjectForId, setCreatingProjectForId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [activeProxy, setActiveProxy] = useState<{
-    url: string | null;
-    masked?: string;
-    ip?: string | null;
-    country?: string | null;
-  }>({ url: null });
   const [lastProxyRotateAt, setLastProxyRotateAt] = useState<string | null>(null);
   const [lastProxyRotateReason, setLastProxyRotateReason] = useState<string | null>(null);
-  const [rotatingProxy, setRotatingProxy] = useState(false);
-  const [rotateMsg, setRotateMsg] = useState('');
+  const [rotatingProxyId, setRotatingProxyId] = useState<string | null>(null);
+  const [rotateMsgById, setRotateMsgById] = useState<Record<string, string>>({});
 
   // Edit form state
   const [editPlanTier, setEditPlanTier] = useState('Google AI Ultra');
   const [editProjectUrl, setEditProjectUrl] = useState('');
   const [editMaxParallelLimit, setEditMaxParallelLimit] = useState(5);
 
-  const fetchActiveProxy = async () => {
+  const fetchProxyMeta = async () => {
     try {
       const res = await fetch('/api/admin/egress-proxies');
       if (!res.ok) return;
       const data = await res.json();
-      const activeUrl = data.activeUrl || null;
-      const active = Array.isArray(data.proxies)
-        ? data.proxies.find((p: any) => p.enabled !== false && p.url === activeUrl) ||
-          data.proxies.find((p: any) => p.enabled !== false)
-        : null;
-      const masked = activeUrl
-        ? String(activeUrl).replace(/:([^:@/]+)@/, ':****@')
-        : null;
-      setActiveProxy({
-        url: activeUrl,
-        masked: masked || undefined,
-        ip: active?.ip ?? null,
-        country: active?.country ?? null,
-      });
       if (data.lastProxyRotateAt) setLastProxyRotateAt(data.lastProxyRotateAt);
       if (typeof data.lastProxyRotateReason === 'string') {
         setLastProxyRotateReason(data.lastProxyRotateReason);
@@ -152,24 +137,24 @@ export default function AdminAccountsPage() {
 
   useEffect(() => {
     fetchAccounts();
-    fetchActiveProxy();
+    fetchProxyMeta();
   }, []);
 
-  const handleRotateProxy = async () => {
+  const handleRotateProxy = async (accountId: string) => {
     if (
       !confirm(
-        'Rotate to the next egress proxy and relaunch BiB? Google login is kept on the same profile.'
+        'Rotate this account to the next unique egress proxy and relaunch BiB? Google login is kept on the same profile.'
       )
     ) {
       return;
     }
-    setRotatingProxy(true);
-    setRotateMsg('Rotating proxy…');
+    setRotatingProxyId(accountId);
+    setRotateMsgById((m) => ({ ...m, [accountId]: 'Rotating proxy…' }));
     try {
       const res = await fetch('/api/admin/egress-proxies', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'rotate' }),
+        body: JSON.stringify({ action: 'rotate-account', accountId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Rotate failed');
@@ -177,18 +162,24 @@ export default function AdminAccountsPage() {
       if (typeof data.lastProxyRotateReason === 'string') {
         setLastProxyRotateReason(data.lastProxyRotateReason);
       }
-      await fetchActiveProxy();
       await fetchAccounts();
-      setRotateMsg(
-        data.rotated
-          ? `Rotated · relaunched ${data.relaunched || 0} account(s)`
-          : data.error || 'Rotate did not complete'
-      );
+      setRotateMsgById((m) => ({
+        ...m,
+        [accountId]: data.rotated
+          ? `Rotated · relaunched ${data.relaunched || 0}`
+          : data.error || 'Rotate did not complete',
+      }));
     } catch (err: any) {
-      setRotateMsg(err.message || 'Rotate failed');
+      setRotateMsgById((m) => ({ ...m, [accountId]: err.message || 'Rotate failed' }));
     } finally {
-      setRotatingProxy(false);
-      setTimeout(() => setRotateMsg(''), 6000);
+      setRotatingProxyId(null);
+      setTimeout(() => {
+        setRotateMsgById((m) => {
+          const next = { ...m };
+          delete next[accountId];
+          return next;
+        });
+      }, 6000);
     }
   };
 
@@ -791,14 +782,17 @@ export default function AdminAccountsPage() {
                       <div className="min-w-0">
                         <p className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--ink3)]">
                           <Globe className="h-3 w-3" />
-                          Active egress proxy
+                          Account egress proxy
                         </p>
-                        <p className="mt-0.5 truncate font-mono text-[11px] text-[var(--ink)]" title={activeProxy.url || ''}>
-                          {activeProxy.masked || activeProxy.url || 'None configured'}
+                        <p
+                          className="mt-0.5 truncate font-mono text-[11px] text-[var(--ink)]"
+                          title={acc.egressProxyUrl || ''}
+                        >
+                          {acc.egressProxyMasked || acc.egressProxyUrl || 'Unassigned (set on launch)'}
                         </p>
-                        {(activeProxy.ip || activeProxy.country) && (
+                        {(acc.egressIp || acc.egressCountry) && (
                           <p className="mt-0.5 text-[11px] text-[var(--ink3)]">
-                            {[activeProxy.ip, activeProxy.country].filter(Boolean).join(' · ')}
+                            {[acc.egressIp, acc.egressCountry].filter(Boolean).join(' · ')}
                           </p>
                         )}
                         {lastProxyRotateAt ? (
@@ -808,22 +802,20 @@ export default function AdminAccountsPage() {
                             {new Date(lastProxyRotateAt).toLocaleString()}
                             {lastProxyRotateReason ? ` · ${lastProxyRotateReason}` : ''}
                           </p>
-                        ) : (
-                          <p className="mt-1 text-[10px] text-[var(--ink3)]">No rotate recorded yet</p>
-                        )}
-                        {rotateMsg ? (
-                          <p className="mt-1 text-[10px] text-[var(--a1)]">{rotateMsg}</p>
+                        ) : null}
+                        {rotateMsgById[acc.id] ? (
+                          <p className="mt-1 text-[10px] text-[var(--a1)]">{rotateMsgById[acc.id]}</p>
                         ) : null}
                       </div>
                       <button
                         type="button"
-                        onClick={handleRotateProxy}
-                        disabled={rotatingProxy || bibBusyId === acc.id}
+                        onClick={() => handleRotateProxy(acc.id)}
+                        disabled={rotatingProxyId === acc.id || bibBusyId === acc.id}
                         className="shrink-0 flex items-center gap-1 rounded-lg border border-[var(--a1)]/30 bg-[var(--a1soft)] px-2 py-1 text-[11px] font-semibold text-[var(--a1)] disabled:opacity-50"
-                        title="Rotate to next proxy and relaunch (keeps Google login)"
+                        title="Rotate this account to next unique proxy and relaunch (keeps Google login)"
                       >
-                        <RefreshCcw className={`h-3 w-3 ${rotatingProxy ? 'animate-spin' : ''}`} />
-                        {rotatingProxy ? 'Rotating…' : 'Rotate'}
+                        <RefreshCcw className={`h-3 w-3 ${rotatingProxyId === acc.id ? 'animate-spin' : ''}`} />
+                        {rotatingProxyId === acc.id ? 'Rotating…' : 'Rotate'}
                       </button>
                     </div>
                   </div>

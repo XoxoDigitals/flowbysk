@@ -339,6 +339,69 @@ export function reassignUniqueProxies(accountIds: string[]): Record<string, stri
 }
 
 /**
+ * Keep sticky assignments where still unique+valid; fill gaps; fix collisions.
+ * Does not reshuffle accounts that already have a unique proxy.
+ * @returns accountIds whose assignment changed
+ */
+export function ensureStickyUniqueAssignments(accountIds: string[]): {
+  assignments: Record<string, string>;
+  changed: string[];
+} {
+  const { proxies, assignments: prev } = readEgressProxyMirror();
+  const enabled = proxies.filter((p) => p.enabled && p.url);
+  const ids = [...new Set(accountIds.filter(Boolean))];
+  if (!enabled.length || !ids.length) {
+    return { assignments: prev, changed: [] };
+  }
+
+  const assignments: Record<string, string> = { ...prev };
+  const changed: string[] = [];
+  const claimed = new Set<string>();
+
+  // Pass 1: keep existing unique sticky assignments for requested accounts
+  for (const acc of ids) {
+    const pid = assignments[acc];
+    const hit = pid ? enabled.find((p) => p.id === pid) : null;
+    if (hit && !claimed.has(hit.id)) {
+      claimed.add(hit.id);
+    } else if (pid) {
+      delete assignments[acc];
+    }
+  }
+
+  // Pass 2: assign unused proxies to accounts still missing
+  for (const acc of ids) {
+    if (assignments[acc] && enabled.some((p) => p.id === assignments[acc])) {
+      const pid = assignments[acc];
+      if (!claimed.has(pid)) claimed.add(pid);
+      continue;
+    }
+    const unused = enabled.find((p) => !claimed.has(p.id));
+    let pick = unused || null;
+    if (!pick) {
+      // Short pool: least-used among all
+      const counts = new Map(enabled.map((p) => [p.id, 0]));
+      for (const pid of Object.values(assignments)) {
+        if (counts.has(pid)) counts.set(pid, (counts.get(pid) || 0) + 1);
+      }
+      pick = [...enabled].sort(
+        (a, b) => (counts.get(a.id) || 0) - (counts.get(b.id) || 0)
+      )[0];
+    }
+    if (!pick) continue;
+    if (assignments[acc] !== pick.id) {
+      assignments[acc] = pick.id;
+      changed.push(acc);
+    }
+    claimed.add(pick.id);
+  }
+
+  // Drop stale assignments for accounts not in the live set? Keep them sticky for offline.
+  writeEgressProxyMirror(proxies, assignments);
+  return { assignments, changed };
+}
+
+/**
  * Fetch public IP + country via the given HTTP proxy (proves proxy works).
  * Uses curl only — avoids bundling optional packages like undici.
  */

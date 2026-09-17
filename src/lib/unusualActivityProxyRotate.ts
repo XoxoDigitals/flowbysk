@@ -5,6 +5,8 @@ import {
   rotateActiveEgressProxy,
   rotateProxyForAccount,
   reassignUniqueProxies,
+  ensureStickyUniqueAssignments,
+  ensureUniqueProxyForAccount,
   readEgressProxyMirror,
   activeEgressProxyUrl,
   getProxyUrlForAccount,
@@ -199,9 +201,11 @@ function getProxyUrlSafe(accountId: string): string | null {
 
 /**
  * Manual / auto-timer: rotate pool order, reassign unique proxies to live accounts, relaunch all.
+ * Pass sticky:true to preserve existing unique assignments (auto-rotate) — only fill gaps / fix collisions.
  */
 export async function performEgressProxyRotateAndRelaunch(opts?: {
   reason?: string;
+  sticky?: boolean;
 }): Promise<{
   ok: boolean;
   rotated: boolean;
@@ -224,21 +228,30 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
 
   rotating = true;
   try {
-    const rotated = rotateActiveEgressProxy();
-    if (!rotated.ok || !rotated.to) {
-      return {
-        ok: false,
-        rotated: false,
-        from: rotated.from,
-        to: rotated.to,
-        relaunched: 0,
-        error: 'Need ≥2 enabled proxies to rotate',
-      };
-    }
+    const sticky = !!opts?.sticky;
+    let from: string | null = activeEgressProxyUrl(readEgressProxyMirror().proxies);
+    let to: string | null = from;
 
-    console.warn(
-      `[proxy-rotate] ${opts?.reason || 'manual'} → ${maskProxyUrl(rotated.to || '')}`
-    );
+    if (!sticky) {
+      const rotated = rotateActiveEgressProxy();
+      if (!rotated.ok || !rotated.to) {
+        return {
+          ok: false,
+          rotated: false,
+          from: rotated.from,
+          to: rotated.to,
+          relaunched: 0,
+          error: 'Need ≥2 enabled proxies to rotate',
+        };
+      }
+      from = rotated.from;
+      to = rotated.to;
+      console.warn(
+        `[proxy-rotate] ${opts?.reason || 'manual'} → ${maskProxyUrl(rotated.to || '')}`
+      );
+    } else {
+      console.warn(`[proxy-rotate] ${opts?.reason || 'auto'} sticky unique ensure`);
+    }
 
     try {
       await bibFetch('/egress-proxy/clear-cache', { method: 'POST', body: '{}' });
@@ -247,10 +260,41 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
     }
 
     const targets = await listRelaunchTargets();
-    reassignUniqueProxies(targets.map((a) => a.id));
+    const targetIds = targets.map((a) => a.id);
+    let relaunchIds = targetIds;
+
+    if (sticky) {
+      const { changed } = ensureStickyUniqueAssignments(targetIds);
+      for (const id of targetIds) {
+        if (!getProxyUrlForAccount(id)) {
+          ensureUniqueProxyForAccount(id);
+          if (!changed.includes(id)) changed.push(id);
+        }
+      }
+      relaunchIds = changed.length ? targets.filter((a) => changed.includes(a.id)).map((a) => a.id) : [];
+      to = activeEgressProxyUrl(readEgressProxyMirror().proxies);
+      if (!relaunchIds.length) {
+        writeSiteRuntimePatch({
+          lastProxyRotateAt: new Date().toISOString(),
+          lastProxyRotateReason: String(opts?.reason || 'auto sticky').slice(0, 120),
+          unusualActivityStreak: 0,
+        });
+        return {
+          ok: true,
+          rotated: false,
+          from,
+          to,
+          relaunched: 0,
+          reason: opts?.reason || 'auto sticky',
+        };
+      }
+    } else {
+      reassignUniqueProxies(targetIds);
+    }
 
     let relaunched = 0;
     for (const acc of targets) {
+      if (sticky && !relaunchIds.includes(acc.id)) continue;
       try {
         await relaunchAccount(acc);
         relaunched += 1;
@@ -261,17 +305,17 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
 
     writeSiteRuntimePatch({
       lastProxyRotateAt: new Date().toISOString(),
-      lastProxyRotateReason: String(opts?.reason || 'manual').slice(0, 120),
+      lastProxyRotateReason: String(opts?.reason || (sticky ? 'auto sticky' : 'manual')).slice(0, 120),
       unusualActivityStreak: 0,
     });
 
     return {
       ok: true,
-      rotated: true,
-      from: rotated.from,
-      to: rotated.to,
+      rotated: !sticky,
+      from,
+      to,
       relaunched,
-      reason: opts?.reason || 'manual',
+      reason: opts?.reason || (sticky ? 'auto sticky' : 'manual'),
     };
   } finally {
     rotating = false;

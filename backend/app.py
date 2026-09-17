@@ -175,6 +175,8 @@ async def bind_saas_identity(request, call_next):
 
 class CookiesRequest(BaseModel):
     cookies: Any = Field(..., description="Raw cookie string, Netscape format, or JSON array/object")
+    account_id: Optional[str] = Field(None, description="Provider account id for egress proxy assignment")
+    accountId: Optional[str] = Field(None, description="Alias for account_id")
 
 
 class WizMetaRequest(BaseModel):
@@ -182,6 +184,8 @@ class WizMetaRequest(BaseModel):
     bl: Optional[str] = Field(None, description="WIZ bl / cfb2h")
     sid: Optional[str] = Field(None, description="WIZ f.sid / FdrFJe")
     preferred_base: Optional[str] = Field("https://flow.google.com")
+    account_id: Optional[str] = Field(None, description="Provider account id for egress proxy assignment")
+    accountId: Optional[str] = Field(None, description="Alias for account_id")
 
 
 class TierOverrideRequest(BaseModel):
@@ -466,6 +470,13 @@ def sync_chrome_cookies() -> Dict[str, Any]:
 def update_cookies(req: CookiesRequest) -> Dict[str, Any]:
     """Submit fresh Google session cookies, validate them against Google Flow, and persist."""
     try:
+        account_id = (req.account_id or req.accountId or "").strip() or None
+        if account_id:
+            flow_service.egress_account_id = account_id
+            try:
+                sync_egress_proxy_env(account_id=account_id)
+            except Exception:
+                pass
         status = flow_service.set_cookies(req.cookies)
         return {"success": status.get("is_authenticated", False), "status": status}
     except Exception as e:
@@ -477,6 +488,9 @@ def update_cookies(req: CookiesRequest) -> Dict[str, Any]:
 def update_wiz_meta(req: WizMetaRequest) -> Dict[str, Any]:
     """Inject Flow WIZ batchexecute tokens (from BiB Chrome SNlM0e)."""
     try:
+        account_id = (req.account_id or req.accountId or "").strip() or None
+        if account_id:
+            flow_service.egress_account_id = account_id
         meta = flow_service.apply_wiz_meta(
             at=req.at,
             bl=req.bl,
