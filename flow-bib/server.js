@@ -153,29 +153,63 @@ async function ensureAccountUsable(s, preferredProject) {
   let auth = await s.refreshAuthStatus();
   if (auth.status === 'READY' && auth.at) return auth;
 
-  if (auth.hasWebSession || auth.authenticated) {
+  if (auth.hasWebSession || auth.authenticated || auth.status === 'READY') {
     const pid =
       preferredProject ||
       auth.projectId ||
       (Array.isArray(s.projectIds) && s.projectIds[0]) ||
       null;
-    if (pid && !auth.at) {
+    // Always try to mint WIZ at when missing (background + manual)
+    if (!auth.at) {
       try {
-        await s.navigate(`https://flow.google.com/project/${pid}`);
-        await sleep(1000);
+        const wiz = await s.ensureWizAt(pid);
         auth = await s.refreshAuthStatus();
+        if (!auth.at && wiz?.ok) {
+          auth = { ...auth, at: true };
+        }
       } catch (e) {
         console.warn(`[${s.accountId}] recover WIZ at:`, e.message);
       }
     }
-    if (auth.hasWebSession || auth.authenticated || auth.status === 'READY') {
-      return auth;
+    if (auth.at || auth.hasWebSession || auth.authenticated || auth.status === 'READY') {
+      // Prefer having at; if still missing after ensure, one more hard nav
+      if (!auth.at && pid) {
+        try {
+          await s.navigate(`https://flow.google.com/project/${pid}`);
+          await sleep(1200);
+          auth = await s.refreshAuthStatus();
+        } catch (e) {
+          console.warn(`[${s.accountId}] recover WIZ nav:`, e.message);
+        }
+      }
+      if (auth.at || auth.hasWebSession || auth.authenticated || auth.status === 'READY') {
+        return auth;
+      }
     }
   }
 
   const err = new Error('Account not logged in');
   err.statusCode = 401;
   throw err;
+}
+
+/** Load project page until WIZ `at` exists; throw 401 only after retries. */
+async function requireWizContext(s, preferredProject) {
+  let ctx = await s.readContext();
+  if (ctx?.at) return ctx;
+  const pid =
+    preferredProject ||
+    projectFromHref(ctx?.href || '') ||
+    (Array.isArray(s.projectIds) && s.projectIds[0]) ||
+    null;
+  await s.ensureWizAt(pid);
+  ctx = await s.readContext();
+  if (!ctx?.at) {
+    const err = new Error('No WIZ at token — open a Flow project');
+    err.statusCode = 401;
+    throw err;
+  }
+  return ctx;
 }
 
 function readAutolaunchState() {
@@ -581,15 +615,22 @@ app.post('/create-character', requireInternalSecret, async (req, res) => {
       return res.status(e.statusCode || 500).json({ error: e.message });
     }
 
-    let ctx = await s.readContext();
-    if (!ctx.at) return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
+    let ctx;
+    try {
+      ctx = await requireWizContext(s, preferredProject);
+    } catch (e) {
+      return res.status(e.statusCode || 401).json({ error: e.message });
+    }
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'No projectId available' });
 
     if (!projectFromHref(ctx.href)) {
       await s.ensureOnAnyProjectPage(projectId);
-      ctx = await s.readContext();
-      if (!ctx.at) return res.status(401).json({ error: 'No WIZ at after project navigate' });
+      try {
+        ctx = await requireWizContext(s, projectId);
+      } catch (e) {
+        return res.status(e.statusCode || 401).json({ error: e.message });
+      }
     }
 
     const mediaIds = [
@@ -773,10 +814,11 @@ app.post('/generate', requireInternalSecret, async (req, res) => {
       return res.status(e.statusCode || 500).json({ error: e.message });
     }
 
-    let ctx = await s.readContext();
-    if (!ctx.at) {
-      // Last chance recover (ensureAccountUsable already tried once)
-      return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
+    let ctx;
+    try {
+      ctx = await requireWizContext(s, preferredProject);
+    } catch (e) {
+      return res.status(e.statusCode || 401).json({ error: e.message });
     }
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'No projectId available' });
@@ -784,7 +826,11 @@ app.post('/generate', requireInternalSecret, async (req, res) => {
     // Ensure parked on any project page for mint (do not hop sticky A→B)
     if (!projectFromHref(ctx.href)) {
       await s.ensureOnAnyProjectPage(projectId);
-      ctx = await s.readContext();
+      try {
+        ctx = await requireWizContext(s, projectId);
+      } catch (e) {
+        return res.status(e.statusCode || 401).json({ error: e.message });
+      }
     }
 
     const recaptcha = await s.mintRecaptcha('IMAGE_GENERATION');
@@ -949,8 +995,12 @@ app.post('/batch-run', requireInternalSecret, async (req, res) => {
       return res.status(e.statusCode || 500).json({ error: e.message });
     }
 
-    const ctx = await s.readContext();
-    if (!ctx.at) return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
+    let ctx;
+    try {
+      ctx = await requireWizContext(s);
+    } catch (e) {
+      return res.status(e.statusCode || 401).json({ error: e.message });
+    }
     const { cookie } = await s.cookieHeaderFor(ctx.origin);
 
     let tasks = [];
@@ -1046,15 +1096,23 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
       return res.status(e.statusCode || 500).json({ error: e.message });
     }
 
-    let ctx = await s.readContext();
-    if (!ctx.at) return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
+    let ctx;
+    try {
+      ctx = await requireWizContext(s, preferredProject);
+    } catch (e) {
+      return res.status(e.statusCode || 401).json({ error: e.message });
+    }
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'no projectId' });
 
     // reCAPTCHA mint needs any project page — do not hop sticky A→B
     if (!projectFromHref(ctx.href)) {
       await s.ensureOnAnyProjectPage(projectId);
-      ctx = await s.readContext();
+      try {
+        ctx = await requireWizContext(s, projectId);
+      } catch (e) {
+        return res.status(e.statusCode || 401).json({ error: e.message });
+      }
     }
 
     let { cookie } = await s.cookieHeaderFor(ctx.origin);
@@ -1344,16 +1402,23 @@ app.post('/accounts/:id/upload-image', requireInternalSecret, async (req, res) =
       return res.status(e.statusCode || 500).json({ error: e.message });
     }
 
-    let ctx = await s.readContext();
-    if (!ctx.at) return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
+    let ctx;
+    try {
+      ctx = await requireWizContext(s, preferredProject);
+    } catch (e) {
+      return res.status(e.statusCode || 401).json({ error: e.message });
+    }
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'No projectId available' });
 
     // Navigate only if not on any project page (mint); keep sticky projectId in payload
     if (!projectFromHref(ctx.href)) {
       await s.ensureOnAnyProjectPage(projectId);
-      ctx = await s.readContext();
-      if (!ctx.at) return res.status(401).json({ error: 'No WIZ at after project navigate' });
+      try {
+        ctx = await requireWizContext(s, projectId);
+      } catch (e) {
+        return res.status(e.statusCode || 401).json({ error: e.message });
+      }
     }
 
     // Resolve image bytes → base64
@@ -1491,15 +1556,20 @@ app.post('/upsample-video', requireInternalSecret, async (req, res) => {
       return res.status(e.statusCode || 500).json({ error: e.message });
     }
 
-    let ctx = await s.readContext();
+    let ctx;
+    try {
+      ctx = await requireWizContext(s, preferredProject);
+    } catch (e) {
+      return res.status(e.statusCode || 401).json({ error: e.message });
+    }
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'no projectId' });
-    if (!projectFromHref(ctx.href) || !ctx.at) {
+    if (!projectFromHref(ctx.href)) {
       await s.ensureOnAnyProjectPage(projectId);
-      await sleep(400);
-      ctx = await s.readContext();
-      if (!ctx.at) {
-        return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
+      try {
+        ctx = await requireWizContext(s, projectId);
+      } catch (e) {
+        return res.status(e.statusCode || 401).json({ error: e.message });
       }
     }
 
@@ -1608,29 +1678,21 @@ app.post('/video-status', requireInternalSecret, async (req, res) => {
     }
     let ctx;
     try {
-      ctx = await s.readContext();
+      ctx = await requireWizContext(s, preferredProject);
     } catch (navErr) {
-      // Mid-navigation races during Launch/Open — retry once
-      await sleep(800);
-      ctx = await s.readContext();
+      try {
+        await sleep(800);
+        ctx = await requireWizContext(s, preferredProject);
+      } catch (e) {
+        return res.status(e.statusCode || 401).json({
+          error: e.message,
+          retryable: true,
+          status: 'PROCESSING',
+        });
+      }
     }
     const projectId =
       preferredProject || s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
-    // Missing WIZ `at` ≠ logout (cookies can still be valid). Recover, then say so clearly.
-    if (!ctx.at) {
-      if (projectId) {
-        try {
-          await s.ensureOnAnyProjectPage(projectId);
-          await sleep(600);
-          ctx = await s.readContext();
-        } catch (e) {
-          console.warn(`[${accountId}] video-status recover WIZ at:`, e.message);
-        }
-      }
-      if (!ctx.at) {
-        return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
-      }
-    }
     if (!projectId) return res.status(400).json({ error: 'no projectId' });
     const { cookie } = await s.cookieHeaderFor(ctx.origin);
     const hdr = ogiHeaders(ctx, cookie);

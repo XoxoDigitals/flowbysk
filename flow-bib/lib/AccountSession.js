@@ -294,6 +294,9 @@ class AccountSession {
       await this.parkWarmProject().catch((e) =>
         console.warn(`[${this.accountId}] warm park:`, e.message || e)
       );
+      await this.ensureWizAt(this.projectIds[0] || null).catch((e) =>
+        console.warn(`[${this.accountId}] launch WIZ:`, e.message || e)
+      );
       this._startHealthLoop();
       return st;
     } catch (e) {
@@ -536,8 +539,8 @@ class AccountSession {
   }
 
   /**
-   * Block Image / Media / Font through the egress proxy unless an admin viewer
-   * is watching (wsClients). Generation APIs use XHR/Fetch and keep working.
+   * Block Image / Media through the egress proxy in background (no admin viewer).
+   * Fonts stay allowed so Flow shell/WIZ can still load. Manual viewer = allow all.
    */
   async _installMediaBandwidthGuard(opts = {}) {
     if (!this.cdp || this._mediaGuardInstalled) return;
@@ -548,7 +551,6 @@ class AccountSession {
         patterns: [
           { resourceType: 'Image', requestStage: 'Request' },
           { resourceType: 'Media', requestStage: 'Request' },
-          { resourceType: 'Font', requestStage: 'Request' },
         ],
       });
     } catch (e) {
@@ -570,12 +572,14 @@ class AccountSession {
         /* page/cdp may be gone */
       }
     });
-    console.log(`[${this.accountId}] media bandwidth guard ON (images/video blocked until viewer opens)`);
+    console.log(
+      `[${this.accountId}] media bandwidth guard ON (images/video blocked in background; fonts OK)`
+    );
   }
 
   /**
-   * Toggle media loading. When turning ON for a live viewer, soft-reload so
-   * gallery thumbnails can appear; when OFF, new media requests are aborted.
+   * Toggle media loading. Manual viewer → everything on (no forced reload).
+   * Background → block images/video again.
    */
   async setMediaLoadingEnabled(enabled, { reload = false } = {}) {
     const next = !!enabled;
@@ -584,12 +588,20 @@ class AccountSession {
     }
     this.allowMedia = next;
     console.log(
-      `[${this.accountId}] media loading ${next ? 'ENABLED (viewer)' : 'BLOCKED (save proxy)'}`
+      `[${this.accountId}] media loading ${next ? 'ENABLED (manual viewer)' : 'BLOCKED (background)'}`
     );
     if (next && reload && this.page) {
       try {
-        await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
-        // Reload detaches CDP — rebind so stream/proxy keep working (never throw to client)
+        const href = this.page.url() || '';
+        const warm =
+          (href.match(/\/project\/([0-9a-f-]{36})/i) || [])[1] ||
+          this.projectIds[0] ||
+          null;
+        if (warm) {
+          await this.navigate(`https://flow.google.com/project/${warm}`);
+        } else {
+          await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+        }
         try {
           this.cdp = await this.page.target().createCDPSession();
           this._bearerSniffInstalled = false;
@@ -601,10 +613,10 @@ class AccountSession {
           await this.startScreencast();
           this.refreshEgressIp().catch(() => {});
         } catch (e) {
-          console.warn(`[${this.accountId}] rebind after media reload:`, e.message || e);
+          console.warn(`[${this.accountId}] rebind after media enable:`, e.message || e);
         }
       } catch (e) {
-        console.warn(`[${this.accountId}] media reload:`, e.message);
+        console.warn(`[${this.accountId}] media enable nav:`, e.message);
       }
     }
     return { allowMedia: this.allowMedia };
@@ -613,7 +625,11 @@ class AccountSession {
   async onViewerConnected() {
     const n = this.wsClients.size;
     if (n === 1) {
+      // Manual mode: show everything. Soft project nav (not blind reload) + ensure WIZ at.
       await this.setMediaLoadingEnabled(true, { reload: true });
+      await this.ensureWizAt(this.projectIds[0] || null).catch((e) =>
+        console.warn(`[${this.accountId}] viewer WIZ recover:`, e.message || e)
+      );
     }
   }
 
@@ -621,6 +637,62 @@ class AccountSession {
     if (this.wsClients.size === 0) {
       await this.setMediaLoadingEnabled(false);
     }
+  }
+
+  /**
+   * Ensure Flow WIZ `at` (SNlM0e) is present — navigate to a project page if missing.
+   * Used in background gens and manual viewer.
+   */
+  async ensureWizAt(preferredProjectId = null, opts = {}) {
+    if (!this.page) return { ok: false, at: '', reason: 'no page' };
+    const maxAttempts = Math.max(1, opts.attempts || 3);
+    for (let i = 0; i < maxAttempts; i++) {
+      let ctx;
+      try {
+        ctx = await this.readContext();
+      } catch (e) {
+        console.warn(`[${this.accountId}] ensureWizAt read:`, e.message || e);
+        await sleep(500);
+        continue;
+      }
+      if (ctx?.at && String(ctx.at).length > 10) {
+        return { ok: true, at: ctx.at, href: ctx.href };
+      }
+      const warm =
+        String(preferredProjectId || '').trim() ||
+        projectFromHref(ctx?.href || '') ||
+        this.projectIds[0] ||
+        null;
+      console.warn(
+        `[${this.accountId}] WIZ at missing — loading project ${warm ? warm.slice(0, 8) : '?'}… (try ${i + 1}/${maxAttempts})`
+      );
+      try {
+        if (warm) {
+          await this.ensureOnAnyProjectPage(warm);
+        } else {
+          await this.navigate('https://flow.google.com/');
+        }
+        await sleep(900 + i * 400);
+        // Wait briefly for WIZ_global_data to appear
+        for (let w = 0; w < 8; w++) {
+          try {
+            const at = await this.page.evaluate(() => {
+              const g = window.WIZ_global_data || {};
+              return g.SNlM0e || '';
+            });
+            if (at && String(at).length > 10) {
+              return { ok: true, at, href: this.page.url() };
+            }
+          } catch {
+            /* navigating */
+          }
+          await sleep(400);
+        }
+      } catch (e) {
+        console.warn(`[${this.accountId}] ensureWizAt nav:`, e.message || e);
+      }
+    }
+    return { ok: false, at: '', reason: 'WIZ at still missing after project load' };
   }
 
   async _installBearerSniff() {
