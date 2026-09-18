@@ -277,7 +277,7 @@ class AccountSession {
       this.cdp = await this.page.target().createCDPSession();
       this._bearerSniffInstalled = false;
       this._mediaGuardInstalled = false;
-      await this._installMediaBandwidthGuard();
+      this.allowMedia = true; // load Flow fully first — block media only after WIZ is ready
       await this._installBearerSniff();
       await this.page
         .goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 45000 })
@@ -297,6 +297,14 @@ class AccountSession {
       await this.ensureWizAt(this.projectIds[0] || null).catch((e) =>
         console.warn(`[${this.accountId}] launch WIZ:`, e.message || e)
       );
+      // Background only: block images/video after session is healthy (skip if viewer already open)
+      if (this.wsClients.size === 0) {
+        this.allowMedia = false;
+        this._mediaGuardInstalled = false;
+        await this._installMediaBandwidthGuard().catch((e) =>
+          console.warn(`[${this.accountId}] media guard:`, e.message || e)
+        );
+      }
       this._startHealthLoop();
       return st;
     } catch (e) {
@@ -539,13 +547,23 @@ class AccountSession {
   }
 
   /**
-   * Block Image / Media through the egress proxy in background (no admin viewer).
-   * Fonts stay allowed so Flow shell/WIZ can still load. Manual viewer = allow all.
+   * Block Image / Media in background only. Manual viewer: Fetch.disable completely.
    */
   async _installMediaBandwidthGuard(opts = {}) {
-    if (!this.cdp || this._mediaGuardInstalled) return;
+    if (!this.cdp) return;
+    if (opts.keepAllowMedia || this.allowMedia || this.wsClients.size > 0) {
+      try {
+        await this.cdp.send('Fetch.disable');
+      } catch {
+        /* ignore */
+      }
+      this.allowMedia = true;
+      this._mediaGuardInstalled = false;
+      return;
+    }
+    if (this._mediaGuardInstalled) return;
     this._mediaGuardInstalled = true;
-    if (!opts.keepAllowMedia) this.allowMedia = false;
+    this.allowMedia = false;
     try {
       await this.cdp.send('Fetch.enable', {
         patterns: [
@@ -555,12 +573,13 @@ class AccountSession {
       });
     } catch (e) {
       console.warn(`[${this.accountId}] Fetch.enable media guard:`, e.message);
+      this._mediaGuardInstalled = false;
       return;
     }
 
     this.cdp.on('Fetch.requestPaused', async (ev) => {
       try {
-        if (this.allowMedia) {
+        if (this.allowMedia || this.wsClients.size > 0) {
           await this.cdp.send('Fetch.continueRequest', { requestId: ev.requestId });
           return;
         }
@@ -569,73 +588,82 @@ class AccountSession {
           errorReason: 'BlockedByClient',
         });
       } catch {
-        /* page/cdp may be gone */
+        /* ignore */
       }
     });
-    console.log(
-      `[${this.accountId}] media bandwidth guard ON (images/video blocked in background; fonts OK)`
-    );
+    console.log(`[${this.accountId}] media guard ON (background images/video blocked)`);
   }
 
-  /**
-   * Toggle media loading. Manual viewer → everything on (no forced reload).
-   * Background → block images/video again.
-   */
-  async setMediaLoadingEnabled(enabled, { reload = false } = {}) {
-    const next = !!enabled;
-    if (this.allowMedia === next && !(next && reload)) {
-      return { allowMedia: this.allowMedia };
-    }
-    this.allowMedia = next;
-    console.log(
-      `[${this.accountId}] media loading ${next ? 'ENABLED (manual viewer)' : 'BLOCKED (background)'}`
-    );
-    if (next && reload && this.page) {
+  /** Manual mode: Fetch.disable + hard-load Flow project so stream is not blank white. */
+  async enterManualViewerMode() {
+    this.allowMedia = true;
+    console.log(`[${this.accountId}] MANUAL viewer — Fetch.disable + load project`);
+    try {
+      if (this.cdp) await this.cdp.send('Fetch.disable').catch(() => {});
+      this._mediaGuardInstalled = false;
+
+      const warm = this.projectIds[0] || null;
+      const target = warm ? `https://flow.google.com/project/${warm}` : START_URL;
+      await this.navigate(target);
+      await sleep(1500);
+
       try {
-        const href = this.page.url() || '';
-        const warm =
-          (href.match(/\/project\/([0-9a-f-]{36})/i) || [])[1] ||
-          this.projectIds[0] ||
-          null;
-        if (warm) {
-          await this.navigate(`https://flow.google.com/project/${warm}`);
-        } else {
-          await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
-        }
-        try {
-          this.cdp = await this.page.target().createCDPSession();
-          this._bearerSniffInstalled = false;
-          this._mediaGuardInstalled = false;
-          this.screencasting = false;
-          await this._installMediaBandwidthGuard({ keepAllowMedia: true });
-          this.allowMedia = true;
-          await this._installBearerSniff();
-          await this.startScreencast();
-          this.refreshEgressIp().catch(() => {});
-        } catch (e) {
-          console.warn(`[${this.accountId}] rebind after media enable:`, e.message || e);
-        }
+        this.cdp = await this.page.target().createCDPSession();
+        this._bearerSniffInstalled = false;
+        this._mediaGuardInstalled = false;
+        this.screencasting = false;
+        this.allowMedia = true;
+        // Do NOT re-enable Fetch here
+        await this._installBearerSniff();
+        await this.startScreencast();
       } catch (e) {
-        console.warn(`[${this.accountId}] media enable nav:`, e.message);
+        console.warn(`[${this.accountId}] manual CDP rebind:`, e.message || e);
       }
+
+      const wiz = await this.ensureWizAt(warm);
+      console.log(
+        `[${this.accountId}] manual WIZ ${wiz.ok ? 'OK' : 'MISSING'} ${(wiz.href || '').slice(0, 90)}`
+      );
+      this.refreshEgressIp().catch(() => {});
+    } catch (e) {
+      console.warn(`[${this.accountId}] enterManualViewerMode:`, e.message || e);
+    }
+  }
+
+  async leaveManualViewerMode() {
+    this.allowMedia = false;
+    console.log(`[${this.accountId}] BACKGROUND — re-block images/video`);
+    try {
+      this._mediaGuardInstalled = false;
+      if (this.cdp) await this._installMediaBandwidthGuard();
+    } catch (e) {
+      console.warn(`[${this.accountId}] leaveManualViewerMode:`, e.message || e);
+    }
+  }
+
+  async setMediaLoadingEnabled(enabled, { reload = false } = {}) {
+    if (enabled) {
+      if (reload || !this.allowMedia) await this.enterManualViewerMode();
+      else {
+        this.allowMedia = true;
+        if (this.cdp) await this.cdp.send('Fetch.disable').catch(() => {});
+        this._mediaGuardInstalled = false;
+      }
+    } else {
+      await this.leaveManualViewerMode();
     }
     return { allowMedia: this.allowMedia };
   }
 
   async onViewerConnected() {
-    const n = this.wsClients.size;
-    if (n === 1) {
-      // Manual mode: show everything. Soft project nav (not blind reload) + ensure WIZ at.
-      await this.setMediaLoadingEnabled(true, { reload: true });
-      await this.ensureWizAt(this.projectIds[0] || null).catch((e) =>
-        console.warn(`[${this.accountId}] viewer WIZ recover:`, e.message || e)
-      );
+    if (this.wsClients.size === 1) {
+      await this.enterManualViewerMode();
     }
   }
 
   async onViewerDisconnected() {
     if (this.wsClients.size === 0) {
-      await this.setMediaLoadingEnabled(false);
+      await this.leaveManualViewerMode();
     }
   }
 

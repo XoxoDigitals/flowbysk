@@ -513,8 +513,16 @@ app.post('/accounts/:id/navigate', async (req, res) => {
   try {
     const s = pool.get(req.params.id);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    // Manual Open / Open Flow — never leave Fetch blocking on
+    if (s.cdp) await s.cdp.send('Fetch.disable').catch(() => {});
+    s.allowMedia = true;
+    s._mediaGuardInstalled = false;
     const out = await s.navigate(req.body?.url || START_URL);
-    res.json({ success: true, ...out });
+    await sleep(800);
+    await s.ensureWizAt(
+      projectFromHref(req.body?.url || '') || s.projectIds[0] || null
+    ).catch(() => {});
+    res.json({ success: true, ...out, at: !!(await s.readContext().catch(() => ({}))).at });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
