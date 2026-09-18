@@ -5545,8 +5545,9 @@ class FlowService:
     def _download_media_bytes(self, url: str, timeout: float = 120.0) -> bytes:
         """Download Flow CDN / signed media bytes (cookies optional for signed URLs).
 
-        Prefer egress proxy when configured, but if the tunnel is dead (407 / ProxyError),
-        retry direct — signed flow-content.google URLs usually work without a proxy.
+        Always fetch direct — never via egress proxy. Signed flow-content.google URLs
+        work without a proxy; keeping downloads off the tunnel saves bandwidth.
+        Generate/mint still use the account proxy via BiB / API paths.
         """
         if not url or not str(url).startswith(("http://", "https://")):
             raise ValueError(f"Invalid media URL for download: {url!r}")
@@ -5554,46 +5555,11 @@ class FlowService:
         if self.cookies and "google" in url:
             headers["Cookie"] = self.cookies
 
-        try:
-            resp = requests.get(
-                url,
-                headers=headers,
-                timeout=timeout,
-                **apply_proxies_kwargs(url, {}, account_id=self.egress_account_id or None),
-            )
-            resp.raise_for_status()
-        except Exception as first_err:
-            err_text = f"{first_err}"
-            is_proxy = (
-                "ProxyError" in type(first_err).__name__
-                or "ProxyError" in err_text
-                or "407" in err_text
-                or "Tunnel connection failed" in err_text
-                or "Unable to connect to proxy" in err_text
-            )
-            # Also unwrap requests.exceptions.ConnectionError cause chains
-            cause = getattr(first_err, "__cause__", None) or getattr(first_err, "args", [None])[0]
-            if cause is not None:
-                ctext = f"{cause}"
-                if (
-                    "407" in ctext
-                    or "ProxyError" in ctext
-                    or "Tunnel connection failed" in ctext
-                    or "Unable to connect to proxy" in ctext
-                ):
-                    is_proxy = True
-            if not is_proxy:
-                raise
-            logger.warning(
-                "Media download via egress proxy failed (%s); retrying direct (no proxy)",
-                err_text[:180],
-            )
-            # trust_env is a Session attribute, not a get() kwarg
-            session = requests.Session()
-            session.trust_env = False
-            session.proxies = {}
-            resp = session.get(url, headers=headers, timeout=timeout)
-            resp.raise_for_status()
+        session = requests.Session()
+        session.trust_env = False
+        session.proxies = {}
+        resp = session.get(url, headers=headers, timeout=timeout)
+        resp.raise_for_status()
 
         data = resp.content
         if not data:

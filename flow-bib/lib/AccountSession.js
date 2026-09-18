@@ -265,6 +265,9 @@ class AccountSession {
       );
 
       const st = await this.refreshAuthStatus();
+      await this.parkWarmProject().catch((e) =>
+        console.warn(`[${this.accountId}] warm park:`, e.message || e)
+      );
       this._startHealthLoop();
       return st;
     } catch (e) {
@@ -326,6 +329,71 @@ class AccountSession {
     });
   }
 
+  /**
+   * If not already on any Flow project page, navigate to warm home (projectIds[0]
+   * or preferred). Does NOT hop A→B when already on a different project.
+   */
+  async ensureOnAnyProjectPage(preferredProjectId) {
+    if (!this.page) return null;
+    const ctx = await this.readContext();
+    const onProject = projectFromHref(ctx.href);
+    if (onProject) return onProject;
+    const warm =
+      String(preferredProjectId || '').trim() ||
+      this.projectIds[0] ||
+      null;
+    if (!warm) return null;
+    await this.navigate(`https://flow.google.com/project/${warm}`);
+    await sleep(800);
+    return projectFromHref((await this.readContext()).href) || warm;
+  }
+
+  /** Best-effort: leave Chrome parked on projectIds[0] when not on a project. */
+  async parkWarmProject() {
+    return this.ensureOnAnyProjectPage(this.projectIds[0] || null);
+  }
+
+  /**
+   * Light human-like mouse + scroll before reCAPTCHA mint (~1–2.5s).
+   * No navigation — avoids destroying the JS context.
+   */
+  async humanizeBeforeMint() {
+    if (!this.page || this.page.isClosed()) return;
+    try {
+      const viewport = this.page.viewport() || { width: VIEW_W, height: VIEW_H };
+      const w = Math.max(320, viewport.width || VIEW_W);
+      const h = Math.max(240, viewport.height || VIEW_H);
+      let x = w * (0.25 + Math.random() * 0.4);
+      let y = h * (0.3 + Math.random() * 0.35);
+      await this.page.mouse.move(x, y, { steps: 2 + Math.floor(Math.random() * 3) });
+      const moves = 2 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < moves; i++) {
+        x = Math.min(w - 20, Math.max(20, x + (Math.random() * 120 - 60)));
+        y = Math.min(h - 20, Math.max(20, y + (Math.random() * 80 - 40)));
+        await this.page.mouse.move(x, y, { steps: 2 + Math.floor(Math.random() * 4) });
+        await sleep(150 + Math.floor(Math.random() * 250));
+      }
+      const dy = 40 + Math.floor(Math.random() * 140);
+      try {
+        await this.page.mouse.wheel({ deltaY: dy });
+      } catch {
+        await this.page.evaluate((d) => window.scrollBy(0, d), dy);
+      }
+      await sleep(200 + Math.floor(Math.random() * 300));
+      if (Math.random() > 0.4) {
+        const back = -Math.floor(dy * (0.3 + Math.random() * 0.5));
+        try {
+          await this.page.mouse.wheel({ deltaY: back });
+        } catch {
+          await this.page.evaluate((d) => window.scrollBy(0, d), back);
+        }
+        await sleep(120 + Math.floor(Math.random() * 200));
+      }
+    } catch (e) {
+      console.warn(`[${this.accountId}] humanizeBeforeMint:`, e.message || e);
+    }
+  }
+
   async mintRecaptcha(action = 'IMAGE_GENERATION') {
     if (!this.page) throw new Error('Browser not launched');
 
@@ -339,16 +407,8 @@ class AccountSession {
     });
 
     const ensureProjectPage = async () => {
-      const ctx = await this.readContext();
-      let pid = projectFromHref(ctx.href);
-      if (!pid) {
-        pid = this.projectIds[0] || null;
-        if (pid) {
-          await this.navigate(`https://flow.google.com/project/${pid}`);
-          await sleep(1200);
-        }
-      }
-      return pid;
+      // Any project page is enough for grecaptcha; do not hop to a different sticky id.
+      return this.ensureOnAnyProjectPage(this.projectIds[0] || null);
     };
 
     const waitForSettle = async () => {
@@ -377,15 +437,17 @@ class AccountSession {
               { timeout: 10000 }
             );
           } catch {
-            const ctx = await this.readContext();
-            const pid = projectFromHref(ctx.href) || this.projectIds[0];
-            if (pid) {
-              await this.navigate(`https://flow.google.com/project/${pid}`);
-            } else {
+            await ensureProjectPage();
+            const stillMissing = !(await this.readContext()
+              .then((c) => projectFromHref(c.href))
+              .catch(() => null));
+            if (stillMissing) {
               await this.page.reload({ waitUntil: 'domcontentloaded' });
             }
             await sleep(1500);
           }
+
+          await this.humanizeBeforeMint();
 
           const token = await this.page.evaluate(
             async (key, act) => {
@@ -817,8 +879,13 @@ class AccountSession {
     if (!this.page) throw new Error('no page');
 
     const attemptOnce = async () => {
-      const projectId =
+      const warmPid =
         projectFromHref((await this.readContext()).href) || this.projectIds[0] || '';
+      const payloadPid = String(
+        (payload && payload.clientContext && payload.clientContext.projectId) || ''
+      ).trim();
+      // Sticky/target project from payload wins; warm tab project only for parking mint.
+      const projectId = payloadPid || warmPid;
 
       let accessToken = await this.fetchLabsAccessToken({ force: true });
       if (!accessToken) {
@@ -831,13 +898,8 @@ class AccountSession {
         );
       }
 
-      if (projectId && !/flow\.google\.com\/project\//i.test(this.page.url() || '')) {
-        await this.navigate(`https://flow.google.com/project/${projectId}`);
-        await sleep(1000);
-      } else if (!/flow\.google\.com/i.test(this.page.url() || '')) {
-        await this.navigate(projectId ? `https://flow.google.com/project/${projectId}` : START_URL);
-        await sleep(1000);
-      }
+      // Park on any project page for mint — do not hop to sticky target.
+      await this.ensureOnAnyProjectPage(warmPid || projectId || this.projectIds[0]);
 
       const recaptcha = await this.mintRecaptcha(action);
       if (!recaptcha || recaptcha.length < 50) {

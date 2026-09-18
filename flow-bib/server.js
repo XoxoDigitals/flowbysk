@@ -586,9 +586,8 @@ app.post('/create-character', requireInternalSecret, async (req, res) => {
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'No projectId available' });
 
-    if (!projectFromHref(ctx.href) || projectFromHref(ctx.href) !== projectId) {
-      await s.navigate(`https://flow.google.com/project/${projectId}`);
-      await sleep(800);
+    if (!projectFromHref(ctx.href)) {
+      await s.ensureOnAnyProjectPage(projectId);
       ctx = await s.readContext();
       if (!ctx.at) return res.status(401).json({ error: 'No WIZ at after project navigate' });
     }
@@ -782,10 +781,9 @@ app.post('/generate', requireInternalSecret, async (req, res) => {
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'No projectId available' });
 
-    // Ensure parked on a project page for mint
+    // Ensure parked on any project page for mint (do not hop sticky A→B)
     if (!projectFromHref(ctx.href)) {
-      await s.navigate(`https://flow.google.com/project/${projectId}`);
-      await sleep(800);
+      await s.ensureOnAnyProjectPage(projectId);
       ctx = await s.readContext();
     }
 
@@ -1053,10 +1051,9 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'no projectId' });
 
-    // reCAPTCHA mint requires a project page
-    if (!projectFromHref(ctx.href) || projectFromHref(ctx.href) !== projectId) {
-      await s.navigate(`https://flow.google.com/project/${projectId}`);
-      await sleep(800);
+    // reCAPTCHA mint needs any project page — do not hop sticky A→B
+    if (!projectFromHref(ctx.href)) {
+      await s.ensureOnAnyProjectPage(projectId);
       ctx = await s.readContext();
     }
 
@@ -1220,6 +1217,9 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
       });
     }
 
+    // Leave tab on warm project (do not navigate to sticky target)
+    s.parkWarmProject().catch(() => {});
+
     const pollsAllowed = waitForCompletion ? Math.max(maxPolls, 45) : 0;
     let polls = 0;
     for (; polls < pollsAllowed && !videoUrl && mediaId; polls++) {
@@ -1349,10 +1349,9 @@ app.post('/accounts/:id/upload-image', requireInternalSecret, async (req, res) =
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'No projectId available' });
 
-    // Navigate to project page if needed for reCAPTCHA mint
-    if (!projectFromHref(ctx.href) || projectFromHref(ctx.href) !== projectId) {
-      await s.navigate(`https://flow.google.com/project/${projectId}`);
-      await sleep(800);
+    // Navigate only if not on any project page (mint); keep sticky projectId in payload
+    if (!projectFromHref(ctx.href)) {
+      await s.ensureOnAnyProjectPage(projectId);
       ctx = await s.readContext();
       if (!ctx.at) return res.status(401).json({ error: 'No WIZ at after project navigate' });
     }
@@ -1495,9 +1494,9 @@ app.post('/upsample-video', requireInternalSecret, async (req, res) => {
     let ctx = await s.readContext();
     const projectId = s.pickProjectId(preferredProject) || projectFromHref(ctx.href);
     if (!projectId) return res.status(400).json({ error: 'no projectId' });
-    if (!projectFromHref(ctx.href) || projectFromHref(ctx.href) !== projectId || !ctx.at) {
-      await s.navigate(`https://flow.google.com/project/${projectId}`);
-      await sleep(1000);
+    if (!projectFromHref(ctx.href) || !ctx.at) {
+      await s.ensureOnAnyProjectPage(projectId);
+      await sleep(400);
       ctx = await s.readContext();
       if (!ctx.at) {
         return res.status(401).json({ error: 'No WIZ at token — open a Flow project' });
@@ -1605,8 +1604,8 @@ app.post('/video-status', requireInternalSecret, async (req, res) => {
     if (!ctx.at) {
       if (projectId) {
         try {
-          await s.navigate(`https://flow.google.com/project/${projectId}`);
-          await sleep(1000);
+          await s.ensureOnAnyProjectPage(projectId);
+          await sleep(600);
           ctx = await s.readContext();
         } catch (e) {
           console.warn(`[${accountId}] video-status recover WIZ at:`, e.message);
