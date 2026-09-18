@@ -1786,6 +1786,9 @@ server.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => {
     const s = pool.get(accountId) || getOrCreate(accountId);
     s.wsClients.add(ws);
+    s.onViewerConnected().catch((e) =>
+      console.warn(`[${accountId}] viewer connect media:`, e.message || e)
+    );
     if (s.latestFrame) {
       try {
         ws.send(JSON.stringify({ type: 'frame', data: s.latestFrame }));
@@ -1794,7 +1797,12 @@ server.on('upgrade', (req, socket, head) => {
       }
     }
     ws.on('message', (raw) => s.handleWsMessage(raw, ws));
-    ws.on('close', () => s.wsClients.delete(ws));
+    ws.on('close', () => {
+      s.wsClients.delete(ws);
+      s.onViewerDisconnected().catch((e) =>
+        console.warn(`[${accountId}] viewer disconnect media:`, e.message || e)
+      );
+    });
   });
 });
 

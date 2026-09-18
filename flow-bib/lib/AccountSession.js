@@ -117,6 +117,9 @@ class AccountSession {
     this._proxyFailStreak = 0;
     this._proxyCheckTick = 0;
     this._proxyRecovering = false;
+    /** When false (default), Chrome aborts Image/Media/Font — saves residential proxy GB. */
+    this.allowMedia = false;
+    this._mediaGuardInstalled = false;
   }
 
   /** Safely update profileDir post-construction (e.g. re-launch with a new opts.profileDir). */
@@ -254,6 +257,9 @@ class AccountSession {
       }
       await this.page.setUserAgent(UA);
       this.cdp = await this.page.target().createCDPSession();
+      this._bearerSniffInstalled = false;
+      this._mediaGuardInstalled = false;
+      await this._installMediaBandwidthGuard();
       await this._installBearerSniff();
       await this.page
         .goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 45000 })
@@ -295,6 +301,9 @@ class AccountSession {
     this.cdp = null;
     this.latestFrame = null;
     this.status = 'STOPPED';
+    this.allowMedia = false;
+    this._mediaGuardInstalled = false;
+    this._bearerSniffInstalled = false;
     // Always clear orphan locks so the next launch reuses the same profile (stay logged in).
     await killOrphanChromeForProfile(this.profileDir);
     if (clearProfile) {
@@ -507,9 +516,77 @@ class AccountSession {
   }
 
   /**
-   * Sniff Authorization Bearer + full aisandbox request/response bodies from Flow traffic.
-   * Captures UpsampleVideo / video generate payloads so we can match Studio to real UI.
+   * Block Image / Media / Font through the egress proxy unless an admin viewer
+   * is watching (wsClients). Generation APIs use XHR/Fetch and keep working.
    */
+  async _installMediaBandwidthGuard() {
+    if (!this.cdp || this._mediaGuardInstalled) return;
+    this._mediaGuardInstalled = true;
+    this.allowMedia = false;
+    try {
+      await this.cdp.send('Fetch.enable', {
+        patterns: [
+          { resourceType: 'Image', requestStage: 'Request' },
+          { resourceType: 'Media', requestStage: 'Request' },
+          { resourceType: 'Font', requestStage: 'Request' },
+        ],
+      });
+    } catch (e) {
+      console.warn(`[${this.accountId}] Fetch.enable media guard:`, e.message);
+      return;
+    }
+
+    this.cdp.on('Fetch.requestPaused', async (ev) => {
+      try {
+        if (this.allowMedia) {
+          await this.cdp.send('Fetch.continueRequest', { requestId: ev.requestId });
+          return;
+        }
+        await this.cdp.send('Fetch.failRequest', {
+          requestId: ev.requestId,
+          errorReason: 'BlockedByClient',
+        });
+      } catch {
+        /* page/cdp may be gone */
+      }
+    });
+    console.log(`[${this.accountId}] media bandwidth guard ON (images/video blocked until viewer opens)`);
+  }
+
+  /**
+   * Toggle media loading. When turning ON for a live viewer, soft-reload so
+   * gallery thumbnails can appear; when OFF, new media requests are aborted.
+   */
+  async setMediaLoadingEnabled(enabled, { reload = false } = {}) {
+    const next = !!enabled;
+    if (this.allowMedia === next) return { allowMedia: this.allowMedia };
+    this.allowMedia = next;
+    console.log(
+      `[${this.accountId}] media loading ${next ? 'ENABLED (viewer)' : 'BLOCKED (save proxy)'}`
+    );
+    if (next && reload && this.page) {
+      try {
+        await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+      } catch (e) {
+        console.warn(`[${this.accountId}] media reload:`, e.message);
+      }
+    }
+    return { allowMedia: this.allowMedia };
+  }
+
+  async onViewerConnected() {
+    const n = this.wsClients.size;
+    if (n === 1) {
+      await this.setMediaLoadingEnabled(true, { reload: true });
+    }
+  }
+
+  async onViewerDisconnected() {
+    if (this.wsClients.size === 0) {
+      await this.setMediaLoadingEnabled(false);
+    }
+  }
+
   async _installBearerSniff() {
     if (!this.cdp || this._bearerSniffInstalled) return;
     this._bearerSniffInstalled = true;
@@ -1267,6 +1344,8 @@ class AccountSession {
       email: this.email,
       lastError: this.lastError,
       running: !!this.browser,
+      allowMedia: !!this.allowMedia,
+      viewers: this.wsClients.size,
       egress: {
         proxy: this.egressProxyUrl || null,
         ip: this.egressIp || null,
