@@ -193,8 +193,15 @@ async function ensureAccountUsable(s, preferredProject) {
   throw err;
 }
 
-/** Load project page until WIZ `at` exists; throw 401 only after retries. */
+/** Load project page until WIZ `at` exists; throw 401 only after retries.
+ *  If user is mid-login, return a clear retryable error — do not navigate away. */
 async function requireWizContext(s, preferredProject) {
+  if (await s.isOnLoginFlow()) {
+    const err = new Error('Waiting for Google login — finish sign-in in BiB viewer');
+    err.statusCode = 401;
+    err.retryable = true;
+    throw err;
+  }
   let ctx = await s.readContext();
   if (ctx?.at) return ctx;
   const pid =
@@ -202,7 +209,13 @@ async function requireWizContext(s, preferredProject) {
     projectFromHref(ctx?.href || '') ||
     (Array.isArray(s.projectIds) && s.projectIds[0]) ||
     null;
-  await s.ensureWizAt(pid);
+  const wiz = await s.ensureWizAt(pid);
+  if (wiz?.paused) {
+    const err = new Error('Waiting for Google login — finish sign-in in BiB viewer');
+    err.statusCode = 401;
+    err.retryable = true;
+    throw err;
+  }
   ctx = await s.readContext();
   if (!ctx?.at) {
     const err = new Error('No WIZ at token — open a Flow project');
@@ -513,16 +526,24 @@ app.post('/accounts/:id/navigate', async (req, res) => {
   try {
     const s = pool.get(req.params.id);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
-    // Manual Open / Open Flow — never leave Fetch blocking on
     if (s.cdp) await s.cdp.send('Fetch.disable').catch(() => {});
     s.allowMedia = true;
     s._mediaGuardInstalled = false;
-    const out = await s.navigate(req.body?.url || START_URL);
+    const targetUrl = req.body?.url || START_URL;
+    const out = await s.navigate(targetUrl);
     await sleep(800);
-    await s.ensureWizAt(
-      projectFromHref(req.body?.url || '') || s.projectIds[0] || null
-    ).catch(() => {});
-    res.json({ success: true, ...out, at: !!(await s.readContext().catch(() => ({}))).at });
+    // Only auto-WIZ when admin opened a Flow project (never after login/accounts URLs)
+    const openedLogin =
+      /accounts\.google\.com|\/signin|oauth|ServiceLogin/i.test(String(targetUrl)) ||
+      (await s.isOnLoginFlow());
+    let at = false;
+    if (!openedLogin) {
+      await s
+        .ensureWizAt(projectFromHref(targetUrl) || s.projectIds[0] || null)
+        .catch(() => {});
+      at = !!(await s.readContext().catch(() => ({}))).at;
+    }
+    res.json({ success: true, ...out, at, loginInProgress: openedLogin });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

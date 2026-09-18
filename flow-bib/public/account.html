@@ -70,8 +70,21 @@ async function pollStatus() {
   if (!accountId) return;
   try {
     const s = await (await fetch(`${BASE}/accounts/${encodeURIComponent(accountId)}/status`)).json();
-    const signedIn = !!(s.at && (s.authenticated || s.hasWebSession)) || !!(s.at && s.status === 'READY');
-    setPill('authPill', 'auth: ' + (signedIn ? 'signed in' : (s.hasWebSession || s.authenticated || s.status === 'READY' ? 'session (loading WIZ…)' : 'signed out')), signedIn);
+    const signedIn = !!(s.at && (s.authenticated || s.hasWebSession));
+    const needsLogin = s.status === 'NEEDS_LOGIN' || (!s.at && !s.hasWebSession);
+    const loadingWiz = !s.at && !!(s.hasWebSession || s.authenticated || s.status === 'READY');
+    setPill(
+      'authPill',
+      'auth: ' +
+        (signedIn
+          ? 'signed in'
+          : needsLogin
+            ? 'needs login'
+            : loadingWiz
+              ? 'session (open a project)'
+              : 'signed out'),
+      signedIn ? true : needsLogin ? false : null
+    );
     const n = Array.isArray(s.projectIds) ? s.projectIds.length : (s.projectCount || 0);
     setPill('projPill', 'projects: ' + (n || '—'), n > 0 ? true : null);
     if (s.hasAccessToken || s.labsOk) {

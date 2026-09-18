@@ -291,14 +291,18 @@ class AccountSession {
       );
 
       const st = await this.refreshAuthStatus();
-      await this.parkWarmProject().catch((e) =>
-        console.warn(`[${this.accountId}] warm park:`, e.message || e)
-      );
-      await this.ensureWizAt(this.projectIds[0] || null).catch((e) =>
-        console.warn(`[${this.accountId}] launch WIZ:`, e.message || e)
-      );
-      // Background only: block images/video after session is healthy (skip if viewer already open)
-      if (this.wsClients.size === 0) {
+      // Only park + WIZ when already signed in — never yank a NEEDS_LOGIN session to marketing
+      if (st.status !== 'NEEDS_LOGIN' && !(await this.isOnLoginFlow())) {
+        await this.parkWarmProject().catch((e) =>
+          console.warn(`[${this.accountId}] warm park:`, e.message || e)
+        );
+        await this.ensureWizAt(this.projectIds[0] || null).catch((e) =>
+          console.warn(`[${this.accountId}] launch WIZ:`, e.message || e)
+        );
+      } else {
+        console.warn(`[${this.accountId}] launch: NEEDS_LOGIN — skip auto project/WIZ nav`);
+      }
+      if (this.wsClients.size === 0 && st.status !== 'NEEDS_LOGIN') {
         this.allowMedia = false;
         this._mediaGuardInstalled = false;
         await this._installMediaBandwidthGuard().catch((e) =>
@@ -369,13 +373,47 @@ class AccountSession {
     });
   }
 
+  /** True when admin is mid Google login / OAuth — never auto-navigate away. */
+  isLoginOrAuthUrl(href) {
+    const u = String(href || '');
+    return /accounts\.google\.com|\/signin|oauth|ServiceLogin|Identifier|challenge|\/about\b|flow\.google\.com\/?\s*$/i.test(
+      u
+    ) && !/\/project\/[0-9a-f-]{36}/i.test(u);
+  }
+
+  async isOnLoginFlow() {
+    if (!this.page) return false;
+    try {
+      const href = this.page.url() || '';
+      if (/accounts\.google\.com|\/signin|oauth|ServiceLogin|Identifier|challenge/i.test(href)) {
+        return true;
+      }
+      // Marketing landing without project = treat as login-needed; don't hijack
+      if (/flow\.google\.com\/?(?:about)?\/?$/i.test(href) || /\/about\b/i.test(href)) {
+        if (this.status === 'NEEDS_LOGIN') return true;
+      }
+      return this.status === 'NEEDS_LOGIN';
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * If not already on any Flow project page, navigate to warm home (projectIds[0]
    * or preferred). Does NOT hop A→B when already on a different project.
+   * Never interrupts Google login / OAuth.
    */
   async ensureOnAnyProjectPage(preferredProjectId) {
     if (!this.page) return null;
+    if (await this.isOnLoginFlow()) {
+      console.warn(`[${this.accountId}] skip project nav — login/OAuth in progress`);
+      return null;
+    }
     const ctx = await this.readContext();
+    if (this.isLoginOrAuthUrl(ctx.href) && !projectFromHref(ctx.href)) {
+      console.warn(`[${this.accountId}] skip project nav — on auth/landing: ${String(ctx.href).slice(0, 80)}`);
+      return null;
+    }
     const onProject = projectFromHref(ctx.href);
     if (onProject) return onProject;
     const warm =
@@ -594,18 +632,13 @@ class AccountSession {
     console.log(`[${this.accountId}] media guard ON (background images/video blocked)`);
   }
 
-  /** Manual mode: Fetch.disable + hard-load Flow project so stream is not blank white. */
+  /** Manual mode: Fetch.disable; only auto-load project when already signed in (not mid-login). */
   async enterManualViewerMode() {
     this.allowMedia = true;
-    console.log(`[${this.accountId}] MANUAL viewer — Fetch.disable + load project`);
+    console.log(`[${this.accountId}] MANUAL viewer — Fetch.disable`);
     try {
       if (this.cdp) await this.cdp.send('Fetch.disable').catch(() => {});
       this._mediaGuardInstalled = false;
-
-      const warm = this.projectIds[0] || null;
-      const target = warm ? `https://flow.google.com/project/${warm}` : START_URL;
-      await this.navigate(target);
-      await sleep(1500);
 
       try {
         this.cdp = await this.page.target().createCDPSession();
@@ -613,17 +646,40 @@ class AccountSession {
         this._mediaGuardInstalled = false;
         this.screencasting = false;
         this.allowMedia = true;
-        // Do NOT re-enable Fetch here
         await this._installBearerSniff();
         await this.startScreencast();
       } catch (e) {
         console.warn(`[${this.accountId}] manual CDP rebind:`, e.message || e);
       }
 
-      const wiz = await this.ensureWizAt(warm);
-      console.log(
-        `[${this.accountId}] manual WIZ ${wiz.ok ? 'OK' : 'MISSING'} ${(wiz.href || '').slice(0, 90)}`
-      );
+      // Do NOT yank user off Google login / OAuth / landing when NEEDS_LOGIN
+      if (await this.isOnLoginFlow()) {
+        console.warn(
+          `[${this.accountId}] manual viewer: login in progress — leave page alone (no WIZ auto-nav)`
+        );
+        this.refreshEgressIp().catch(() => {});
+        return;
+      }
+
+      const href = this.page?.url() || '';
+      const onProject = projectFromHref(href);
+      const warm = this.projectIds[0] || null;
+
+      // Already on a project with WIZ — done
+      try {
+        const ctx = await this.readContext();
+        if (ctx?.at && onProject) {
+          this.refreshEgressIp().catch(() => {});
+          return;
+        }
+      } catch {
+        /* continue */
+      }
+
+      // Signed-in session but missing WIZ: gentle project ensure (not if on accounts.google)
+      if (warm && !/accounts\.google\.com|\/signin/i.test(href)) {
+        await this.ensureWizAt(warm, { attempts: 2 });
+      }
       this.refreshEgressIp().catch(() => {});
     } catch (e) {
       console.warn(`[${this.accountId}] enterManualViewerMode:`, e.message || e);
@@ -669,12 +725,23 @@ class AccountSession {
 
   /**
    * Ensure Flow WIZ `at` (SNlM0e) is present — navigate to a project page if missing.
-   * Used in background gens and manual viewer.
+   * Never interrupts Google login / OAuth. Used in background gens and after sign-in.
    */
   async ensureWizAt(preferredProjectId = null, opts = {}) {
     if (!this.page) return { ok: false, at: '', reason: 'no page' };
+
+    if (await this.isOnLoginFlow()) {
+      console.warn(`[${this.accountId}] ensureWizAt paused — login/OAuth in progress`);
+      return { ok: false, at: '', reason: 'login_in_progress', paused: true };
+    }
+
     const maxAttempts = Math.max(1, opts.attempts || 3);
     for (let i = 0; i < maxAttempts; i++) {
+      // Re-check each attempt — user may open login mid-loop
+      if (await this.isOnLoginFlow()) {
+        return { ok: false, at: '', reason: 'login_in_progress', paused: true };
+      }
+
       let ctx;
       try {
         ctx = await this.readContext();
@@ -686,6 +753,15 @@ class AccountSession {
       if (ctx?.at && String(ctx.at).length > 10) {
         return { ok: true, at: ctx.at, href: ctx.href };
       }
+
+      // On accounts.google / signin — never navigate away
+      if (this.isLoginOrAuthUrl(ctx?.href) && !projectFromHref(ctx?.href || '')) {
+        console.warn(
+          `[${this.accountId}] ensureWizAt paused — auth page ${String(ctx.href).slice(0, 80)}`
+        );
+        return { ok: false, at: '', reason: 'login_in_progress', paused: true, href: ctx.href };
+      }
+
       const warm =
         String(preferredProjectId || '').trim() ||
         projectFromHref(ctx?.href || '') ||
@@ -696,13 +772,20 @@ class AccountSession {
       );
       try {
         if (warm) {
-          await this.ensureOnAnyProjectPage(warm);
+          const landed = await this.ensureOnAnyProjectPage(warm);
+          if (!landed && (await this.isOnLoginFlow())) {
+            return { ok: false, at: '', reason: 'login_in_progress', paused: true };
+          }
         } else {
-          await this.navigate('https://flow.google.com/');
+          // No project id — don't bounce to bare flow.google.com (marketing dump)
+          console.warn(`[${this.accountId}] ensureWizAt: no projectId to open`);
+          return { ok: false, at: '', reason: 'no_project_id' };
         }
         await sleep(900 + i * 400);
-        // Wait briefly for WIZ_global_data to appear
         for (let w = 0; w < 8; w++) {
+          if (await this.isOnLoginFlow()) {
+            return { ok: false, at: '', reason: 'login_in_progress', paused: true };
+          }
           try {
             const at = await this.page.evaluate(() => {
               const g = window.WIZ_global_data || {};
