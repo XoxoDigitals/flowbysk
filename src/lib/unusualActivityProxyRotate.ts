@@ -166,6 +166,18 @@ export async function rotateProxyAndRelaunchForAccount(
         };
       }
       toUrl = di.url;
+      try {
+        const { recordProxyOutcome } = await import('./dataimpulse');
+        recordProxyOutcome({
+          event: 'rotate',
+          accountId,
+          country: di.country,
+          sessId: di.sessId,
+          port: di.port,
+        });
+      } catch {
+        /* ignore */
+      }
       console.warn(
         `[proxy-rotate] DataImpulse account ${accountId.slice(0, 8)} ${opts?.reason || 'manual'} cr.${di.country} → ${maskProxyUrl(di.url)}`
       );

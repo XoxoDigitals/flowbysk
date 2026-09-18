@@ -23,7 +23,7 @@ import {
 } from '@/lib/customDeals';
 import { toUserFacingQueueMessage, toUserFacingError } from '@/lib/userMessages';
 import { resetUnusualActivityStreak, isUnusualActivityError } from '@/lib/unusualActivityProxyRotate';
-import { recordProxyOutcome } from '@/lib/dataimpulse';
+import { recordProxyOutcome, jobKindFromModelKey } from '@/lib/dataimpulse';
 import { isThrottleGenerationError } from '@/lib/systemErrorRetry';
 
 const PYTHON_WORKER_URL = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
@@ -553,6 +553,7 @@ export async function handleJobSuccess(jobId: string, outputUrl: string, metadat
       event: 'job_ok',
       accountId: job.providerAccountId || undefined,
       jobId: job.id,
+      kind: jobKindFromModelKey(job.modelKey),
     });
   } catch {
     /* ignore */
@@ -682,6 +683,7 @@ export async function handleJobFailure(jobId: string, errorMessage: string) {
       event: unusual ? 'unusual' : throttle ? 'throttle' : 'job_fail',
       accountId: job.providerAccountId || undefined,
       jobId: job.id,
+      kind: jobKindFromModelKey(job.modelKey),
     });
   } catch {
     /* ignore */

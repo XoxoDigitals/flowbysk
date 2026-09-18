@@ -50,10 +50,27 @@ type LeaderRow = {
   unusual: number;
   throttle: number;
   tunnel: number;
+  rotates: number;
+  imageOk: number;
+  imageFail: number;
+  videoOk: number;
+  videoFail: number;
+  uniqueProxies: number;
+  avgSuccessPerProxy: number;
   total: number;
   successRate: number;
   unusualRate: number;
   score: number;
+};
+
+type StatsTotals = {
+  rotates: number;
+  imageOk: number;
+  imageFail: number;
+  videoOk: number;
+  videoFail: number;
+  ok: number;
+  fail: number;
 };
 
 type Assignment = {
@@ -70,6 +87,7 @@ export default function AdminProxyStatsPage() {
   const [settings, setSettings] = useState<DiSettings | null>(null);
   const [usage, setUsage] = useState<Usage | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderRow[]>([]);
+  const [statsTotals, setStatsTotals] = useState<StatsTotals | null>(null);
   const [recent, setRecent] = useState<any[]>([]);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [days, setDays] = useState(7);
@@ -121,6 +139,7 @@ export default function AdminProxyStatsPage() {
       setAutoAssign(s.autoAssignOnLaunch !== false);
       setUsage(data.usage || null);
       setLeaderboard(data.stats?.leaderboard || []);
+      setStatsTotals(data.stats?.totals || null);
       setRecent(data.stats?.recent || []);
       setAssignments(data.assignments || []);
     } catch (e: any) {
@@ -454,32 +473,57 @@ export default function AdminProxyStatsPage() {
 
       {/* Country leaderboard */}
       <section className="rounded-[14px] border border-[var(--line)] bg-[var(--bg2)] p-4">
-        <div className="mb-3 text-sm font-medium text-[var(--ink)]">Country quality</div>
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+          <div className="text-sm font-medium text-[var(--ink)]">Country quality</div>
+          {statsTotals && (
+            <div className="flex flex-wrap gap-3 text-[11px] text-[var(--ink3)]">
+              <span>
+                Rotates <span className="text-[var(--ink)]">{statsTotals.rotates}</span>
+              </span>
+              <span>
+                Img {statsTotals.imageOk}/{statsTotals.imageFail} ok/fail
+              </span>
+              <span>
+                Vid {statsTotals.videoOk}/{statsTotals.videoFail} ok/fail
+              </span>
+            </div>
+          )}
+        </div>
         {leaderboard.length === 0 ? (
           <p className="text-xs text-[var(--ink3)]">No outcome events yet.</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
+            <table className="w-full min-w-[920px] text-left text-xs">
               <thead>
                 <tr className="border-b border-[var(--line)] text-[var(--ink3)]">
-                  <th className="py-2 pr-3 font-medium">Country</th>
-                  <th className="py-2 pr-3 font-medium">OK</th>
-                  <th className="py-2 pr-3 font-medium">Fail</th>
-                  <th className="py-2 pr-3 font-medium">Unusual</th>
-                  <th className="py-2 pr-3 font-medium">Success %</th>
-                  <th className="py-2 pr-3 font-medium">Unusual %</th>
+                  <th className="py-2 pr-2 font-medium">Country</th>
+                  <th className="py-2 pr-2 font-medium">Rotates</th>
+                  <th className="py-2 pr-2 font-medium">Img OK</th>
+                  <th className="py-2 pr-2 font-medium">Img Fail</th>
+                  <th className="py-2 pr-2 font-medium">Vid OK</th>
+                  <th className="py-2 pr-2 font-medium">Vid Fail</th>
+                  <th className="py-2 pr-2 font-medium">Avg/proxy</th>
+                  <th className="py-2 pr-2 font-medium">Proxies</th>
+                  <th className="py-2 pr-2 font-medium">Unusual</th>
+                  <th className="py-2 pr-2 font-medium">Success %</th>
                   <th className="py-2 font-medium">Score</th>
                 </tr>
               </thead>
               <tbody>
                 {leaderboard.map((row) => (
                   <tr key={row.country} className="border-b border-[var(--line)]/60 text-[var(--ink)]">
-                    <td className="py-2 pr-3 font-mono uppercase">{row.country}</td>
-                    <td className="py-2 pr-3">{row.ok}</td>
-                    <td className="py-2 pr-3">{row.fail + row.tunnel}</td>
-                    <td className="py-2 pr-3">{row.unusual + row.throttle}</td>
-                    <td className="py-2 pr-3">{(row.successRate * 100).toFixed(0)}%</td>
-                    <td className="py-2 pr-3">{(row.unusualRate * 100).toFixed(0)}%</td>
+                    <td className="py-2 pr-2 font-mono uppercase">{row.country}</td>
+                    <td className="py-2 pr-2">{row.rotates ?? 0}</td>
+                    <td className="py-2 pr-2">{row.imageOk ?? 0}</td>
+                    <td className="py-2 pr-2">{row.imageFail ?? 0}</td>
+                    <td className="py-2 pr-2">{row.videoOk ?? 0}</td>
+                    <td className="py-2 pr-2">{row.videoFail ?? 0}</td>
+                    <td className="py-2 pr-2">
+                      {((row.avgSuccessPerProxy ?? 0) * 100).toFixed(0)}%
+                    </td>
+                    <td className="py-2 pr-2">{row.uniqueProxies ?? 0}</td>
+                    <td className="py-2 pr-2">{(row.unusual || 0) + (row.throttle || 0)}</td>
+                    <td className="py-2 pr-2">{(row.successRate * 100).toFixed(0)}%</td>
                     <td className="py-2">{row.score.toFixed(1)}</td>
                   </tr>
                 ))}
@@ -487,6 +531,10 @@ export default function AdminProxyStatsPage() {
             </table>
           </div>
         )}
+        <p className="mt-2 text-[10px] text-[var(--ink3)]">
+          Avg/proxy = mean success rate across unique sticky sessids in that country. Image/video
+          counts fill in as new jobs complete after this update.
+        </p>
       </section>
 
       {/* Assignments + recent */}

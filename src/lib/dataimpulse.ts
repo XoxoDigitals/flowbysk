@@ -37,15 +37,21 @@ export type ProxyOutcomeEventType =
   | 'job_fail'
   | 'unusual'
   | 'throttle'
-  | 'tunnel_fail';
+  | 'tunnel_fail'
+  | 'rotate';
+
+export type ProxyOutcomeKind = 'image' | 'video';
 
 export type ProxyOutcomeEvent = {
   at: string;
   accountId?: string;
   country?: string;
   sessId?: string;
+  port?: number;
   event: ProxyOutcomeEventType;
   jobId?: string;
+  /** image vs video generation (for job_ok / job_fail) */
+  kind?: ProxyOutcomeKind;
 };
 
 const DEFAULTS: DataImpulseConfig = {
@@ -339,7 +345,16 @@ export function reassignAllDataImpulse(accountIds: string[]) {
   const out: Record<string, string> = {};
   for (const id of accountIds) {
     const r = allocateDataImpulseForAccount(id, { forceNew: true });
-    if (r) out[id] = r.url;
+    if (r) {
+      out[id] = r.url;
+      recordProxyOutcome({
+        event: 'rotate',
+        accountId: id,
+        country: r.country,
+        sessId: r.sessId,
+        port: r.port,
+      });
+    }
   }
   return out;
 }
@@ -359,14 +374,22 @@ export function recordProxyOutcome(ev: Omit<ProxyOutcomeEvent, 'at'> & { at?: st
       accountId: ev.accountId,
       country: ev.country || meta?.country,
       sessId: ev.sessId || meta?.sessId,
+      port: ev.port ?? meta?.port,
       event: ev.event,
       jobId: ev.jobId,
+      kind: ev.kind,
     };
     fs.mkdirSync(path.dirname(PROXY_METRICS_PATH), { recursive: true });
     fs.appendFileSync(PROXY_METRICS_PATH, JSON.stringify(row) + '\n', 'utf8');
   } catch {
     /* ignore */
   }
+}
+
+export function jobKindFromModelKey(modelKey?: string | null): ProxyOutcomeKind {
+  const k = String(modelKey || '').toLowerCase();
+  if (/veo|omni|video|i2v|t2v|r2v/.test(k)) return 'video';
+  return 'image';
 }
 
 export function readProxyMetrics(limit = 5000): ProxyOutcomeEvent[] {
@@ -393,30 +416,88 @@ export function readProxyMetrics(limit = 5000): ProxyOutcomeEvent[] {
 export function aggregateProxyStats(days = 7) {
   const since = Date.now() - days * 86400000;
   const events = readProxyMetrics(20000).filter((e) => Date.parse(e.at) >= since);
-  const byCountry: Record<
-    string,
-    { ok: number; fail: number; unusual: number; throttle: number; tunnel: number; total: number }
-  > = {};
+
+  type CountryAgg = {
+    ok: number;
+    fail: number;
+    unusual: number;
+    throttle: number;
+    tunnel: number;
+    rotates: number;
+    imageOk: number;
+    imageFail: number;
+    videoOk: number;
+    videoFail: number;
+    total: number;
+    /** sessId|port → job outcomes for avg success per proxy */
+    proxyJobs: Record<string, { ok: number; fail: number }>;
+  };
+
+  const byCountry: Record<string, CountryAgg> = {};
+  const ensure = (c: string): CountryAgg => {
+    if (!byCountry[c]) {
+      byCountry[c] = {
+        ok: 0,
+        fail: 0,
+        unusual: 0,
+        throttle: 0,
+        tunnel: 0,
+        rotates: 0,
+        imageOk: 0,
+        imageFail: 0,
+        videoOk: 0,
+        videoFail: 0,
+        total: 0,
+        proxyJobs: {},
+      };
+    }
+    return byCountry[c];
+  };
+
   for (const e of events) {
     const c = normalizeCountryCode(e.country || '') || 'unknown';
-    if (!byCountry[c]) {
-      byCountry[c] = { ok: 0, fail: 0, unusual: 0, throttle: 0, tunnel: 0, total: 0 };
-    }
-    const row = byCountry[c];
+    const row = ensure(c);
     row.total += 1;
-    if (e.event === 'job_ok') row.ok += 1;
-    else if (e.event === 'job_fail') row.fail += 1;
-    else if (e.event === 'unusual') row.unusual += 1;
+    const proxyKey = e.sessId || (e.port != null ? `p${e.port}` : e.accountId || 'unknown');
+
+    if (e.event === 'job_ok') {
+      row.ok += 1;
+      if (e.kind === 'video') row.videoOk += 1;
+      else row.imageOk += 1;
+      if (!row.proxyJobs[proxyKey]) row.proxyJobs[proxyKey] = { ok: 0, fail: 0 };
+      row.proxyJobs[proxyKey].ok += 1;
+    } else if (e.event === 'job_fail') {
+      row.fail += 1;
+      if (e.kind === 'video') row.videoFail += 1;
+      else row.imageFail += 1;
+      if (!row.proxyJobs[proxyKey]) row.proxyJobs[proxyKey] = { ok: 0, fail: 0 };
+      row.proxyJobs[proxyKey].fail += 1;
+    } else if (e.event === 'unusual') row.unusual += 1;
     else if (e.event === 'throttle') row.throttle += 1;
     else if (e.event === 'tunnel_fail') row.tunnel += 1;
+    else if (e.event === 'rotate') row.rotates += 1;
   }
+
   const leaderboard = Object.entries(byCountry)
     .map(([country, r]) => {
-      const successRate = r.total ? r.ok / r.total : 0;
-      const unusualRate = r.total ? (r.unusual + r.throttle) / r.total : 0;
+      const jobTotal = r.ok + r.fail || 0;
+      const successRate = jobTotal ? r.ok / jobTotal : 0;
+      const unusualDenom = r.ok + r.fail + r.unusual + r.throttle || 1;
+      const unusualRate = (r.unusual + r.throttle) / unusualDenom;
+      const proxyEntries = Object.values(r.proxyJobs);
+      const avgSuccessPerProxy =
+        proxyEntries.length === 0
+          ? 0
+          : proxyEntries.reduce((sum, p) => {
+              const t = p.ok + p.fail;
+              return sum + (t ? p.ok / t : 0);
+            }, 0) / proxyEntries.length;
+      const { proxyJobs: _pj, ...rest } = r;
       return {
         country,
-        ...r,
+        ...rest,
+        uniqueProxies: proxyEntries.length,
+        avgSuccessPerProxy,
         successRate,
         unusualRate,
         score: successRate * 100 - unusualRate * 80 + Math.min(20, r.ok),
@@ -425,7 +506,16 @@ export function aggregateProxyStats(days = 7) {
     .sort((a, b) => b.score - a.score);
 
   const recent = events.slice(-40).reverse();
-  return { days, leaderboard, recent, totalEvents: events.length };
+  const totals = {
+    rotates: leaderboard.reduce((s, r) => s + r.rotates, 0),
+    imageOk: leaderboard.reduce((s, r) => s + r.imageOk, 0),
+    imageFail: leaderboard.reduce((s, r) => s + r.imageFail, 0),
+    videoOk: leaderboard.reduce((s, r) => s + r.videoOk, 0),
+    videoFail: leaderboard.reduce((s, r) => s + r.videoFail, 0),
+    ok: leaderboard.reduce((s, r) => s + r.ok, 0),
+    fail: leaderboard.reduce((s, r) => s + r.fail, 0),
+  };
+  return { days, leaderboard, recent, totalEvents: events.length, totals };
 }
 
 /* ---------- Gateway API (plan usage) — Basic Auth = proxy login/password ---------- */
