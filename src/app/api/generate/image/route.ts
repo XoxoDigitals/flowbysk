@@ -325,6 +325,12 @@ export async function POST(req: Request) {
           expiresAt: mediaExpiresAt,
         },
       });
+      try {
+        const { recordJobProxyOutcome } = await import('@/lib/dataimpulse');
+        recordJobProxyOutcome(job, 'ok');
+      } catch {
+        /* ignore */
+      }
 
       try {
         const runId = String(body.run_id || job.id);

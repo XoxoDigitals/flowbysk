@@ -417,6 +417,12 @@ export async function POST(req: Request) {
             completedAt: new Date(),
           },
         });
+        try {
+          const { recordJobProxyOutcome } = await import('@/lib/dataimpulse');
+          recordJobProxyOutcome(job, 'ok');
+        } catch {
+          /* ignore */
+        }
 
         await prisma.asset.create({
           data: {

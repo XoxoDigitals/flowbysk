@@ -7,6 +7,7 @@ import { createStudioLog } from '@/lib/studioLogs';
 import { bibVideoStatus } from '@/lib/bib';
 import { toUserFacingError } from '@/lib/userMessages';
 import { noteUnusualActivityFailure } from '@/lib/unusualActivityProxyRotate';
+import { recordJobProxyOutcome } from '@/lib/dataimpulse';
 
 const PYTHON_WORKER_URL = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
 
@@ -211,6 +212,11 @@ export async function GET(
             noteUnusualActivityFailure(failMsg, job.providerAccountId || undefined).catch((e) =>
               console.warn('[proxy-rotate]', e)
             );
+            try {
+              recordJobProxyOutcome(job, 'fail');
+            } catch {
+              /* ignore */
+            }
             await releaseCredits(
               job.userId,
               job.walletType,
@@ -249,6 +255,11 @@ export async function GET(
           if (updateRes.count > 0) {
             const shortId = job.id.substring(0, 8);
             const urlPath = String(mediaUrl || '').split('?')[0];
+            try {
+              recordJobProxyOutcome(job, 'ok');
+            } catch {
+              /* ignore */
+            }
             const existingAsset = await prisma.asset.findFirst({
               where: {
                 userId: job.userId,
@@ -375,6 +386,11 @@ export async function GET(
           // If this request was the one that marked the job COMPLETED, persist the asset and settle credits
           if (updateRes.count > 0) {
             const shortId = job.id.substring(0, 8);
+            try {
+              recordJobProxyOutcome(job, 'ok');
+            } catch {
+              /* ignore */
+            }
             const existingAsset = await prisma.asset.findFirst({
               where: {
                 userId: job.userId,
@@ -427,6 +443,11 @@ export async function GET(
           noteUnusualActivityFailure(failMsg, job.providerAccountId || undefined).catch((e) =>
             console.warn('[proxy-rotate]', e)
           );
+          try {
+            recordJobProxyOutcome(job, 'fail');
+          } catch {
+            /* ignore */
+          }
           await prisma.generationJob.update({
             where: { id: job.id },
             data: {

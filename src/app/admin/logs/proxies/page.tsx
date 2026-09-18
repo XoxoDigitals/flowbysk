@@ -532,8 +532,9 @@ export default function AdminProxyStatsPage() {
           </div>
         )}
         <p className="mt-2 text-[10px] text-[var(--ink3)]">
-          Avg/proxy = mean success rate across unique sticky sessids in that country. Image/video
-          counts fill in as new jobs complete after this update.
+          Avg/proxy = mean success rate across unique sticky sessids in that country. Img/Vid OK
+          update when jobs complete (queue + status poll). Unusual can rise without OK if gens
+          fail before finish. Refresh after new completions.
         </p>
       </section>
 

@@ -338,6 +338,12 @@ export async function POST(req: Request) {
             completedAt: new Date(),
           },
         });
+        try {
+          const { recordJobProxyOutcome } = await import('@/lib/dataimpulse');
+          recordJobProxyOutcome(job, 'ok');
+        } catch {
+          /* ignore */
+        }
 
         // Save into prisma.asset idempotently
         const shortId = job.id.substring(0, 8);

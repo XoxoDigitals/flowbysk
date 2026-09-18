@@ -392,6 +392,29 @@ export function jobKindFromModelKey(modelKey?: string | null): ProxyOutcomeKind 
   return 'image';
 }
 
+/** Record ok/fail for country quality — call from EVERY job completion path (queue + status poll + sync API). */
+export function recordJobProxyOutcome(
+  job: {
+    id?: string | null;
+    providerAccountId?: string | null;
+    modelKey?: string | null;
+  },
+  outcome: 'ok' | 'fail' | 'unusual' | 'throttle'
+): void {
+  const event =
+    outcome === 'ok'
+      ? 'job_ok'
+      : outcome === 'fail'
+        ? 'job_fail'
+        : outcome;
+  recordProxyOutcome({
+    event,
+    accountId: job.providerAccountId || undefined,
+    jobId: job.id || undefined,
+    kind: jobKindFromModelKey(job.modelKey),
+  });
+}
+
 export function readProxyMetrics(limit = 5000): ProxyOutcomeEvent[] {
   try {
     if (!fs.existsSync(PROXY_METRICS_PATH)) return [];

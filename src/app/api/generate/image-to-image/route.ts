@@ -338,6 +338,12 @@ export async function POST(req: Request) {
             },
           },
         });
+        try {
+          const { recordJobProxyOutcome } = await import('@/lib/dataimpulse');
+          recordJobProxyOutcome(job, 'ok');
+        } catch {
+          /* ignore */
+        }
 
         const shortId = job.id.substring(0, 8);
         const urlPath = String(primaryUrl || '').split('?')[0];
