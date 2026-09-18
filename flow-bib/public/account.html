@@ -129,6 +129,8 @@ function connect() {
           (m.countryCode ? ' (' + m.countryCode + ')' : '') +
           (m.proxy ? '' : ' · direct');
         setPill('proxyPill', label, !!m.proxy);
+      } else if (m.error) {
+        setPill('proxyPill', 'proxy: ' + String(m.error).slice(0, 48), false);
       }
     }
   };

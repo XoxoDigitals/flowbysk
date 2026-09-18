@@ -35,6 +35,14 @@ export function toUserFacingQueueMessage(internal?: string | null): string {
 export function toUserFacingError(internal?: string | null, fallback = 'Something went wrong. Please try again.'): string {
   if (!internal) return fallback;
   const msg = String(internal);
+  // Transient BiB / CDP — treat as still waiting, never "System Error" for customers
+  if (
+    /browser not launched|Waiting for browser|Target closed|not attached|startScreencast|screencast|ECONNREFUSED|fetch failed/i.test(
+      msg
+    )
+  ) {
+    return USER_QUEUE_BUSY;
+  }
   if (/UNUSUAL_ACTIVITY|RECAPTCHA|unusual\s*activity/i.test(msg)) {
     return 'Unusual activity';
   }

@@ -324,7 +324,22 @@ export default function AdminAccountsPage() {
       await fetchAccounts();
       return data;
     } catch (err: any) {
-      alert(err.message || 'BiB action failed');
+      const m = String(err?.message || err || '');
+      // Screencast / detached page is noisy but non-fatal — still open the viewer
+      if (/startScreencast|Not attached|Target closed|CDP|Execution context was destroyed/i.test(m)) {
+        console.warn('[bib]', m);
+        if (action === 'launch') {
+          const acc = accounts.find((a) => a.id === accountId);
+          setBibViewer({
+            id: accountId,
+            url: `/bib/account.html?accountId=${encodeURIComponent(accountId)}`,
+            label: acc?.label || accountId,
+          });
+          await fetchAccounts();
+        }
+        return;
+      }
+      alert(m || 'BiB action failed');
     } finally {
       setBibBusyId(null);
     }

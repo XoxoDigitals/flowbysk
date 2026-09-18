@@ -308,7 +308,46 @@ export async function GET(
           },
         });
       } catch (bibErr: any) {
-        console.warn('[video/status] BiB poll failed:', bibErr?.message || bibErr);
+        const msg = String(bibErr?.message || bibErr);
+        console.warn('[video/status] BiB poll failed:', msg);
+        // Transient: browser restarting / proxy rotate — keep user in queue, don't fail the card
+        if (
+          /browser not launched|Target closed|not attached|startScreencast|CDP|ECONNREFUSED|fetch failed|retryable|PROCESSING/i.test(
+            msg
+          )
+        ) {
+          try {
+            const acc = await prisma.providerAccount.findUnique({
+              where: { id: String(providerAccountId) },
+              select: {
+                id: true,
+                maxParallelLimit: true,
+                flowProjectIds: true,
+                profileDir: true,
+              },
+            });
+            if (acc) {
+              const { ensureBibAccountReady } = await import('@/lib/bib');
+              ensureBibAccountReady(acc).catch((e) =>
+                console.warn('[video/status] ensure launch:', e?.message || e)
+              );
+            }
+          } catch {
+            /* ignore */
+          }
+          return NextResponse.json({
+            success: true,
+            asset: {
+              id: job.id,
+              status: 'PROCESSING',
+              progress: Math.min(90, Math.max(5, job.progress || 15)),
+              url: '',
+              prompt: job.prompt,
+              error: 'Waiting for browser…',
+              inQueue: true,
+            },
+          });
+        }
         // fall through to Python
       }
     }

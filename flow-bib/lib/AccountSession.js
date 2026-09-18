@@ -143,28 +143,46 @@ class AccountSession {
   }
 
   async startScreencast() {
-    if (this.screencasting || !this.cdp) return;
-    this.screencasting = true;
-    this._lastFrameAt = 0;
-    this.cdp.on('Page.screencastFrame', async (ev) => {
-      this.latestFrame = ev.data;
-      this._lastFrameAt = Date.now();
-      this.broadcast({ type: 'frame', data: ev.data });
-      try {
-        await this.cdp.send('Page.screencastFrameAck', { sessionId: ev.sessionId });
-      } catch {
-        /* ignore */
+    if (!this.cdp || !this.page) return;
+    // Never throw — detached page / mid-reload must not fail Launch or surface to admins.
+    try {
+      if (this.screencasting) {
+        try {
+          await this.cdp.send('Page.stopScreencast').catch(() => {});
+        } catch {
+          /* ignore */
+        }
+        this.screencasting = false;
       }
-    });
-    await this.cdp.send('Page.startScreencast', {
-      format: 'jpeg',
-      quality: 55,
-      maxWidth: VIEW_W,
-      maxHeight: VIEW_H,
-      everyNthFrame: 1,
-    });
+      this.screencasting = true;
+      this._lastFrameAt = 0;
+      this.cdp.removeAllListeners?.('Page.screencastFrame');
+      this.cdp.on('Page.screencastFrame', async (ev) => {
+        this.latestFrame = ev.data;
+        this._lastFrameAt = Date.now();
+        this.broadcast({ type: 'frame', data: ev.data });
+        try {
+          await this.cdp.send('Page.screencastFrameAck', { sessionId: ev.sessionId });
+        } catch {
+          /* ignore */
+        }
+      });
+      await this.cdp.send('Page.startScreencast', {
+        format: 'jpeg',
+        quality: 55,
+        maxWidth: VIEW_W,
+        maxHeight: VIEW_H,
+        everyNthFrame: 1,
+      });
+    } catch (e) {
+      this.screencasting = false;
+      console.warn(
+        `[${this.accountId}] startScreencast skipped:`,
+        e?.message || e
+      );
+    }
 
-    // Headless Chrome often sends no CDP screencast frames — fall back to screenshots
+    // Headless / detached CDP — screenshots still work for the admin stream
     if (this._shotTimer) clearInterval(this._shotTimer);
     this._shotTimer = setInterval(() => {
       this._screenshotFallback().catch(() => {});
@@ -264,7 +282,9 @@ class AccountSession {
       await this.page
         .goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 45000 })
         .catch((e) => console.warn(`[${this.accountId}] nav:`, e.message));
-      await this.startScreencast();
+      await this.startScreencast().catch((e) =>
+        console.warn(`[${this.accountId}] screencast:`, e?.message || e)
+      );
 
       await this.refreshEgressIp().catch((e) =>
         console.warn(`[${this.accountId}] egress IP probe:`, e.message)
@@ -519,10 +539,10 @@ class AccountSession {
    * Block Image / Media / Font through the egress proxy unless an admin viewer
    * is watching (wsClients). Generation APIs use XHR/Fetch and keep working.
    */
-  async _installMediaBandwidthGuard() {
+  async _installMediaBandwidthGuard(opts = {}) {
     if (!this.cdp || this._mediaGuardInstalled) return;
     this._mediaGuardInstalled = true;
-    this.allowMedia = false;
+    if (!opts.keepAllowMedia) this.allowMedia = false;
     try {
       await this.cdp.send('Fetch.enable', {
         patterns: [
@@ -559,7 +579,9 @@ class AccountSession {
    */
   async setMediaLoadingEnabled(enabled, { reload = false } = {}) {
     const next = !!enabled;
-    if (this.allowMedia === next) return { allowMedia: this.allowMedia };
+    if (this.allowMedia === next && !(next && reload)) {
+      return { allowMedia: this.allowMedia };
+    }
     this.allowMedia = next;
     console.log(
       `[${this.accountId}] media loading ${next ? 'ENABLED (viewer)' : 'BLOCKED (save proxy)'}`
@@ -567,6 +589,20 @@ class AccountSession {
     if (next && reload && this.page) {
       try {
         await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+        // Reload detaches CDP — rebind so stream/proxy keep working (never throw to client)
+        try {
+          this.cdp = await this.page.target().createCDPSession();
+          this._bearerSniffInstalled = false;
+          this._mediaGuardInstalled = false;
+          this.screencasting = false;
+          await this._installMediaBandwidthGuard({ keepAllowMedia: true });
+          this.allowMedia = true;
+          await this._installBearerSniff();
+          await this.startScreencast();
+          this.refreshEgressIp().catch(() => {});
+        } catch (e) {
+          console.warn(`[${this.accountId}] rebind after media reload:`, e.message || e);
+        }
       } catch (e) {
         console.warn(`[${this.accountId}] media reload:`, e.message);
       }
@@ -1371,12 +1407,12 @@ class AccountSession {
     this.egressError = null;
 
     const curlJson = async (url) => {
-      const args = ['-sS', '--max-time', '20', '-H', 'Accept: application/json', url];
+      const args = ['-sS', '--max-time', '12', '-H', 'Accept: application/json', url];
       if (proxyUrl) args.splice(1, 0, '-x', proxyUrl);
       try {
         const { stdout } = await execFileAsync('curl', args, {
           encoding: 'utf8',
-          timeout: 25000,
+          timeout: 15000,
           windowsHide: true,
           maxBuffer: 256 * 1024,
         });
@@ -1389,7 +1425,12 @@ class AccountSession {
     };
 
     try {
+      // Prefer fast ipify first so the stream toolbar leaves "checking…" quickly
       let info = null;
+      const second = await curlJson('https://api.ipify.org?format=json');
+      if (second && second.ip) {
+        info = { ip: String(second.ip), country: '', countryCode: '' };
+      }
       const first = await curlJson('https://ipapi.co/json/');
       if (first && first.ip && !first.error) {
         info = {
@@ -1397,11 +1438,6 @@ class AccountSession {
           country: String(first.country_name || first.country || ''),
           countryCode: String(first.country_code || ''),
         };
-      } else {
-        const second = await curlJson('https://api.ipify.org?format=json');
-        if (second && second.ip) {
-          info = { ip: String(second.ip), country: '', countryCode: '' };
-        }
       }
 
       if (info && info.ip) {
@@ -1417,7 +1453,13 @@ class AccountSession {
         });
         return info;
       }
-      this.egressError = 'Could not resolve exit IP';
+      this.egressError = proxyUrl ? 'Proxy exit IP probe failed' : 'Could not resolve exit IP';
+      this.broadcast({
+        type: 'egress',
+        ip: null,
+        error: this.egressError,
+        proxy: !!this.egressProxyUrl,
+      });
       return null;
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);

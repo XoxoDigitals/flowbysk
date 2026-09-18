@@ -287,21 +287,47 @@ export async function bibVideoStatus(payload: {
   mediaId: string;
   projectId?: string;
 }) {
-  const res = await bibFetch('/video-status', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `BiB video-status failed (${res.status})`);
-  return data as {
-    success: boolean;
-    status: string;
-    videoUrl?: string | null;
-    imageUrl?: string | null;
-    url?: string | null;
-    mediaId?: string;
-    projectId?: string;
+  const run = async () => {
+    const res = await bibFetch('/video-status', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err: any = new Error(data.error || `BiB video-status failed (${res.status})`);
+      err.status = res.status;
+      err.retryable = data.retryable === true || res.status === 409;
+      throw err;
+    }
+    return data as {
+      success: boolean;
+      status: string;
+      videoUrl?: string | null;
+      imageUrl?: string | null;
+      url?: string | null;
+      mediaId?: string;
+      projectId?: string;
+      error?: string;
+    };
   };
+
+  try {
+    return await run();
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    if (
+      e?.retryable ||
+      /browser not launched|Target closed|not attached|ECONNREFUSED|fetch failed/i.test(msg)
+    ) {
+      try {
+        await ensureBibAccountReady({ id: payload.accountId });
+        return await run();
+      } catch {
+        /* still down — caller keeps job PROCESSING */
+      }
+    }
+    throw e;
+  }
 }
 
 export async function bibExportCookies(accountId: string) {

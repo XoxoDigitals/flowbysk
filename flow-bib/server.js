@@ -1583,8 +1583,24 @@ app.post('/video-status', requireInternalSecret, async (req, res) => {
     if (!accountId || !mediaId) {
       return res.status(400).json({ error: 'accountId and mediaId required' });
     }
-    const s = pool.get(accountId);
-    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    let s = pool.get(accountId);
+    // Auto-relaunch after BiB restart — don't fail the user's in-flight job
+    if (!s?.browser) {
+      try {
+        console.warn(`[${accountId}] video-status: browser down — auto-launching`);
+        await launchAccountEntry({ id: accountId });
+        s = pool.get(accountId);
+      } catch (e) {
+        console.warn(`[${accountId}] video-status auto-launch:`, e.message || e);
+      }
+    }
+    if (!s?.browser) {
+      return res.status(409).json({
+        error: 'Account browser not launched',
+        retryable: true,
+        status: 'PROCESSING',
+      });
+    }
     try {
       await ensureAccountUsable(s, preferredProject);
     } catch (e) {
