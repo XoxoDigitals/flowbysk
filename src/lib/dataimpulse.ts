@@ -428,99 +428,88 @@ export function aggregateProxyStats(days = 7) {
   return { days, leaderboard, recent, totalEvents: events.length };
 }
 
-/* ---------- User API (plan usage) ---------- */
+/* ---------- Gateway API (plan usage) — Basic Auth = proxy login/password ---------- */
 
 let _usageCache: { at: number; data: Record<string, unknown> } | null = null;
+
+/** DataImpulse traffic ints are usually bytes; if already small (< 1e6) treat as GB. */
+function toGb(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  if (Math.abs(n) >= 1_000_000) return n / (1024 * 1024 * 1024);
+  return n;
+}
 
 export async function fetchDataImpulseUsage(): Promise<{
   ok: boolean;
   balance?: number;
   trafficLeftGb?: number;
   trafficUsedGb?: number;
+  totalTrafficGb?: number;
+  usedThreads?: number;
   raw?: unknown;
   error?: string;
   fetchedAt: string;
 }> {
   const cfg = readDataImpulseConfig();
   const fetchedAt = new Date().toISOString();
-  if (!cfg.apiToken) {
-    return { ok: false, error: 'API token not configured', fetchedAt };
+  if (!cfg.proxyLogin?.trim() || !cfg.proxyPassword) {
+    return { ok: false, error: 'Proxy login/password required for plan stats', fetchedAt };
   }
   if (_usageCache && Date.now() - _usageCache.at < 60_000) {
-    return { ok: true, ...( _usageCache.data as any), fetchedAt };
+    return { ok: true, ...(_usageCache.data as any), fetchedAt };
   }
 
-  const headers = {
-    Authorization: `Bearer ${cfg.apiToken}`,
-    Accept: 'application/json',
-  };
+  const basic = Buffer.from(`${cfg.proxyLogin.trim()}:${cfg.proxyPassword}`, 'utf8').toString(
+    'base64'
+  );
 
-  // Try common User API paths (Postman User API + reseller-compatible balance)
-  const candidates = [
-    'https://api.dataimpulse.com/user/balance',
-    'https://api.dataimpulse.com/user/traffic',
-    'https://api.dataimpulse.com/user/usage',
-    'https://api.dataimpulse.com/reseller/user/balance',
-  ];
-
-  let lastErr = 'No endpoint succeeded';
-  let merged: Record<string, unknown> = {};
-
-  for (const url of candidates) {
+  try {
+    const res = await fetch('https://gw.dataimpulse.com:777/api/stats', {
+      headers: {
+        Authorization: `Basic ${basic}`,
+        Accept: 'application/json',
+      },
+      cache: 'no-store',
+    });
+    const text = await res.text();
+    let data: any = null;
     try {
-      const res = await fetch(url, { headers, cache: 'no-store' });
-      const text = await res.text();
-      let data: any = null;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = { raw: text.slice(0, 200) };
-      }
-      if (!res.ok) {
-        lastErr = `${url} → ${res.status}`;
-        continue;
-      }
-      merged = { ...merged, ...flattenUsage(data), source: url };
-      // Prefer first successful balance-like payload
-      if (merged.balance != null || merged.trafficLeftGb != null) break;
-    } catch (e: any) {
-      lastErr = e?.message || String(e);
+      data = JSON.parse(text);
+    } catch {
+      data = null;
     }
-  }
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: data?.message || `Gateway stats HTTP ${res.status}`,
+        fetchedAt,
+      };
+    }
+    if (!data || typeof data !== 'object') {
+      return { ok: false, error: 'Invalid stats response', fetchedAt };
+    }
 
-  if (merged.balance == null && merged.trafficLeftGb == null && Object.keys(merged).length < 2) {
-    return { ok: false, error: lastErr, fetchedAt };
-  }
+    const leftRaw = Number(data.traffic_left);
+    const usedRaw = Number(data.traffic_used);
+    const totalRaw = Number(data.total_traffic);
+    const trafficLeftGb = Number.isFinite(leftRaw) ? toGb(leftRaw) : undefined;
+    const trafficUsedGb = Number.isFinite(usedRaw) ? toGb(usedRaw) : undefined;
+    const totalTrafficGb = Number.isFinite(totalRaw) ? toGb(totalRaw) : undefined;
 
-  const data = {
-    balance: typeof merged.balance === 'number' ? merged.balance : undefined,
-    trafficLeftGb:
-      typeof merged.trafficLeftGb === 'number'
-        ? merged.trafficLeftGb
-        : typeof merged.balance === 'number'
-          ? merged.balance
-          : undefined,
-    trafficUsedGb: typeof merged.trafficUsedGb === 'number' ? merged.trafficUsedGb : undefined,
-    raw: merged,
-  };
-  _usageCache = { at: Date.now(), data };
-  return { ok: true, ...data, fetchedAt };
-}
-
-function flattenUsage(data: any): Record<string, unknown> {
-  if (!data || typeof data !== 'object') return {};
-  const out: Record<string, unknown> = {};
-  if (typeof data.balance === 'number') out.balance = data.balance;
-  if (typeof data.traffic === 'number') out.trafficLeftGb = data.traffic;
-  if (typeof data.traffic_left === 'number') out.trafficLeftGb = data.traffic_left;
-  if (typeof data.trafficLeft === 'number') out.trafficLeftGb = data.trafficLeft;
-  if (typeof data.left === 'number') out.trafficLeftGb = data.left;
-  if (typeof data.used === 'number') out.trafficUsedGb = data.used;
-  if (typeof data.traffic_used === 'number') out.trafficUsedGb = data.traffic_used;
-  if (data.data && typeof data.data === 'object') {
-    Object.assign(out, flattenUsage(data.data));
+    const out = {
+      balance: trafficLeftGb,
+      trafficLeftGb,
+      trafficUsedGb,
+      totalTrafficGb,
+      usedThreads:
+        typeof data.used_threads === 'number' ? data.used_threads : undefined,
+      raw: data,
+    };
+    _usageCache = { at: Date.now(), data: out };
+    return { ok: true, ...out, fetchedAt };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e), fetchedAt };
   }
-  return out;
 }
 
 export async function testDataImpulseConnection(country?: string): Promise<{

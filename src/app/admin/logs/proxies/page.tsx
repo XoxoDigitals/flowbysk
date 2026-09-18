@@ -83,7 +83,6 @@ export default function AdminProxyStatsPage() {
   const [enabled, setEnabled] = useState(false);
   const [proxyLogin, setProxyLogin] = useState('');
   const [proxyPassword, setProxyPassword] = useState('');
-  const [apiToken, setApiToken] = useState('');
   const [countries, setCountries] = useState<string[]>(['us', 'gb', 'de']);
   const [sessttl, setSessttl] = useState(60);
   const [portBase, setPortBase] = useState(10000);
@@ -116,7 +115,6 @@ export default function AdminProxyStatsPage() {
       setEnabled(!!s.enabled);
       setProxyLogin(s.proxyLogin || '');
       setProxyPassword('');
-      setApiToken('');
       setCountries(Array.isArray(s.countries) ? s.countries : ['us']);
       setSessttl(s.sessttlMinutes || 60);
       setPortBase(s.stickyPortBase || 10000);
@@ -151,7 +149,6 @@ export default function AdminProxyStatsPage() {
         reassignLive,
       };
       if (proxyPassword.trim()) body.proxyPassword = proxyPassword.trim();
-      if (apiToken.trim()) body.apiToken = apiToken.trim();
 
       const res = await fetch('/api/admin/dataimpulse', {
         method: 'PUT',
@@ -166,7 +163,6 @@ export default function AdminProxyStatsPage() {
           : 'Saved DataImpulse settings'
       );
       setProxyPassword('');
-      setApiToken('');
       await load();
     } catch (e: any) {
       setErr(e?.message || 'Save failed');
@@ -285,8 +281,7 @@ export default function AdminProxyStatsPage() {
         </div>
         {!usage?.ok ? (
           <p className="text-xs text-[var(--ink3)]">
-            {usage?.error || 'Add User API token below to see remaining traffic.'}
-            {usage?.error?.includes('TRAFFIC') ? ' Tip: 407 TRAFFIC_EXHAUSTED means top up the plan.' : ''}
+            {usage?.error || 'Save proxy login + password below — plan stats use the same Basic Auth.'}
           </p>
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -329,9 +324,9 @@ export default function AdminProxyStatsPage() {
           </label>
         </div>
         <p className="mb-3 text-xs text-[var(--ink3)]">
-          Sticky residential via <code className="text-[var(--ink2)]">gw.dataimpulse.com</code> with
-          country + sessid. When enabled, BiB launch and rotate use DataImpulse instead of the static
-          egress list (fallback when disabled).
+          Sticky residential via <code className="text-[var(--ink2)]">gw.dataimpulse.com</code> ports
+          10000+ with country + sessid. Login/password also fetch plan stats from the Gateway API.
+          When enabled, BiB launch and rotate use DataImpulse; static egress list is fallback when off.
         </p>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block text-xs text-[var(--ink3)]">
@@ -351,17 +346,6 @@ export default function AdminProxyStatsPage() {
               value={proxyPassword}
               onChange={(e) => setProxyPassword(e.target.value)}
               placeholder={settings?.proxyPasswordSet ? '••••••••' : ''}
-              autoComplete="new-password"
-            />
-          </label>
-          <label className="block text-xs text-[var(--ink3)] sm:col-span-2">
-            User API token (plan usage) {settings?.apiTokenSet ? '(set)' : ''}
-            <input
-              className={inputClass + ' mt-1'}
-              type="password"
-              value={apiToken}
-              onChange={(e) => setApiToken(e.target.value)}
-              placeholder={settings?.apiTokenSet ? '••••••••' : 'Bearer from dashboard API Management'}
               autoComplete="new-password"
             />
           </label>
