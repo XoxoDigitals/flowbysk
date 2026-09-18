@@ -22,7 +22,9 @@ import {
   resolveEffectiveParallel,
 } from '@/lib/customDeals';
 import { toUserFacingQueueMessage, toUserFacingError } from '@/lib/userMessages';
-import { resetUnusualActivityStreak } from '@/lib/unusualActivityProxyRotate';
+import { resetUnusualActivityStreak, isUnusualActivityError } from '@/lib/unusualActivityProxyRotate';
+import { recordProxyOutcome } from '@/lib/dataimpulse';
+import { isThrottleGenerationError } from '@/lib/systemErrorRetry';
 
 const PYTHON_WORKER_URL = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
 
@@ -546,6 +548,16 @@ export async function handleJobSuccess(jobId: string, outputUrl: string, metadat
 
   resetUnusualActivityStreak();
 
+  try {
+    recordProxyOutcome({
+      event: 'job_ok',
+      accountId: job.providerAccountId || undefined,
+      jobId: job.id,
+    });
+  } catch {
+    /* ignore */
+  }
+
   // Persist into prisma.asset so media gallery and projects find it in DB
   const isVideo = job.modelKey.includes('veo') || job.modelKey.includes('omni');
   const isJpg = outputUrl.includes('.jpg') || outputUrl.includes('.jpeg');
@@ -662,6 +674,18 @@ export async function handleJobFailure(jobId: string, errorMessage: string) {
   });
 
   console.error(`[jobFailure ${jobId}]`, errorMessage);
+
+  try {
+    const unusual = isUnusualActivityError(errorMessage);
+    const throttle = isThrottleGenerationError(errorMessage);
+    recordProxyOutcome({
+      event: unusual ? 'unusual' : throttle ? 'throttle' : 'job_fail',
+      accountId: job.providerAccountId || undefined,
+      jobId: job.id,
+    });
+  } catch {
+    /* ignore */
+  }
 
   // Unusual streak is counted inside withSystemErrorRetry (each attempt).
 

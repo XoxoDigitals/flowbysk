@@ -208,7 +208,7 @@ export async function GET(
             },
           });
           if (updateRes.count > 0) {
-            noteUnusualActivityFailure(failMsg).catch((e) =>
+            noteUnusualActivityFailure(failMsg, job.providerAccountId || undefined).catch((e) =>
               console.warn('[proxy-rotate]', e)
             );
             await releaseCredits(
@@ -385,7 +385,7 @@ export async function GET(
 
         if (workerAsset.status === 'FAILED') {
           const failMsg = workerAsset.error || 'Generation failed upstream';
-          noteUnusualActivityFailure(failMsg).catch((e) =>
+          noteUnusualActivityFailure(failMsg, job.providerAccountId || undefined).catch((e) =>
             console.warn('[proxy-rotate]', e)
           );
           await prisma.generationJob.update({

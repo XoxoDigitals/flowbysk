@@ -12,6 +12,12 @@ import {
   getProxyUrlForAccount,
 } from './egressProxy';
 import {
+  allocateDataImpulseForAccount,
+  isDataImpulseReady,
+  reassignAllDataImpulse,
+  rotateDataImpulseAccount,
+} from './dataimpulse';
+import {
   bibDisconnectAccount,
   bibFetch,
   bibLaunchAccount,
@@ -144,21 +150,42 @@ export async function rotateProxyAndRelaunchForAccount(
 
   rotating = true;
   try {
-    const rotated = rotateProxyForAccount(accountId);
-    if (!rotated.ok || !rotated.to) {
-      return {
-        ok: false,
-        rotated: false,
-        from: rotated.from,
-        to: rotated.to,
-        relaunched: 0,
-        error: rotated.error || 'Need ≥2 enabled proxies to rotate',
-      };
-    }
+    const fromBefore = getProxyUrlSafe(accountId);
+    let toUrl: string | null = null;
 
-    console.warn(
-      `[proxy-rotate] account ${accountId.slice(0, 8)} ${opts?.reason || 'manual'} → ${maskProxyUrl(rotated.to)}`
-    );
+    if (isDataImpulseReady()) {
+      const di = rotateDataImpulseAccount(accountId);
+      if (!di?.url) {
+        return {
+          ok: false,
+          rotated: false,
+          from: fromBefore,
+          to: null,
+          relaunched: 0,
+          error: 'DataImpulse rotate failed',
+        };
+      }
+      toUrl = di.url;
+      console.warn(
+        `[proxy-rotate] DataImpulse account ${accountId.slice(0, 8)} ${opts?.reason || 'manual'} cr.${di.country} → ${maskProxyUrl(di.url)}`
+      );
+    } else {
+      const rotated = rotateProxyForAccount(accountId);
+      if (!rotated.ok || !rotated.to) {
+        return {
+          ok: false,
+          rotated: false,
+          from: rotated.from,
+          to: rotated.to,
+          relaunched: 0,
+          error: rotated.error || 'Need ≥2 enabled proxies to rotate',
+        };
+      }
+      toUrl = rotated.to;
+      console.warn(
+        `[proxy-rotate] account ${accountId.slice(0, 8)} ${opts?.reason || 'manual'} → ${maskProxyUrl(rotated.to)}`
+      );
+    }
 
     try {
       await bibFetch('/egress-proxy/clear-cache', { method: 'POST', body: '{}' });
@@ -186,8 +213,8 @@ export async function rotateProxyAndRelaunchForAccount(
     return {
       ok: true,
       rotated: true,
-      from: rotated.from,
-      to: rotated.to,
+      from: fromBefore,
+      to: toUrl,
       relaunched,
     };
   } finally {
@@ -231,10 +258,15 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
   rotating = true;
   try {
     const sticky = !!opts?.sticky;
+    const diReady = isDataImpulseReady();
     let from: string | null = activeEgressProxyUrl(readEgressProxyMirror().proxies);
     let to: string | null = from;
 
-    if (!sticky) {
+    if (diReady) {
+      console.warn(
+        `[proxy-rotate] DataImpulse ${opts?.reason || 'manual'} ${sticky ? 'sticky ensure' : 'reshuffle sessids'}`
+      );
+    } else if (!sticky) {
       const rotated = rotateActiveEgressProxy();
       if (!rotated.ok || !rotated.to) {
         return {
@@ -265,7 +297,36 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
     const targetIds = targets.map((a) => a.id);
     let relaunchIds = targetIds;
 
-    if (sticky) {
+    if (diReady) {
+      if (sticky) {
+        const changed: string[] = [];
+        for (const id of targetIds) {
+          const before = getProxyUrlForAccount(id);
+          const r = allocateDataImpulseForAccount(id);
+          if (r && (!before || before !== r.url)) changed.push(id);
+        }
+        relaunchIds = changed;
+        to = targetIds.length ? getProxyUrlForAccount(targetIds[0]) : to;
+        if (!relaunchIds.length) {
+          writeSiteRuntimePatch({
+            lastProxyRotateAt: new Date().toISOString(),
+            lastProxyRotateReason: String(opts?.reason || 'auto sticky DI').slice(0, 120),
+            unusualActivityStreak: 0,
+          });
+          return {
+            ok: true,
+            rotated: false,
+            from,
+            to,
+            relaunched: 0,
+            reason: opts?.reason || 'auto sticky',
+          };
+        }
+      } else {
+        reassignAllDataImpulse(targetIds);
+        to = targetIds.length ? getProxyUrlForAccount(targetIds[0]) : to;
+      }
+    } else if (sticky) {
       const { changed } = ensureStickyUniqueAssignments(targetIds);
       for (const id of targetIds) {
         if (!getProxyUrlForAccount(id)) {
@@ -338,6 +399,12 @@ export async function noteUnusualActivityFailure(
 }> {
   if (!isUnusualActivityError(errorMessage)) {
     return { rotated: false, streak: getUnusualActivityStreak() };
+  }
+  try {
+    const { recordProxyOutcome } = await import('./dataimpulse');
+    recordProxyOutcome({ event: 'unusual', accountId });
+  } catch {
+    /* ignore */
   }
   if (accountId) {
     const result = await rotateProxyAndRelaunchForAccount(accountId, {

@@ -38,6 +38,24 @@ export async function bibLaunchAccount(
   accountId: string,
   opts?: { maxSlots?: number; projectIds?: string[]; profileDir?: string | null }
 ) {
+  // Ensure sticky residential (or static) assignment before Chrome starts
+  try {
+    const {
+      allocateDataImpulseForAccount,
+      isDataImpulseReady,
+      readDataImpulseConfig,
+    } = await import('@/lib/dataimpulse');
+    const { ensureUniqueProxyForAccount } = await import('@/lib/egressProxy');
+    const cfg = readDataImpulseConfig();
+    if (isDataImpulseReady(cfg) && cfg.autoAssignOnLaunch) {
+      allocateDataImpulseForAccount(accountId);
+    } else {
+      ensureUniqueProxyForAccount(accountId);
+    }
+  } catch (e) {
+    console.warn('[bibLaunch] proxy allocate:', e);
+  }
+
   const res = await bibFetch(`/accounts/${encodeURIComponent(accountId)}/launch`, {
     method: 'POST',
     body: JSON.stringify({

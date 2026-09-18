@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import NextLink from 'next/link';
 import {
   RefreshCw,
   Search,
@@ -10,6 +11,7 @@ import {
   FileText,
   ChevronDown,
   ChevronRight,
+  Globe,
 } from 'lucide-react';
 
 type ServiceTab = 'web' | 'bib' | 'api';
@@ -175,6 +177,13 @@ export default function AdminPm2LogsPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <NextLink
+            href="/admin/logs/proxies"
+            className="inline-flex items-center gap-1.5 rounded-[11px] border border-[var(--line)] bg-[var(--bg2)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] hover:bg-[var(--bg3)]"
+          >
+            <Globe className="h-3.5 w-3.5" />
+            Proxy / DataImpulse
+          </NextLink>
           <label className="flex items-center gap-1.5 text-[11px] text-[var(--ink3)]">
             <input
               type="checkbox"

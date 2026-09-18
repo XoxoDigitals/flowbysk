@@ -10,6 +10,7 @@
  */
 
 import { isUnusualActivityError, rotateProxyAndRelaunchForAccount } from './unusualActivityProxyRotate';
+import { recordProxyOutcome } from './dataimpulse';
 
 export function isPolicyGenerationError(raw: unknown): boolean {
   const text = String(raw ?? '').trim();
@@ -112,6 +113,14 @@ export async function withSystemErrorRetry<T>(
       // Unusual / too-much-traffic: never fail on first hit.
       if (isUnusualActivityError(msg)) {
         unusualHits += 1;
+        try {
+          recordProxyOutcome({
+            event: 'unusual',
+            accountId: opts.providerAccountId,
+          });
+        } catch {
+          /* ignore */
+        }
         console.warn(
           `[system-retry] ${label}: unusual #${unusualHits} — ${msg.slice(0, 160)}`
         );
@@ -163,6 +172,14 @@ export async function withSystemErrorRetry<T>(
       // Throttle: fixed schedule (default 10s then 20s), then stop
       if (isThrottleGenerationError(msg)) {
         throttleAttempts += 1;
+        try {
+          recordProxyOutcome({
+            event: 'throttle',
+            accountId: opts.providerAccountId,
+          });
+        } catch {
+          /* ignore */
+        }
         if (throttleAttempts > throttleDelaysMs.length) {
           console.warn(
             `[system-retry] ${label}: throttle retries exhausted (${throttleAttempts - 1}/${throttleDelaysMs.length}) — giving up`

@@ -30,6 +30,7 @@ const TITLES: Record<string, string> = {
   '/admin/orders': 'Orders',
   '/admin/accounts': 'Accounts',
   '/admin/jobs': 'Jobs',
+  '/admin/logs/proxies': 'Proxy / DataImpulse',
   '/admin/logs': 'Logs',
   '/admin/studio-logs': 'Studio Logs',
   '/admin/plans': 'Plans',
@@ -123,7 +124,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     { name: 'Tickets', href: '/admin/tickets', icon: LifeBuoy },
     { name: 'Stripe', href: '/admin/stripe', icon: CreditCard },
     ...(adminRole === 'SUPER_ADMIN'
-      ? [{ name: 'Logs', href: '/admin/logs', icon: ShieldAlert }]
+      ? [
+          { name: 'Logs', href: '/admin/logs', icon: ShieldAlert },
+          { name: 'Proxy / DataImpulse', href: '/admin/logs/proxies', icon: Server },
+        ]
       : []),
     { name: 'Studio Logs', href: '/admin/studio-logs', icon: Terminal },
     { name: 'Settings', href: '/admin/settings', icon: Settings },
@@ -157,7 +161,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             const active =
               item.href === '/admin'
                 ? pathname === '/admin'
-                : pathname?.startsWith(item.href);
+                : item.href === '/admin/logs'
+                  ? pathname === '/admin/logs'
+                  : pathname?.startsWith(item.href);
             return (
               <NextLink
                 key={item.href}
