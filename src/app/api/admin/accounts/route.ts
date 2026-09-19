@@ -452,6 +452,14 @@ export async function DELETE(req: Request) {
       where: { id },
     });
 
+    try {
+      const { pruneOrphanDataImpulseAssignments } = await import('@/lib/dataimpulse');
+      const live = await prisma.providerAccount.findMany({ select: { id: true } });
+      pruneOrphanDataImpulseAssignments(live.map((a) => a.id));
+    } catch (e) {
+      console.warn('[accounts] prune DataImpulse orphans after delete:', e);
+    }
+
     await prisma.adminAuditLog.create({
       data: {
         adminId: admin.userId,
