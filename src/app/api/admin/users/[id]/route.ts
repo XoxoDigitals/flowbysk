@@ -3,6 +3,7 @@ import { requireAdmin, hashPassword } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { UserStatus } from '@prisma/client';
 import { setUserProviderAssignment } from '@/lib/allocation';
+import { displayToolChip, jobRunId } from '@/lib/adminAnalytics';
 
 export async function GET(
   req: Request,
@@ -174,7 +175,11 @@ export async function GET(
           imageJobs,
           totalProjects: user._count.projects,
         },
-        recentJobs: jobs,
+        recentJobs: jobs.map((j) => ({
+          ...j,
+          tool: displayToolChip(j.parameters),
+          runId: jobRunId(j),
+        })),
         transactions: user.ledgerEntries,
         orders: user.orders,
       },

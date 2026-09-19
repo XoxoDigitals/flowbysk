@@ -33,8 +33,10 @@ import {
   RefreshCw,
   Eye,
   EyeOff,
+  ScrollText,
 } from 'lucide-react';
 import { formatModelDisplayName } from '@/lib/modelLabels';
+import { JobStudioLogsModal, type JobLogsTarget } from '@/components/admin/JobStudioLogsModal';
 
 interface GenerationJobItem {
   id: string;
@@ -45,6 +47,8 @@ interface GenerationJobItem {
   progress: number;
   prompt: string;
   parameters?: any;
+  tool?: string;
+  runId?: string;
   outputMediaUrl?: string | null;
   errorMessage?: string | null;
   submittedAt: string;
@@ -171,6 +175,7 @@ export default function AdminUserDetailPage() {
 
   // Media preview modal
   const [previewMedia, setPreviewMedia] = useState<{ url: string; type: 'video' | 'image'; prompt?: string } | null>(null);
+  const [jobLogsTarget, setJobLogsTarget] = useState<JobLogsTarget | null>(null);
 
   // Active Tab
   const [activeTab, setActiveTab] = useState<'generations' | 'credits' | 'plan' | 'settings' | 'studio-logs'>('generations');
@@ -672,14 +677,18 @@ export default function AdminUserDetailPage() {
                       <th className="px-4 py-3">Media / Preview</th>
                       <th className="px-4 py-3">Prompt</th>
                       <th className="px-4 py-3">Model</th>
+                      <th className="px-4 py-3">Tool</th>
                       <th className="px-4 py-3">Cost & Wallet</th>
                       <th className="px-4 py-3">Status</th>
                       <th className="px-4 py-3">Timestamp</th>
+                      <th className="px-4 py-3 text-right">Logs</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredJobs.map((j) => {
                       const isVid = (j.modelKey || '').toLowerCase().includes('veo') || (j.modelKey || '').toLowerCase().includes('video');
+                      const tool = j.tool || 'studio';
+                      const runId = j.runId || j.id;
 
                       return (
                         <tr key={j.id} className="border-t border-[var(--line)] hover:bg-[var(--bg2)]/50">
@@ -739,10 +748,17 @@ export default function AdminUserDetailPage() {
                             </span>
                           </td>
 
+                          {/* Tool */}
+                          <td className="px-4 py-3">
+                            <span className="rounded-md bg-[var(--bg3)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--ink2)]">
+                              {tool}
+                            </span>
+                          </td>
+
                           {/* Cost */}
                           <td className="px-4 py-3 font-mono">
                             <span className="text-[var(--ink)] font-bold">{j.creditCost}</span>{' '}
-                            <span className={`text-[10px] font-semibold ${j.walletType === 'PRO' ? 'text-[var(--a1)]' : 'text-[var(--a1)]'}`}>
+                            <span className="text-[10px] font-semibold text-[var(--a1)]">
                               {j.walletType}
                             </span>
                           </td>
@@ -764,7 +780,28 @@ export default function AdminUserDetailPage() {
 
                           {/* Timestamp */}
                           <td className="px-4 py-3 text-[var(--ink3)] whitespace-nowrap text-[11px]">
-                            {new Date(j.createdAt).toLocaleString()}
+                            {new Date(j.submittedAt || j.createdAt).toLocaleString()}
+                          </td>
+
+                          {/* Logs */}
+                          <td className="px-4 py-3 text-right">
+                            <button
+                              type="button"
+                              title="View studio logs"
+                              className="inline-flex items-center justify-center rounded-md border border-[var(--line)] bg-[var(--bg2)] p-1.5 text-[var(--ink2)] hover:border-[var(--a1)] hover:text-[var(--a1)]"
+                              onClick={() =>
+                                setJobLogsTarget({
+                                  jobId: j.id,
+                                  runId,
+                                  prompt: j.prompt,
+                                  status: j.status,
+                                  tool,
+                                  userId: user?.id || null,
+                                })
+                              }
+                            >
+                              <ScrollText className="h-3.5 w-3.5" />
+                            </button>
                           </td>
                         </tr>
                       );
@@ -1459,6 +1496,8 @@ export default function AdminUserDetailPage() {
           </div>
         </div>
       )}
+
+      <JobStudioLogsModal target={jobLogsTarget} onClose={() => setJobLogsTarget(null)} />
     </div>
   );
 }

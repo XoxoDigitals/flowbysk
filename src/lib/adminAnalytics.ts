@@ -31,7 +31,28 @@ export function classifyTool(parameters: unknown): string {
   if (src.includes('bulki2v') || src === 'biv') return 'bulki2v';
   if (src.includes('whisk')) return 'whisk';
   if (src.includes('ingredient')) return 'ingredients';
+  if (src === 'i2v' || src === 'i2i' || src === 'image' || src === 'video' || src === 'extend') {
+    return 'studio';
+  }
   return src;
+}
+
+/** Short chip label for admin Jobs / generations tables. */
+export function displayToolChip(parameters: unknown): string {
+  const tool = classifyTool(parameters);
+  if (/^bulk/.test(tool)) return 'bulk';
+  if (tool === 'storyteller') return 'storyteller';
+  if (tool === 'whisk') return 'whisk';
+  if (tool === 'ingredients') return 'ingredients';
+  if (tool === 'extend') return 'extend';
+  if (tool === 'studio') return 'studio';
+  return tool.slice(0, 24) || 'studio';
+}
+
+export function jobRunId(job: { id: string; parameters?: unknown }): string {
+  const params = (job.parameters as Record<string, unknown>) || {};
+  const rid = String(params.run_id || '').trim();
+  return rid || job.id;
 }
 
 export function classifyMethod(job: {

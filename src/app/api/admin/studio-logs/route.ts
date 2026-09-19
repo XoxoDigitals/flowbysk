@@ -12,6 +12,8 @@ export async function GET(req: Request) {
     const source = searchParams.get('source');
     const user = searchParams.get('user');
     const userId = searchParams.get('userId');
+    const runId = searchParams.get('runId');
+    const jobId = searchParams.get('jobId');
     const q = searchParams.get('q');
     const from = searchParams.get('from');
     const to = searchParams.get('to');
@@ -25,13 +27,25 @@ export async function GET(req: Request) {
     if (source && source.trim() && source !== 'ALL') {
       where.source = { equals: source.trim(), mode: 'insensitive' };
     }
+
+    const runIds = [
+      String(runId || '').trim(),
+      String(jobId || '').trim(),
+    ].filter(Boolean);
+    const uniqueRunIds = [...new Set(runIds)];
+    if (uniqueRunIds.length === 1) {
+      where.runId = uniqueRunIds[0];
+    } else if (uniqueRunIds.length > 1) {
+      where.runId = { in: uniqueRunIds };
+    }
+
     if (userId && userId.trim()) {
       const uid = userId.trim();
       const u = await prisma.user.findUnique({
         where: { id: uid },
         select: { email: true },
       });
-      where.OR = [
+      const userOr: Prisma.StudioLogWhereInput[] = [
         { userId: uid },
         ...(u?.email
           ? [
@@ -40,12 +54,21 @@ export async function GET(req: Request) {
             ]
           : []),
       ];
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+        { OR: userOr },
+      ];
     } else if (user && user.trim()) {
       const term = user.trim();
-      where.OR = [
-        { userId: term },
-        { userEmail: { contains: term, mode: 'insensitive' } },
-        { flowEmail: { contains: term, mode: 'insensitive' } },
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+        {
+          OR: [
+            { userId: term },
+            { userEmail: { contains: term, mode: 'insensitive' } },
+            { flowEmail: { contains: term, mode: 'insensitive' } },
+          ],
+        },
       ];
     }
     if (q && q.trim()) {

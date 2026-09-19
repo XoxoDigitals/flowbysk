@@ -6,6 +6,7 @@ import {
   ListOrdered,
   RefreshCw,
   RotateCcw,
+  ScrollText,
   ShieldAlert,
 } from 'lucide-react';
 import {
@@ -16,6 +17,7 @@ import {
   parseJobStatusFilter,
 } from '@/lib/analytics-range';
 import { formatModelDisplayName } from '@/lib/modelLabels';
+import { JobStudioLogsModal, type JobLogsTarget } from '@/components/admin/JobStudioLogsModal';
 
 interface GlobalJob {
   id: string;
@@ -29,7 +31,9 @@ interface GlobalJob {
   outputMediaUrl: string | null;
   submittedAt: string;
   expiresAt: string;
-  user: { email: string; name: string };
+  tool?: string;
+  runId?: string;
+  user: { id?: string; email: string; name: string };
   project: { name: string };
   providerAccount: { label: string } | null;
 }
@@ -63,6 +67,7 @@ function AdminJobsInner() {
 
   const [jobs, setJobs] = useState<GlobalJob[]>([]);
   const [loading, setLoading] = useState(true);
+  const [jobLogsTarget, setJobLogsTarget] = useState<JobLogsTarget | null>(null);
 
   const setFilters = (nextRange: AnalyticsRange, nextStatus: JobStatusFilter) => {
     const q = new URLSearchParams();
@@ -174,6 +179,7 @@ function AdminJobsInner() {
                 <th className={thClass}>Job / Time</th>
                 <th className={thClass}>Customer</th>
                 <th className={thClass}>Model & Wallet</th>
+                <th className={thClass}>Tool</th>
                 <th className={thClass}>Status</th>
                 <th className={thClass}>Provider</th>
                 <th className={thClass}>Prompt</th>
@@ -183,18 +189,21 @@ function AdminJobsInner() {
             <tbody>
               {loading && jobs.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="border-t border-[var(--line)] px-4 py-10 text-center text-[var(--ink3)]">
+                  <td colSpan={8} className="border-t border-[var(--line)] px-4 py-10 text-center text-[var(--ink3)]">
                     Loading jobs…
                   </td>
                 </tr>
               ) : jobs.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="border-t border-[var(--line)] px-4 py-10 text-center text-[var(--ink3)]">
+                  <td colSpan={8} className="border-t border-[var(--line)] px-4 py-10 text-center text-[var(--ink3)]">
                     No jobs for this range / status.
                   </td>
                 </tr>
               ) : (
-                jobs.map((job) => (
+                jobs.map((job) => {
+                  const tool = job.tool || 'studio';
+                  const runId = job.runId || job.id;
+                  return (
                   <tr key={job.id} className="border-t border-[var(--line)] hover:bg-[var(--bg2)]/50">
                     <td className="whitespace-nowrap px-4 py-3">
                       <div className="font-mono font-semibold text-[var(--ink)]">{job.id.slice(0, 8)}…</div>
@@ -221,6 +230,11 @@ function AdminJobsInner() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
+                      <span className="rounded-md bg-[var(--bg3)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--ink2)]">
+                        {tool}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
                       <span className={`rounded-md px-2 py-0.5 text-[10px] font-semibold ${statusBadge(job.status)}`}>
                         {job.status}
                       </span>
@@ -233,6 +247,23 @@ function AdminJobsInner() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          title="View studio logs"
+                          className="inline-flex items-center justify-center rounded-md border border-[var(--line)] bg-[var(--bg2)] p-1.5 text-[var(--ink2)] hover:border-[var(--a1)] hover:text-[var(--a1)]"
+                          onClick={() =>
+                            setJobLogsTarget({
+                              jobId: job.id,
+                              runId,
+                              prompt: job.prompt,
+                              status: job.status,
+                              tool,
+                              userId: job.user?.id || null,
+                            })
+                          }
+                        >
+                          <ScrollText className="h-3.5 w-3.5" />
+                        </button>
                         {job.status === 'FAILED' && (
                           <button
                             type="button"
@@ -258,12 +289,15 @@ function AdminJobsInner() {
                       </div>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
         </div>
       </div>
+
+      <JobStudioLogsModal target={jobLogsTarget} onClose={() => setJobLogsTarget(null)} />
     </div>
   );
 }

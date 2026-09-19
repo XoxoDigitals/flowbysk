@@ -8,6 +8,7 @@ import {
   parseJobStatusFilter,
   rangeToDateBounds,
 } from '@/lib/analytics-range';
+import { displayToolChip, jobRunId } from '@/lib/adminAnalytics';
 
 export async function GET(req: Request) {
   try {
@@ -44,7 +45,7 @@ export async function GET(req: Request) {
       orderBy: { createdAt: 'desc' },
       take: 200,
       include: {
-        user: { select: { email: true, name: true } },
+        user: { select: { id: true, email: true, name: true } },
         project: { select: { name: true } },
         providerAccount: { select: { label: true } },
       },
@@ -56,7 +57,11 @@ export async function GET(req: Request) {
       status: statusFilter,
       from: start.toISOString(),
       to: end.toISOString(),
-      jobs,
+      jobs: jobs.map((j) => ({
+        ...j,
+        tool: displayToolChip(j.parameters),
+        runId: jobRunId(j),
+      })),
     });
   } catch (error: any) {
     return NextResponse.json(
