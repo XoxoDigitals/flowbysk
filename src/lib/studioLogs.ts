@@ -547,9 +547,17 @@ export function deriveRunStatus(
 
 export function extractRunTitle(message: string): string {
   const m = String(message || '');
-  // Submit/polling lines are follow-ups — never use them as the run title
+  // Submit/polling/dispatch lines are follow-ups — never use them as the run title
   if (isSubmitOnlyMessage(m)) {
     return promptFromSubmitMessage(m);
+  }
+  if (/\bdispatching to Flow\b/i.test(m)) {
+    const parts = m.split(/\s+[—–-]\s+/);
+    if (parts.length >= 2) {
+      const last = parts[parts.length - 1].trim();
+      if (last && !/^project\s+/i.test(last)) return last.slice(0, 140);
+    }
+    return '';
   }
   if (/\bcomplete\b|\bfailed\b/i.test(m) && /asset\(s\)|^\s*T2[IV]\s+complete/i.test(m)) {
     return '';
@@ -563,6 +571,7 @@ export function extractRunTitle(message: string): string {
     /Ingredient mode\s*\([^)]*\):\s*(.+)$/i,
     /Ingredients?\s+(?:video|image):\s*(.+)$/i,
     /(?:I2I|Remix)[^:]*:\s*(.+)$/i,
+    /(?:I2V|T2V|Video|Image|I2I)\s+complete(?:\s*\([^)]*\))?:\s*(.+)$/i,
     /T2V\s+generate[^:]*:\s*(.+)$/i,
   ];
   for (const re of patterns) {
@@ -575,6 +584,7 @@ export function extractRunTitle(message: string): string {
     }
   }
   if (/^[TI]2[IV]\s+submitted\b/i.test(m)) return '';
+  if (/\bdispatching to Flow\b/i.test(m)) return '';
   return m.slice(0, 140) || 'Studio event';
 }
 

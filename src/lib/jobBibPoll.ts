@@ -62,6 +62,8 @@ async function logJobTerminal(
     prompt: string | null;
     parameters: unknown;
     providerAccountId?: string | null;
+    modelKey?: string | null;
+    startedAt?: Date | null;
   },
   kind: 'complete' | 'failed',
   detail?: string
@@ -69,42 +71,16 @@ async function logJobTerminal(
   try {
     const params = (job.parameters as Record<string, any>) || {};
     const runId = String(params.run_id || job.id);
-    const promptSlice = String(job.prompt || '').trim().slice(0, 80);
-    const errSlice = String(detail || 'Generation failed').replace(/\s+/g, ' ').trim().slice(0, 120);
-    const message =
-      kind === 'failed'
-        ? promptSlice
-          ? `Video failed: ${errSlice} — ${promptSlice}`
-          : `Video failed: ${errSlice}`
-        : `Video complete${detail ? ` (${detail})` : ''}: ${(job.prompt || 'video').slice(0, 80)}`;
-
-    const existing = await prisma.studioLog.findFirst({
-      where: {
-        runId,
-        message: {
-          startsWith: kind === 'failed' ? 'Video failed' : 'Video complete',
-        },
-        createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
-      },
-      select: { id: true },
-    });
-    if (existing) {
-      if (kind === 'failed' && job.providerAccountId) {
-        const provider = await prisma.providerAccount.findUnique({
-          where: { id: job.providerAccountId },
-          select: { accountEmail: true },
-        });
-        if (provider?.accountEmail) {
-          await prisma.studioLog
-            .updateMany({
-              where: { id: existing.id, flowEmail: null },
-              data: { flowEmail: provider.accountEmail },
-            })
-            .catch(() => 0);
-        }
-      }
-      return;
-    }
+    const isI2V = !!(
+      params.staged_id ||
+      params.image_id ||
+      params.first_frame_id ||
+      params.last_frame_id ||
+      params.first_frame_staged_id ||
+      params.last_frame_staged_id ||
+      params.frame_mode ||
+      /i2v|bulki2v/i.test(String(params.source || ''))
+    );
 
     const provider = job.providerAccountId
       ? await prisma.providerAccount.findUnique({
@@ -117,8 +93,59 @@ async function logJobTerminal(
       select: { email: true },
     });
 
+    if (kind === 'complete') {
+      const { logGenerationComplete } = await import('@/lib/studioLogs');
+      const started = job.startedAt ? new Date(job.startedAt).getTime() : 0;
+      const durationSec =
+        detail && /^\d+(?:\.\d+)?s$/i.test(String(detail).trim())
+          ? Number(String(detail).replace(/s$/i, ''))
+          : started > 0
+            ? (Date.now() - started) / 1000
+            : undefined;
+      await logGenerationComplete({
+        runId,
+        userId: job.userId,
+        userEmail: user?.email || null,
+        flowEmail: provider?.accountEmail || null,
+        kind: isI2V ? 'i2v' : 't2v',
+        prompt: job.prompt,
+        durationSec,
+      });
+      return;
+    }
+
+    const promptSlice = String(job.prompt || '').trim().slice(0, 80);
+    const errSlice = String(detail || 'Generation failed').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const failLabel = isI2V ? 'I2V' : 'Video';
+    const message = promptSlice
+      ? `${failLabel} failed: ${errSlice} — ${promptSlice}`
+      : `${failLabel} failed: ${errSlice}`;
+
+    const existing = await prisma.studioLog.findFirst({
+      where: {
+        runId,
+        OR: [
+          { message: { startsWith: 'Video failed' } },
+          { message: { startsWith: 'I2V failed' } },
+        ],
+        createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      if (provider?.accountEmail) {
+        await prisma.studioLog
+          .updateMany({
+            where: { id: existing.id, flowEmail: null },
+            data: { flowEmail: provider.accountEmail },
+          })
+          .catch(() => 0);
+      }
+      return;
+    }
+
     await createStudioLog({
-      level: kind === 'failed' ? 'error' : 'info',
+      level: 'error',
       message,
       source: 'generate',
       runId,

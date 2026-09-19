@@ -8,7 +8,7 @@ import { getUserPlanLimit, countUserActiveJobs, checkAndDispatchNextJobs } from 
 import { JobStatus, WalletType } from '@prisma/client';
 import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
 import { prepareProviderWorkerSession, ensureFlowReadyMediaId } from '@/lib/providerSession';
-import { createStudioLog, logGenerationQueued } from '@/lib/studioLogs';
+import { createStudioLog, logGenerationQueued, logGenerationAccepted, logGenerationSubmitted, logGenerationComplete } from '@/lib/studioLogs';
 import { switchJobToAlternateProviderAccount } from '@/lib/uploadAccountFailover';
 import { bibGenerateVideo, ensureBibAccountReady, bibEnsureLabs } from '@/lib/bib';
 import { resolveVideoWireModel } from '@/lib/modelWire';
@@ -198,6 +198,30 @@ export async function POST(req: Request) {
       },
     });
 
+    const runId = String(body.run_id || job.id);
+    const genStartedAt = Date.now();
+    try {
+      await logGenerationAccepted({
+        runId,
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider.accountEmail || null,
+        prompt: job.prompt,
+        source: body.source || 'i2v',
+        kind: 'image-to-video',
+      });
+      await logGenerationSubmitted({
+        runId,
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider.accountEmail || null,
+        kind: 'i2v',
+        prompt: job.prompt,
+      });
+    } catch {
+      /* ignore studio log */
+    }
+
     try {
       const sessionPrep = await prepareProviderWorkerSession(provider, session.userId);
       let liveCookies = sessionPrep.cookies || provider?.cookies || undefined;
@@ -270,12 +294,12 @@ export async function POST(req: Request) {
       console.info(
         `[i2v] BiB FE ${model} → wire ${wireModel} project=${targetProjectId || 'none'} mode=${useR2v ? 'r2v' : 'i2v'}`
       );
-      if (body.run_id) {
+      if (body.run_id || job.id) {
         createStudioLog({
           level: 'info',
           source: 'generate',
-          message: `I2V dispatching to Flow via BiB (project ${String(targetProjectId || 'default').slice(0, 8)}…)`,
-          runId: String(body.run_id),
+          message: `I2V dispatching to Flow via BiB (project ${String(targetProjectId || 'default').slice(0, 8)}…) — ${String(job.prompt || '').slice(0, 60)}`,
+          runId: String(body.run_id || job.id),
           userId: session.userId,
           userEmail: session.email,
           flowEmail: provider.accountEmail || null,
@@ -549,6 +573,16 @@ export async function POST(req: Request) {
 
         await settleCredits(session.userId, pricing.walletType, pricing.price, job.id);
         checkAndDispatchNextJobs(session.userId).catch(console.error);
+
+        await logGenerationComplete({
+          runId,
+          userId: session.userId,
+          userEmail: session.email,
+          flowEmail: provider.accountEmail || null,
+          kind: 'i2v',
+          prompt: job.prompt,
+          durationSec: (Date.now() - genStartedAt) / 1000,
+        }).catch(() => 0);
 
         return NextResponse.json({
           success: true,

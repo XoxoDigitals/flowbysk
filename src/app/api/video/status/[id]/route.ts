@@ -17,6 +17,8 @@ async function logJobTerminal(
     userId: string;
     prompt: string | null;
     parameters: unknown;
+    providerAccountId?: string | null;
+    startedAt?: Date | null;
   },
   kind: 'complete' | 'failed',
   detail?: string
@@ -24,18 +26,59 @@ async function logJobTerminal(
   try {
     const params = (job.parameters as Record<string, any>) || {};
     const runId = String(params.run_id || job.id);
-    const message =
-      kind === 'failed'
-        ? `Video failed: ${(detail || 'Generation failed').slice(0, 200)}`
-        : `Video complete${detail ? ` (${detail})` : ''}: ${(job.prompt || 'video').slice(0, 80)}`;
+    const isI2V = !!(
+      params.staged_id ||
+      params.image_id ||
+      params.first_frame_id ||
+      params.last_frame_id ||
+      params.first_frame_staged_id ||
+      params.last_frame_staged_id ||
+      params.frame_mode ||
+      /i2v|bulki2v/i.test(String(params.source || ''))
+    );
+
+    if (kind === 'complete') {
+      const { logGenerationComplete } = await import('@/lib/studioLogs');
+      const provider = job.providerAccountId
+        ? await prisma.providerAccount.findUnique({
+            where: { id: job.providerAccountId },
+            select: { accountEmail: true },
+          })
+        : null;
+      const user = await prisma.user.findUnique({
+        where: { id: job.userId },
+        select: { email: true },
+      });
+      const started = job.startedAt ? new Date(job.startedAt).getTime() : 0;
+      const durationSec =
+        detail && /^\d+(?:\.\d+)?s$/i.test(String(detail).trim())
+          ? Number(String(detail).replace(/s$/i, ''))
+          : started > 0
+            ? (Date.now() - started) / 1000
+            : undefined;
+      await logGenerationComplete({
+        runId,
+        userId: job.userId,
+        userEmail: user?.email || null,
+        flowEmail: provider?.accountEmail || null,
+        kind: isI2V ? 'i2v' : 't2v',
+        prompt: job.prompt,
+        durationSec,
+      });
+      return;
+    }
+
+    const failLabel = isI2V ? 'I2V' : 'Video';
+    const message = `${failLabel} failed: ${(detail || 'Generation failed').slice(0, 200)}`;
 
     // One terminal event per run (overlapping status polls)
     const existing = await prisma.studioLog.findFirst({
       where: {
         runId,
-        message: {
-          startsWith: kind === 'failed' ? 'Video failed' : 'Video complete',
-        },
+        OR: [
+          { message: { startsWith: 'Video failed' } },
+          { message: { startsWith: 'I2V failed' } },
+        ],
         createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
       },
       select: { id: true },
@@ -43,7 +86,7 @@ async function logJobTerminal(
     if (existing) return;
 
     await createStudioLog({
-      level: kind === 'failed' ? 'error' : 'info',
+      level: 'error',
       message,
       source: 'generate',
       runId,
