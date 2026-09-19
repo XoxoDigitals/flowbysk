@@ -86,6 +86,9 @@ export default function AdminSettingsPage() {
   const [noticeSeverity, setNoticeSeverity] = useState<'INFO' | 'WARNING' | 'SUCCESS'>('INFO');
   const [savingNotice, setSavingNotice] = useState(false);
   const [socialLinks, setSocialLinks] = useState<SocialLinks>({});
+  const [savingSocial, setSavingSocial] = useState(false);
+  const [socialMsg, setSocialMsg] = useState('');
+  const [socialErr, setSocialErr] = useState('');
 
   const [tools, setTools] = useState<ToolMap>({});
   const [toolLabels, setToolLabels] = useState<Record<string, string>>({});
@@ -293,6 +296,31 @@ export default function AdminSettingsPage() {
       setProxyErr(err.message || 'Check failed');
     } finally {
       setCheckingProxyId(null);
+    }
+  };
+
+  const onSaveSocialLinks = async (e: FormEvent) => {
+    e.preventDefault();
+    setSavingSocial(true);
+    setSocialMsg('');
+    setSocialErr('');
+    try {
+      const res = await fetch('/api/admin/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ socialLinks }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+      if (data?.settings?.socialLinks && typeof data.settings.socialLinks === 'object') {
+        setSocialLinks(data.settings.socialLinks);
+      }
+      setSocialMsg('Social links saved — icons show on the user dashboard announcement.');
+      await refreshSiteSettings();
+    } catch (err: any) {
+      setSocialErr(err.message || 'Save failed');
+    } finally {
+      setSavingSocial(false);
     }
   };
 
