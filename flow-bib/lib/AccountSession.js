@@ -294,8 +294,13 @@ class AccountSession {
       this._mediaGuardInstalled = false;
       this.allowMedia = true; // load Flow fully first — block media only after WIZ is ready
       await this._installBearerSniff();
+      // Prefer landing directly on a known project so we don't stick on marketing home
+      const launchUrl =
+        Array.isArray(this.projectIds) && this.projectIds[0]
+          ? `https://flow.google.com/project/${this.projectIds[0]}`
+          : START_URL;
       await this.page
-        .goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 45000 })
+        .goto(launchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 })
         .catch((e) => console.warn(`[${this.accountId}] nav:`, e.message));
       await this.startScreencast().catch((e) =>
         console.warn(`[${this.accountId}] screencast:`, e?.message || e)
@@ -306,7 +311,7 @@ class AccountSession {
       );
 
       const st = await this.refreshAuthStatus();
-      // Only park + WIZ when already signed in — never yank a NEEDS_LOGIN session to marketing
+      // Only park + WIZ when already signed in — never yank a Google login session
       if (st.status !== 'NEEDS_LOGIN' && !(await this.isOnLoginFlow())) {
         await this.parkWarmProject().catch((e) =>
           console.warn(`[${this.accountId}] warm park:`, e.message || e)
@@ -388,12 +393,13 @@ class AccountSession {
     });
   }
 
-  /** True when admin is mid Google login / OAuth — never auto-navigate away. */
+  /** True when on Google login / OAuth — never auto-navigate away.
+   *  Bare https://flow.google.com/ is the app home, NOT login — we must be allowed
+   *  to navigate from home → /project/{id}. */
   isLoginOrAuthUrl(href) {
     const u = String(href || '');
-    return /accounts\.google\.com|\/signin|oauth|ServiceLogin|Identifier|challenge|\/about\b|flow\.google\.com\/?\s*$/i.test(
-      u
-    ) && !/\/project\/[0-9a-f-]{36}/i.test(u);
+    if (/\/project\/[0-9a-f-]{36}/i.test(u)) return false;
+    return /accounts\.google\.com|\/signin|oauth|ServiceLogin|Identifier|challenge/i.test(u);
   }
 
   async isOnLoginFlow() {
@@ -403,14 +409,6 @@ class AccountSession {
       // Real Google login / OAuth only — pause auto-nav so admin can finish sign-in
       if (/accounts\.google\.com|\/signin|oauth|ServiceLogin|Identifier|challenge/i.test(href)) {
         return true;
-      }
-      // Dead / flaky proxy on marketing landing is NOT login — do not pause as OAuth
-      if (this.isEgressUnhealthy()) {
-        return false;
-      }
-      // Marketing landing without project: only treat as login if we already marked NEEDS_LOGIN
-      if (/flow\.google\.com\/?(?:about)?\/?$/i.test(href) || /\/about\b/i.test(href)) {
-        return this.status === 'NEEDS_LOGIN';
       }
       return false;
     } catch {
@@ -429,21 +427,32 @@ class AccountSession {
       console.warn(`[${this.accountId}] skip project nav — login/OAuth in progress`);
       return null;
     }
-    const ctx = await this.readContext();
-    if (this.isLoginOrAuthUrl(ctx.href) && !projectFromHref(ctx.href)) {
-      console.warn(`[${this.accountId}] skip project nav — on auth/landing: ${String(ctx.href).slice(0, 80)}`);
-      return null;
+    let ctx;
+    try {
+      ctx = await this.readContext();
+    } catch (e) {
+      console.warn(`[${this.accountId}] ensureOnAnyProjectPage read:`, e.message || e);
+      ctx = { href: this.page.url() || '' };
     }
     const onProject = projectFromHref(ctx.href);
     if (onProject) return onProject;
+
     const warm =
       String(preferredProjectId || '').trim() ||
       this.projectIds[0] ||
       null;
-    if (!warm) return null;
+    if (!warm) {
+      console.warn(`[${this.accountId}] ensureOnAnyProjectPage: no projectId (on ${String(ctx.href).slice(0, 60)})`);
+      return null;
+    }
+
+    // Home / about / any non-project URL → open the warm project (do NOT skip)
+    console.log(
+      `[${this.accountId}] open project ${warm.slice(0, 8)}… (from ${String(ctx.href || '').slice(0, 64)})`
+    );
     await this.navigate(`https://flow.google.com/project/${warm}`);
     await sleep(800);
-    return projectFromHref((await this.readContext()).href) || warm;
+    return projectFromHref((await this.readContext().catch(() => ({ href: '' }))).href) || warm;
   }
 
   /** Best-effort: leave Chrome parked on projectIds[0] when not on a project. */
@@ -807,10 +816,10 @@ class AccountSession {
         return { ok: true, at: ctx.at, href: ctx.href };
       }
 
-      // On accounts.google / signin — never navigate away
+      // On accounts.google / signin — never navigate away (bare flow.google.com/ is OK to leave)
       if (this.isLoginOrAuthUrl(ctx?.href) && !projectFromHref(ctx?.href || '')) {
         console.warn(
-          `[${this.accountId}] ensureWizAt paused — auth page ${String(ctx.href).slice(0, 80)}`
+          `[${this.accountId}] ensureWizAt paused — Google auth page ${String(ctx.href).slice(0, 80)}`
         );
         return { ok: false, at: '', reason: 'login_in_progress', paused: true, href: ctx.href };
       }

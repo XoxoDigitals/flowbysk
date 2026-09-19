@@ -463,7 +463,7 @@ AccountSession.onEmptyMintStorm = async (accountId, detail = {}) => {
     }
     return;
   }
-  if (now - emptyMintHardRestartAt < EMPTY_MINT_HARD_RESTART_COOLDOWN_MS && !detail.final) {
+  if (now - emptyMintHardRestartAt < EMPTY_MINT_HARD_RESTART_COOLDOWN_MS) {
     console.warn(
       `[empty-mint] skip hard restart (cooldown ${Math.round(
         (EMPTY_MINT_HARD_RESTART_COOLDOWN_MS - (now - emptyMintHardRestartAt)) / 1000
@@ -493,11 +493,15 @@ AccountSession.onEmptyMintStorm = async (accountId, detail = {}) => {
       if (!s) continue;
       try {
         await s.launch();
-        // Land on a project page so grecaptcha is available
-        if (Array.isArray(s.projectIds) && s.projectIds[0]) {
-          await s.ensureOnAnyProjectPage(s.projectIds[0]).catch(() => {});
+        // Force project page (home is not enough for grecaptcha / upload)
+        const warm = Array.isArray(s.projectIds) && s.projectIds[0] ? s.projectIds[0] : null;
+        if (warm) {
+          await s.ensureOnAnyProjectPage(warm).catch(() => {});
+          await s.ensureWizAt(warm, { attempts: 2 }).catch(() => {});
         }
-        console.log(`[empty-mint] relaunched ${id.slice(0, 8)} status=${s.status}`);
+        console.log(
+          `[empty-mint] relaunched ${id.slice(0, 8)} status=${s.status} url=${String(s.page?.url?.() || '').slice(0, 64)}`
+        );
       } catch (e) {
         console.warn(`[empty-mint] relaunch ${id.slice(0, 8)}:`, e.message || e);
       }
