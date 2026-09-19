@@ -55,6 +55,8 @@ export default function ResellerDashboardPage() {
     displayPrice: 0,
     days: 30,
   });
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkRemoving, setBulkRemoving] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -68,6 +70,7 @@ export default function ResellerDashboardPage() {
       if (!usersRes.ok) throw new Error(data.error || 'Forbidden');
       setSeats(data.seats || []);
       setUsers(data.users || []);
+      setSelectedIds(new Set());
       if (!form.planId && data.seats?.[0]) {
         setForm((f) => ({ ...f, planId: data.seats[0].planId }));
       }
@@ -118,6 +121,57 @@ export default function ResellerDashboardPage() {
       return;
     }
     await load();
+  };
+
+  const allSelected = users.length > 0 && users.every((u) => selectedIds.has(u.assignmentId));
+
+  const toggleSelect = (assignmentId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(assignmentId)) next.delete(assignmentId);
+      else next.add(assignmentId);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelectedIds(new Set());
+      return;
+    }
+    setSelectedIds(new Set(users.map((u) => u.assignmentId)));
+  };
+
+  const onBulkRemove = async () => {
+    const ids = [...selectedIds];
+    if (!ids.length) return;
+    if (
+      !confirm(
+        `Remove ${ids.length} user(s)? Same-day removes restore seats and will not count for your admin.`
+      )
+    ) {
+      return;
+    }
+    setBulkRemoving(true);
+    try {
+      const res = await fetch('/api/reseller/users', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assignmentIds: ids }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed');
+      const failedN = Array.isArray(data.failed) ? data.failed.length : 0;
+      if (failedN > 0) {
+        alert(`Removed ${data.removed || 0}; ${failedN} failed.`);
+      }
+      setSelectedIds(new Set());
+      await load();
+    } catch (err: any) {
+      alert(err.message || 'Failed');
+    } finally {
+      setBulkRemoving(false);
+    }
   };
 
   const openEdit = (u: Row) => {
@@ -232,6 +286,17 @@ export default function ResellerDashboardPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {selectedIds.size > 0 && (
+            <button
+              type="button"
+              className="inline-flex items-center gap-1.5 rounded-[11px] border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-500 transition hover:bg-rose-500/20 disabled:opacity-50"
+              disabled={bulkRemoving}
+              onClick={onBulkRemove}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              {bulkRemoving ? 'Removing…' : `Remove selected (${selectedIds.size})`}
+            </button>
+          )}
           <button type="button" className="btn-secondary !text-[13px]" onClick={() => setShowProfile(true)}>
             <User className="h-3.5 w-3.5" />
             Profile
@@ -267,6 +332,16 @@ export default function ResellerDashboardPage() {
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--line)]">
+                  <th className="w-10 px-4 py-3">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={toggleSelectAll}
+                      disabled={users.length === 0}
+                      aria-label="Select all users"
+                      className="h-3.5 w-3.5 accent-[var(--a1)]"
+                    />
+                  </th>
                   {['USER', 'PLAN', 'PRICE', 'ACTIONS'].map((h) => (
                     <th key={h} className="px-4 py-3 font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">
                       {h}
@@ -277,13 +352,22 @@ export default function ResellerDashboardPage() {
               <tbody>
                 {users.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="px-4 py-8 text-center text-[var(--ink3)]">
+                    <td colSpan={5} className="px-4 py-8 text-center text-[var(--ink3)]">
                       No users yet
                     </td>
                   </tr>
                 ) : (
                   users.map((u) => (
                     <tr key={u.assignmentId} className="border-t border-[var(--line)]">
+                      <td className="px-4 py-3">
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(u.assignmentId)}
+                          onChange={() => toggleSelect(u.assignmentId)}
+                          aria-label={`Select ${u.email}`}
+                          className="h-3.5 w-3.5 accent-[var(--a1)]"
+                        />
+                      </td>
                       <td className="px-4 py-3">
                         <div className="font-medium">{u.name || u.email}</div>
                         <div className="font-mono text-[11px] text-[var(--ink3)]">{u.email}</div>

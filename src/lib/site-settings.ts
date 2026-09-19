@@ -9,6 +9,7 @@ import {
 } from './egressProxy';
 import { randomUUID } from 'crypto';
 import { readSiteRuntime, writeSiteRuntimePatch } from './siteRuntime';
+import { normalizeSocialLinks, type SocialLinks } from './socialLinks';
 
 export type PublicSiteSettings = {
   siteName: string;
@@ -18,6 +19,7 @@ export type PublicSiteSettings = {
   ticketSystemEnabled: boolean;
   contactPageEnabled: boolean;
   maintenanceMode: boolean;
+  socialLinks: SocialLinks;
 };
 
 /** Admin-only fields (not exposed on public site-settings API). */
@@ -38,6 +40,7 @@ const DEFAULTS: PublicSiteSettings = {
   ticketSystemEnabled: true,
   contactPageEnabled: true,
   maintenanceMode: false,
+  socialLinks: {},
 };
 
 function mapPublic(row: {
@@ -48,6 +51,7 @@ function mapPublic(row: {
   ticketSystemEnabled: boolean;
   contactPageEnabled?: boolean;
   maintenanceMode?: boolean;
+  socialLinks?: unknown;
 }): PublicSiteSettings {
   const rt = readSiteRuntime();
   return {
@@ -59,6 +63,7 @@ function mapPublic(row: {
     contactPageEnabled: row.contactPageEnabled !== false,
     maintenanceMode:
       typeof row.maintenanceMode === 'boolean' ? row.maintenanceMode : rt.maintenanceMode,
+    socialLinks: normalizeSocialLinks(row.socialLinks),
   };
 }
 
@@ -87,6 +92,7 @@ function mapAdmin(row: {
   ticketSystemEnabled: boolean;
   contactPageEnabled?: boolean;
   maintenanceMode?: boolean;
+  socialLinks?: unknown;
   proxyAutoRotateEnabled?: boolean;
   proxyAutoRotateMinutes?: number;
   egressProxyUrl?: string | null;
@@ -185,8 +191,11 @@ export async function updateSiteSettings(data: {
   proxyAutoRotateMinutes?: number;
   egressProxyUrl?: string | null;
   egressProxies?: EgressProxyEntry[] | unknown;
+  socialLinks?: SocialLinks | unknown;
 }): Promise<AdminSiteSettings> {
   let proxies: EgressProxyEntry[] | undefined;
+  const socialLinks =
+    data.socialLinks !== undefined ? normalizeSocialLinks(data.socialLinks) : undefined;
 
   if (data.egressProxies !== undefined) {
     proxies = normalizeEgressProxyList(data.egressProxies);
@@ -245,6 +254,7 @@ export async function updateSiteSettings(data: {
         proxyAutoRotateMinutes: data.proxyAutoRotateMinutes ?? 60,
         egressProxyUrl: active ?? null,
         egressProxies: proxies ?? [],
+        socialLinks: socialLinks ?? {},
       },
       update: {
         ...(data.siteName !== undefined ? { siteName: data.siteName.trim() || DEFAULTS.siteName } : {}),
@@ -271,6 +281,7 @@ export async function updateSiteSettings(data: {
         ...(proxies !== undefined
           ? { egressProxies: proxies, egressProxyUrl: active }
           : {}),
+        ...(socialLinks !== undefined ? { socialLinks } : {}),
       },
     });
     return mapAdmin(row as any);
@@ -281,6 +292,7 @@ export async function updateSiteSettings(data: {
     const rt = readSiteRuntime();
     return {
       ...publicPart,
+      ...(socialLinks !== undefined ? { socialLinks } : {}),
       egressProxies: proxies ?? mirror.proxies,
       egressProxyUrl: active ?? mirror.url,
       proxyAutoRotateEnabled: rt.proxyAutoRotateEnabled,

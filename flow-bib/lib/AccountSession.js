@@ -117,9 +117,24 @@ class AccountSession {
     this._proxyFailStreak = 0;
     this._proxyCheckTick = 0;
     this._proxyRecovering = false;
+    /** Active upload/generate/status ops — defer soft proxy relaunch while > 0. */
+    this._inflightOps = 0;
     /** When false (default), Chrome aborts Image/Media/Font — saves residential proxy GB. */
     this.allowMedia = false;
     this._mediaGuardInstalled = false;
+  }
+
+  beginOp() {
+    this._inflightOps = (this._inflightOps || 0) + 1;
+  }
+
+  endOp() {
+    this._inflightOps = Math.max(0, (this._inflightOps || 0) - 1);
+  }
+
+  /** True when egress looks dead (tunnel / no exit IP). */
+  isEgressUnhealthy() {
+    return !!(this.egressError || (this._proxyFailStreak || 0) > 0);
   }
 
   /** Safely update profileDir post-construction (e.g. re-launch with a new opts.profileDir). */
@@ -385,14 +400,19 @@ class AccountSession {
     if (!this.page) return false;
     try {
       const href = this.page.url() || '';
+      // Real Google login / OAuth only — pause auto-nav so admin can finish sign-in
       if (/accounts\.google\.com|\/signin|oauth|ServiceLogin|Identifier|challenge/i.test(href)) {
         return true;
       }
-      // Marketing landing without project = treat as login-needed; don't hijack
-      if (/flow\.google\.com\/?(?:about)?\/?$/i.test(href) || /\/about\b/i.test(href)) {
-        if (this.status === 'NEEDS_LOGIN') return true;
+      // Dead / flaky proxy on marketing landing is NOT login — do not pause as OAuth
+      if (this.isEgressUnhealthy()) {
+        return false;
       }
-      return this.status === 'NEEDS_LOGIN';
+      // Marketing landing without project: only treat as login if we already marked NEEDS_LOGIN
+      if (/flow\.google\.com\/?(?:about)?\/?$/i.test(href) || /\/about\b/i.test(href)) {
+        return this.status === 'NEEDS_LOGIN';
+      }
+      return false;
     } catch {
       return false;
     }
@@ -485,11 +505,13 @@ class AccountSession {
     });
 
     const ensureProjectPage = async () => {
+      if (!this.page) throw new Error('Browser not launched');
       // Any project page is enough for grecaptcha; do not hop to a different sticky id.
       return this.ensureOnAnyProjectPage(this.projectIds[0] || null);
     };
 
     const waitForSettle = async () => {
+      if (!this.page) return;
       try {
         await this.page.waitForFunction(() => document.readyState === 'complete', {
           timeout: 8000,
@@ -503,7 +525,9 @@ class AccountSession {
     try {
       for (let attempt = 1; attempt <= 4; attempt++) {
         try {
+          if (!this.page) throw new Error('Browser not launched');
           await ensureProjectPage();
+          if (!this.page) throw new Error('Browser not launched');
           try {
             await this.page.waitForFunction(
               () =>
@@ -515,18 +539,22 @@ class AccountSession {
               { timeout: 10000 }
             );
           } catch {
+            if (!this.page) throw new Error('Browser not launched');
             await ensureProjectPage();
             const stillMissing = !(await this.readContext()
               .then((c) => projectFromHref(c.href))
               .catch(() => null));
             if (stillMissing) {
+              if (!this.page) throw new Error('Browser not launched');
               await this.page.reload({ waitUntil: 'domcontentloaded' });
             }
             await sleep(1500);
           }
 
+          if (!this.page) throw new Error('Browser not launched');
           await this.humanizeBeforeMint();
 
+          if (!this.page) throw new Error('Browser not launched');
           const token = await this.page.evaluate(
             async (key, act) => {
               await new Promise((resolve) => {
@@ -571,13 +599,16 @@ class AccountSession {
         } catch (e) {
           const msg = e && e.message ? e.message : String(e);
           console.warn(`[${this.accountId}] reCAPTCHA mint error attempt ${attempt}:`, msg);
+          if (/Browser not launched/i.test(msg)) {
+            throw e;
+          }
           if (/Execution context was destroyed|navigation|Target closed/i.test(msg)) {
             await waitForSettle();
           }
         }
         await sleep(800 * attempt);
       }
-      return '';
+      return null;
     } finally {
       this._mintLock = null;
       if (typeof release === 'function') release();
@@ -1528,7 +1559,17 @@ class AccountSession {
         // after proxy relaunch / on non-project pages. Do NOT flap to NEEDS_LOGIN.
         if (this.status !== 'STARTING') this.status = 'READY';
       } else if (this.browser && (!hasWeb || signedOut)) {
-        this.status = 'NEEDS_LOGIN';
+        // Dead proxy on marketing landing looks "signed out" — keep ERROR, not NEEDS_LOGIN
+        if (this.isEgressUnhealthy() && hasWeb) {
+          this.status = 'ERROR';
+          this.lastError = this.egressError || 'Egress proxy unhealthy';
+        } else if (this.isEgressUnhealthy() && !hasWeb) {
+          // Cookies missing because tunnel failed — still prefer ERROR over login flap
+          this.status = 'ERROR';
+          this.lastError = this.egressError || 'Egress proxy unhealthy';
+        } else {
+          this.status = 'NEEDS_LOGIN';
+        }
       }
 
       const projectId = projectFromHref(ctx.href);
@@ -1995,6 +2036,18 @@ class AccountSession {
     );
     if (this._proxyFailStreak < 2) return;
 
+    // Soft: skip relaunch while upload/generate/status ops are in flight (non-hard).
+    // Hard tunnel death still relaunches — browser is useless for siblings too.
+    const hardDead = /TUNNEL|ERR_TUNNEL|ECONNREFUSED|proxy.*fail|no exit/i.test(
+      String(this.egressError || '')
+    );
+    if ((this._inflightOps || 0) > 0 && !hardDead) {
+      console.warn(
+        `[${this.accountId}] defer dead-proxy relaunch — ${this._inflightOps} inflight op(s)`
+      );
+      return;
+    }
+
     this._proxyRecovering = true;
     try {
       clearEgressProxyCache();
@@ -2006,6 +2059,10 @@ class AccountSession {
       await sleep(800);
       await this.launch();
       this._proxyFailStreak = 0;
+      // Never invent NEEDS_LOGIN after recover — cookies should still be on disk
+      if (this.status === 'NEEDS_LOGIN' && !this.isEgressUnhealthy()) {
+        /* leave as-is until refreshAuthStatus */
+      }
     } catch (e) {
       console.warn(`[${this.accountId}] proxy recover failed:`, e.message || e);
     } finally {

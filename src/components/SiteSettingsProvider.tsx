@@ -18,6 +18,8 @@ const defaults: PublicSiteSettings = {
   allowSignups: true,
   ticketSystemEnabled: true,
   contactPageEnabled: true,
+  maintenanceMode: false,
+  socialLinks: {},
 };
 
 type SiteSettingsContextValue = PublicSiteSettings & {

@@ -21,6 +21,7 @@ import {
 
 function isMediaParseError(err: unknown) {
   const msg = String((err as any)?.message || err || '');
+  if (/UNUSUAL_ACTIVITY|unusual\s*activity/i.test(msg)) return false;
   return /mediaId could not be parsed|No image URL|Flow project|media not ready|not found/i.test(msg);
 }
 
@@ -347,6 +348,7 @@ export async function POST(req: Request) {
           maxAttempts: isVid ? 3 : 2,
           throttleDelaysMs: [10000, 20000],
           providerAccountId: provider.id,
+          jobId: job.id,
           onRetry: async (err) => {
             if (isVid || !isImageModelQuotaError(err) || !attemptImageModel) return;
             const prev = attemptImageModel;

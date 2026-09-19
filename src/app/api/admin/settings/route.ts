@@ -33,6 +33,7 @@ export async function PUT(req: Request) {
       maintenanceMode: body.maintenanceMode,
       proxyAutoRotateEnabled: body.proxyAutoRotateEnabled,
       proxyAutoRotateMinutes: body.proxyAutoRotateMinutes,
+      socialLinks: body.socialLinks !== undefined ? body.socialLinks : undefined,
       egressProxies: body.egressProxies !== undefined ? body.egressProxies : undefined,
       // Legacy single field only if list not sent
       egressProxyUrl:

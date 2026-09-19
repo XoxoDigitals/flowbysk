@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import {
   Users,
@@ -124,6 +124,8 @@ export default function AdminUsersPage() {
     staff: { id: string; name: string | null; email: string }[];
     resellers: { id: string; label: string }[];
   }>({ staff: [], resellers: [] });
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -142,6 +144,7 @@ export default function AdminUsersPage() {
       if (res.ok) {
         const data = await res.json();
         setUsers(data.users || []);
+        setSelectedIds(new Set());
         if (data.filters) setFilterMeta(data.filters);
       }
     } catch (err) {
@@ -273,6 +276,68 @@ export default function AdminUsersPage() {
     }
   };
 
+  const deletableUsers = useMemo(
+    () => users.filter((u) => u.role === 'CUSTOMER' || u.role === 'RESELLER'),
+    [users]
+  );
+
+  const allDeletableSelected =
+    deletableUsers.length > 0 && deletableUsers.every((u) => selectedIds.has(u.id));
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (allDeletableSelected) {
+      setSelectedIds(new Set());
+      return;
+    }
+    setSelectedIds(new Set(deletableUsers.map((u) => u.id)));
+  };
+
+  const handleBulkDelete = async () => {
+    const ids = [...selectedIds].filter((id) =>
+      deletableUsers.some((u) => u.id === id)
+    );
+    if (!ids.length) {
+      alert('Select at least one customer or reseller to delete.');
+      return;
+    }
+    const ok = window.confirm(
+      `Permanently delete ${ids.length} user(s)? This removes their projects, jobs, and wallets.`
+    );
+    if (!ok) return;
+    const typed = window.prompt(`Type DELETE to confirm deleting ${ids.length} user(s):`);
+    if (typed !== 'DELETE') return;
+
+    setBulkDeleting(true);
+    try {
+      const res = await fetch('/api/admin/users', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userIds: ids }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Bulk delete failed');
+      const failedN = Array.isArray(data.failed) ? data.failed.length : 0;
+      if (failedN > 0) {
+        alert(`Deleted ${data.deleted || 0}; ${failedN} failed.`);
+      }
+      setSelectedIds(new Set());
+      fetchUsers();
+    } catch (err: any) {
+      alert(err.message || 'Bulk delete failed');
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setCreateLoading(true);
@@ -317,6 +382,17 @@ export default function AdminUsersPage() {
         </div>
 
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+          {selectedIds.size > 0 && (
+            <button
+              type="button"
+              disabled={bulkDeleting}
+              onClick={handleBulkDelete}
+              className="inline-flex items-center gap-1.5 rounded-[11px] border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-500 transition hover:bg-rose-500/20 disabled:opacity-50"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              {bulkDeleting ? 'Deleting…' : `Delete selected (${selectedIds.size})`}
+            </button>
+          )}
           <button
             type="button"
             className="btn-secondary !text-[13px]"
@@ -447,6 +523,16 @@ export default function AdminUsersPage() {
           <table className="w-full border-collapse text-left text-xs">
             <thead>
               <tr>
+                <th className={`${thClass} w-10`}>
+                  <input
+                    type="checkbox"
+                    checked={allDeletableSelected}
+                    onChange={toggleSelectAll}
+                    disabled={deletableUsers.length === 0}
+                    aria-label="Select all deletable users"
+                    className="h-3.5 w-3.5 accent-[var(--a1)]"
+                  />
+                </th>
                 <th className={thClass}>User</th>
                 <th className={thClass}>Owner / Source</th>
                 <th className={thClass}>Plan & Slots</th>
@@ -461,19 +547,32 @@ export default function AdminUsersPage() {
             <tbody>
               {loading && users.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="border-t border-[var(--line)] px-4 py-10 text-center text-[var(--ink3)]">
+                  <td colSpan={10} className="border-t border-[var(--line)] px-4 py-10 text-center text-[var(--ink3)]">
                     Loading users…
                   </td>
                 </tr>
               ) : users.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="border-t border-[var(--line)] px-4 py-10 text-center text-[var(--ink3)]">
+                  <td colSpan={10} className="border-t border-[var(--line)] px-4 py-10 text-center text-[var(--ink3)]">
                     No users match these filters.
                   </td>
                 </tr>
               ) : (
                 users.map((u) => (
                   <tr key={u.id} className="border-t border-[var(--line)] hover:bg-[var(--bg2)]/50">
+                    <td className="px-4 py-3">
+                      {u.role === 'CUSTOMER' || u.role === 'RESELLER' ? (
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(u.id)}
+                          onChange={() => toggleSelect(u.id)}
+                          aria-label={`Select ${u.email}`}
+                          className="h-3.5 w-3.5 accent-[var(--a1)]"
+                        />
+                      ) : (
+                        <span className="inline-block w-3.5" />
+                      )}
+                    </td>
                     <td className="px-4 py-3">
                       <Link
                         href={`/admin/users/${u.id}`}

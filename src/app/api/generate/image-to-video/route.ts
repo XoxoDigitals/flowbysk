@@ -15,6 +15,7 @@ import { resolveVideoWireModel } from '@/lib/modelWire';
 
 function isMediaParseError(err: unknown) {
   const msg = String((err as any)?.message || err || '');
+  if (/UNUSUAL_ACTIVITY|unusual\s*activity/i.test(msg)) return false;
   return /mediaId could not be parsed|No image URL|Flow project|media not ready|not found/i.test(msg);
 }
 
@@ -337,7 +338,7 @@ export async function POST(req: Request) {
       try {
         bibResult = await withSystemErrorRetry(
           async () => runI2v(ingredientRefs),
-          { label: `api-i2v-bib:${job.id}`, delayMs: 2000, maxAttempts: 3, throttleDelaysMs: [10000, 20000], providerAccountId: provider.id }
+          { label: `api-i2v-bib:${job.id}`, delayMs: 2000, maxAttempts: 3, throttleDelaysMs: [10000, 20000], providerAccountId: provider.id, jobId: job.id }
         );
       } catch (err) {
         if (!isMediaRepairableError(err)) throw err;

@@ -161,6 +161,7 @@ export async function POST(req: Request) {
       const { maskProxyUrl } = await import('@/lib/egressProxy');
       const result = await rotateProxyAndRelaunchForAccount(accountId, {
         reason: 'manual account',
+        forceRelaunch: !!body.force || !!body.forceRelaunch,
       });
       const mirror = readEgressProxyMirror();
       const rt = readSiteRuntime();
@@ -168,6 +169,7 @@ export async function POST(req: Request) {
         {
           success: result.ok,
           rotated: result.rotated,
+          deferred: !!result.deferred,
           from: result.from ? maskProxyUrl(result.from) : null,
           to: result.to ? maskProxyUrl(result.to) : null,
           accountId,

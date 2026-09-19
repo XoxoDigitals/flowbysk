@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import SiteBrand from '@/components/SiteBrand';
+import AnnouncementSocialIcons from '@/components/AnnouncementSocialIcons';
 import { useTheme } from '@/components/ThemeProvider';
 import { useSiteSettings } from '@/components/SiteSettingsProvider';
 
@@ -54,7 +55,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const pathname = usePathname();
   const router = useRouter();
   const { theme, toggleTheme } = useTheme();
-  const { ticketSystemEnabled } = useSiteSettings();
+  const { ticketSystemEnabled, socialLinks } = useSiteSettings();
   const [userData, setUserData] = useState<UserData | null>(null);
   const [loading, setLoading] = useState(true);
   const [notices, setNotices] = useState<NoticeItem[]>([]);
@@ -311,15 +312,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         )}
 
         <div className="mx-auto flex w-full max-w-[1550px] flex-1 flex-col gap-4 p-4 sm:gap-5 sm:p-[clamp(16px,2.4vw,28px)]">
-          {notices.length > 0 && (
+          {(notices.length > 0 || (socialLinks && Object.keys(socialLinks).length > 0)) && (
             <div className="flex flex-col gap-2.5">
-              {notices.map((n) => {
+              {notices.map((n, idx) => {
                 const colors =
                   n.severity === 'WARNING'
                     ? { bg: 'var(--a2soft)', border: 'var(--a2)', ink: 'var(--a2)' }
                     : n.severity === 'SUCCESS'
                       ? { bg: 'var(--a1soft)', border: 'var(--a1)', ink: 'var(--a1)' }
                       : { bg: 'var(--card)', border: 'var(--line)', ink: 'var(--ink2)' };
+                const isLast = idx === notices.length - 1;
                 return (
                   <div
                     key={n.id}
@@ -330,9 +332,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       {n.title}
                     </p>
                     <p className="mt-1 text-[13px] leading-relaxed text-[var(--ink2)]">{n.body}</p>
+                    {isLast && <AnnouncementSocialIcons links={socialLinks} className="mt-3" />}
                   </div>
                 );
               })}
+              {notices.length === 0 && (
+                <div className="rounded-[14px] border border-[var(--line)] bg-[var(--card)] px-4 py-3">
+                  <AnnouncementSocialIcons links={socialLinks} />
+                </div>
+              )}
             </div>
           )}
           <div className="hidden items-center justify-between gap-3 lg:flex">

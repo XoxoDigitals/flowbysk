@@ -32,6 +32,7 @@ data/settings.json
 data/egress-proxy.json
 data/dataimpulse.json
 data/proxy-metrics.jsonl
+data/proxy-pending-relaunch.json
 data/pm2-log-history/
 data/pm2-logs/
 data/characters.json

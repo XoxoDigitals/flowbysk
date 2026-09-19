@@ -84,7 +84,7 @@ export async function ensureBibAccountReady(account: {
   let live: any = null;
   try {
     live = await bibAccountStatus(account.id);
-    if (live?.running || live?.status === 'READY' || live?.status === 'NEEDS_LOGIN') {
+    if (live?.running || live?.status === 'READY' || live?.status === 'NEEDS_LOGIN' || live?.status === 'ERROR') {
       // keep going — may still need launch if not READY
     } else {
       live = null;
@@ -93,7 +93,13 @@ export async function ensureBibAccountReady(account: {
     live = null;
   }
 
-  if (!live || (live.status !== 'READY' && live.status !== 'NEEDS_LOGIN' && !live.running)) {
+  if (
+    !live ||
+    (live.status !== 'READY' &&
+      live.status !== 'NEEDS_LOGIN' &&
+      live.status !== 'ERROR' &&
+      !live.running)
+  ) {
     live = await bibLaunchAccount(account.id, {
       maxSlots: account.maxParallelLimit || 5,
       projectIds: Array.isArray(account.flowProjectIds)
@@ -107,6 +113,13 @@ export async function ensureBibAccountReady(account: {
   try {
     const { prisma } = await import('@/lib/prisma');
     const { BrowserStatus, ProviderStatus } = await import('@prisma/client');
+    const egressBad = !!(
+      live?.egress?.error ||
+      /Egress proxy|tunnel|no exit/i.test(String(live?.lastError || ''))
+    );
+    const realLoginUrl = /accounts\.google\.com|\/signin|oauth|ServiceLogin|challenge/i.test(
+      String(live?.url || '')
+    );
     if (live?.status === 'READY' || live?.running) {
       await prisma.providerAccount.update({
         where: { id: account.id },
@@ -114,20 +127,40 @@ export async function ensureBibAccountReady(account: {
           browserStatus: BrowserStatus.READY,
           status: ProviderStatus.HEALTHY,
           bibLastSeenAt: new Date(),
-          bibLastError: null,
+          bibLastError: egressBad ? live?.egress?.error || live?.lastError || null : null,
           ...(Array.isArray(live.projectIds) && live.projectIds.length
             ? { flowProjectIds: live.projectIds }
             : {}),
           ...(live.email ? { accountEmail: live.email } : {}),
         },
       });
-    } else if (live?.status === 'NEEDS_LOGIN') {
+    } else if (live?.status === 'ERROR' || (egressBad && live?.status !== 'NEEDS_LOGIN')) {
+      // Dead proxy / ERROR — do not mark NEEDS_LOGIN
+      await prisma.providerAccount.update({
+        where: { id: account.id },
+        data: {
+          browserStatus: BrowserStatus.READY,
+          bibLastSeenAt: new Date(),
+          bibLastError: live?.lastError || live?.egress?.error || 'Egress/proxy error',
+        },
+      });
+    } else if (live?.status === 'NEEDS_LOGIN' && realLoginUrl) {
       await prisma.providerAccount.update({
         where: { id: account.id },
         data: {
           browserStatus: BrowserStatus.NEEDS_LOGIN,
           bibLastSeenAt: new Date(),
           bibLastError: live.lastError || 'BiB needs Google login',
+        },
+      });
+    } else if (live?.status === 'NEEDS_LOGIN' && !realLoginUrl) {
+      // Marketing landing misclassified as logout — keep READY if browser running
+      await prisma.providerAccount.update({
+        where: { id: account.id },
+        data: {
+          browserStatus: live?.running ? BrowserStatus.READY : BrowserStatus.NEEDS_LOGIN,
+          bibLastSeenAt: new Date(),
+          bibLastError: live.lastError || (egressBad ? 'Proxy/session issue' : null),
         },
       });
     }

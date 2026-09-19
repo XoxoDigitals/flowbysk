@@ -66,6 +66,8 @@ export type SystemRetryOptions = {
   label?: string;
   /** Provider account id — required for per-account unusual proxy rotate. */
   providerAccountId?: string;
+  /** Job id — excluded from sibling count when rotating (safe relaunch gate). */
+  jobId?: string;
   /** Called before each retry attempt (after the first failure). */
   onRetry?: (err: unknown, attempt: number) => void | Promise<void>;
   /** If returns false, skip the automatic retry (e.g. user cancelled). */
@@ -110,6 +112,29 @@ export async function withSystemErrorRetry<T>(
         throw err;
       }
 
+      // Dead egress / tunnel — rotate with deadTunnel so relaunch is allowed even with siblings
+      if (/Egress proxy dead|ERR_TUNNEL|tunnel connection failed|no exit IP/i.test(msg)) {
+        unusualHits += 1;
+        if (opts.providerAccountId && unusualHits <= 2) {
+          try {
+            const rot = await rotateProxyAndRelaunchForAccount(opts.providerAccountId, {
+              reason: 'egress proxy dead',
+              exceptJobId: opts.jobId,
+              deadTunnel: true,
+            });
+            console.warn(
+              `[system-retry] ${label}: dead-proxy rotate ${rot.rotated ? 'ok' : 'skip'} relaunched=${rot.relaunched}`
+            );
+          } catch (e) {
+            console.warn(`[system-retry] ${label}: dead-proxy rotate failed:`, e);
+          }
+          if (opts.onRetry) await opts.onRetry(err, unusualHits);
+          await new Promise((r) => setTimeout(r, Math.max(delayMs, 4000)));
+          continue;
+        }
+        break;
+      }
+
       // Unusual / too-much-traffic: never fail on first hit.
       if (isUnusualActivityError(msg)) {
         unusualHits += 1;
@@ -143,11 +168,13 @@ export async function withSystemErrorRetry<T>(
             try {
               const rot = await rotateProxyAndRelaunchForAccount(opts.providerAccountId, {
                 reason: 'unusual activity',
+                exceptJobId: opts.jobId,
+                deadTunnel: /tunnel|egress proxy dead|ERR_TUNNEL|no exit IP/i.test(msg),
               });
               console.warn(
-                `[system-retry] ${label}: proxy rotate ${rot.rotated ? 'ok' : 'skipped'} → ${
-                  rot.to || rot.error || 'n/a'
-                }`
+                `[system-retry] ${label}: proxy rotate ${rot.rotated ? 'ok' : 'skipped'}${
+                  rot.deferred ? ' (deferred relaunch)' : ''
+                } → ${rot.to || rot.error || 'n/a'}`
               );
             } catch (e) {
               console.warn(`[system-retry] ${label}: proxy rotate failed:`, e);

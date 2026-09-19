@@ -231,13 +231,23 @@ export async function refreshFlowMediaId(opts: {
           if (buf.length >= 100) {
             const mimeType =
               assetRec?.mimeType || mimeFromPath(filePath, 'image/jpeg');
-            const bibResult = await bibUploadImage({
-              accountId: opts.accountId,
-              projectId: opts.projectId,
-              imageBase64: buf.toString('base64'),
-              mimeType,
-              filename: path.basename(filePath),
-            });
+            const { withSystemErrorRetry } = await import('./systemErrorRetry');
+            const bibResult = await withSystemErrorRetry(
+              () =>
+                bibUploadImage({
+                  accountId: opts.accountId!,
+                  projectId: opts.projectId,
+                  imageBase64: buf.toString('base64'),
+                  mimeType,
+                  filename: path.basename(filePath!),
+                }),
+              {
+                label: `refreshFlowMediaId:${mediaId.slice(0, 8)}`,
+                providerAccountId: opts.accountId,
+                delayMs: 2000,
+                maxAttempts: 3,
+              }
+            );
             if (bibResult?.mediaId) {
               console.info(
                 `[refreshFlowMediaId] BiB local ${mediaId} → ${bibResult.mediaId.slice(0, 8)}`
@@ -248,6 +258,8 @@ export async function refreshFlowMediaId(opts: {
           }
         }
       } catch (bibErr: any) {
+        const { isUnusualActivityError } = await import('./unusualActivityProxyRotate');
+        if (isUnusualActivityError(bibErr)) throw bibErr;
         console.warn(
           '[refreshFlowMediaId] BiB local staged upload failed, falling back:',
           bibErr?.message || bibErr
@@ -417,6 +429,8 @@ export async function refreshFlowMediaId(opts: {
           }
         }
       } catch (bibErr: any) {
+        const { isUnusualActivityError } = await import('./unusualActivityProxyRotate');
+        if (isUnusualActivityError(bibErr)) throw bibErr;
         console.warn(
           '[refreshFlowMediaId] BiB local-file upload failed:',
           bibErr?.message || bibErr
@@ -464,6 +478,8 @@ export async function refreshFlowMediaId(opts: {
           return bibResult.mediaId;
         }
       } catch (bibErr: any) {
+        const { isUnusualActivityError } = await import('./unusualActivityProxyRotate');
+        if (isUnusualActivityError(bibErr)) throw bibErr;
         console.warn('[refreshFlowMediaId] BiB reupload failed, falling back to Python:', bibErr?.message || bibErr);
       }
     }
@@ -514,6 +530,8 @@ export async function refreshFlowMediaId(opts: {
           return bibResult.mediaId;
         }
       } catch (bibErr: any) {
+        const { isUnusualActivityError } = await import('./unusualActivityProxyRotate');
+        if (isUnusualActivityError(bibErr)) throw bibErr;
         console.warn('[refreshFlowMediaId] BiB bytes upload failed:', bibErr?.message || bibErr);
       }
     }

@@ -399,3 +399,41 @@ export async function POST(req: Request) {
     );
   }
 }
+
+/** Bulk permanent delete. Body: { userIds: string[] } */
+export async function DELETE(req: Request) {
+  try {
+    const admin = await requireAdmin(req);
+    const body = await req.json().catch(() => ({}));
+    const userIds = Array.isArray(body.userIds)
+      ? body.userIds.map((id: unknown) => String(id || '').trim()).filter(Boolean)
+      : [];
+    if (!userIds.length) {
+      return NextResponse.json({ error: 'userIds required' }, { status: 400 });
+    }
+    if (userIds.length > 200) {
+      return NextResponse.json({ error: 'Max 200 users per bulk delete' }, { status: 400 });
+    }
+
+    const { deleteUsersForAdmin } = await import('@/lib/adminDeleteUser');
+    const result = await deleteUsersForAdmin(
+      { userId: admin.userId, role: admin.role },
+      userIds
+    );
+
+    return NextResponse.json({
+      success: result.deleted > 0,
+      deleted: result.deleted,
+      failed: result.failed,
+      message:
+        result.failed.length === 0
+          ? `Deleted ${result.deleted} user(s)`
+          : `Deleted ${result.deleted}; ${result.failed.length} failed`,
+    });
+  } catch (error: any) {
+    return NextResponse.json(
+      { error: error.message || 'Bulk delete failed' },
+      { status: error.message === 'FORBIDDEN' ? 403 : 400 }
+    );
+  }
+}

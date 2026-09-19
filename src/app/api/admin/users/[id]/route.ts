@@ -298,85 +298,20 @@ export async function DELETE(
   try {
     const admin = await requireAdmin(req);
     const { id } = await params;
-
-    if (id === admin.userId) {
-      return NextResponse.json({ error: 'You cannot delete your own account' }, { status: 400 });
+    const { deleteUserForAdmin } = await import('@/lib/adminDeleteUser');
+    const result = await deleteUserForAdmin(
+      { userId: admin.userId, role: admin.role },
+      id
+    );
+    if (!result.ok) {
+      const status =
+        result.error.includes('not found')
+          ? 404
+          : result.error.includes('Cannot') || result.error.includes('Only super')
+            ? 403
+            : 400;
+      return NextResponse.json({ error: result.error }, { status });
     }
-
-    const target = await prisma.user.findUnique({
-      where: { id },
-      select: {
-        id: true,
-        email: true,
-        role: true,
-        resellerProfile: { select: { id: true } },
-      },
-    });
-
-    if (!target) {
-      return NextResponse.json({ error: 'User not found' }, { status: 404 });
-    }
-
-    if (target.role === 'SUPER_ADMIN') {
-      return NextResponse.json({ error: 'Cannot delete super admin accounts' }, { status: 403 });
-    }
-
-    if (target.role === 'ADMIN' && admin.role !== 'SUPER_ADMIN') {
-      return NextResponse.json({ error: 'Only super admin can delete admin accounts' }, { status: 403 });
-    }
-
-    await prisma.$transaction(async (tx) => {
-      await tx.user.updateMany({
-        where: { ownedByAdminId: id },
-        data: { ownedByAdminId: null },
-      });
-      await tx.user.updateMany({
-        where: { createdByAdminId: id },
-        data: { createdByAdminId: null },
-      });
-      await tx.user.updateMany({
-        where: { createdByResellerId: id },
-        data: { createdByResellerId: null },
-      });
-      await tx.user.update({
-        where: { id },
-        data: { assignedProviderAccountId: null, providerAssignmentManual: false },
-      });
-
-      if (target.resellerProfile?.id) {
-        const rid = target.resellerProfile.id;
-        await tx.resellerUserAssignment.deleteMany({ where: { resellerProfileId: rid } });
-        await tx.resellerSeatGrant.deleteMany({ where: { resellerProfileId: rid } });
-        await tx.resellerProfile.delete({ where: { id: rid } });
-      }
-
-      await tx.studioLog.deleteMany({ where: { userId: id } });
-      await tx.creditLedger.deleteMany({ where: { userId: id } });
-      await tx.wallet.deleteMany({ where: { userId: id } });
-      await tx.welcomeGrant.deleteMany({ where: { userId: id } });
-      await tx.subscription.deleteMany({ where: { userId: id } });
-      await tx.order.deleteMany({ where: { userId: id } });
-      await tx.generationJob.deleteMany({ where: { userId: id } });
-      await tx.asset.deleteMany({ where: { userId: id } });
-      await tx.character.deleteMany({ where: { userId: id } });
-      await tx.whiskState.deleteMany({ where: { userId: id } });
-      await tx.supportTicket.deleteMany({ where: { userId: id } });
-      await tx.resellerUserAssignment.deleteMany({ where: { customerId: id } });
-      await tx.project.deleteMany({ where: { userId: id } });
-
-      await tx.adminAuditLog.create({
-        data: {
-          adminId: admin.userId,
-          action: 'ADMIN_USER_DELETED',
-          targetType: 'USER',
-          targetId: id,
-          details: { email: target.email, role: target.role },
-        },
-      });
-
-      await tx.user.delete({ where: { id } });
-    });
-
     return NextResponse.json({ success: true, message: 'User deleted from database' });
   } catch (error: any) {
     console.error('Delete user error:', error);

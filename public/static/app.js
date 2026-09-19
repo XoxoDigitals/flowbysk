@@ -90,7 +90,7 @@
     if (!text) return 'System Error';
 
     // Google reCAPTCHA / unusual-activity — distinct from generic System Error.
-    if (/UNUSUAL_ACTIVITY|RECAPTCHA|unusual\s*activity/i.test(text)) {
+    if (/UNUSUAL_ACTIVITY|RECAPTCHA|unusual\s*activity|mediaId could not be parsed|Upload submitted but mediaId/i.test(text)) {
       return 'Unusual activity';
     }
 

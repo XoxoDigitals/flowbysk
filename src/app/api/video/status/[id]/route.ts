@@ -209,9 +209,11 @@ export async function GET(
             },
           });
           if (updateRes.count > 0) {
-            noteUnusualActivityFailure(failMsg, job.providerAccountId || undefined).catch((e) =>
-              console.warn('[proxy-rotate]', e)
-            );
+            noteUnusualActivityFailure(
+              failMsg,
+              job.providerAccountId || undefined,
+              job.id
+            ).catch((e) => console.warn('[proxy-rotate]', e));
             try {
               recordJobProxyOutcome(job, 'fail');
             } catch {
@@ -226,6 +228,14 @@ export async function GET(
             );
             checkAndDispatchNextJobs(job.userId).catch(console.error);
             await logJobTerminal(job, 'failed', failMsg);
+            try {
+              const { drainPendingProxyRelaunch } = await import(
+                '@/lib/unusualActivityProxyRotate'
+              );
+              await drainPendingProxyRelaunch(job.providerAccountId);
+            } catch {
+              /* ignore */
+            }
           }
           return NextResponse.json({
             success: false,
@@ -295,6 +305,14 @@ export async function GET(
             const dur =
               started > 0 ? `${((Date.now() - started) / 1000).toFixed(1)}s` : undefined;
             await logJobTerminal(job, 'complete', dur);
+            try {
+              const { drainPendingProxyRelaunch } = await import(
+                '@/lib/unusualActivityProxyRotate'
+              );
+              await drainPendingProxyRelaunch(job.providerAccountId);
+            } catch {
+              /* ignore */
+            }
           }
           return NextResponse.json({
             success: true,
@@ -424,6 +442,14 @@ export async function GET(
             const dur =
               started > 0 ? `${((Date.now() - started) / 1000).toFixed(1)}s` : undefined;
             await logJobTerminal(job, 'complete', dur);
+            try {
+              const { drainPendingProxyRelaunch } = await import(
+                '@/lib/unusualActivityProxyRotate'
+              );
+              await drainPendingProxyRelaunch(job.providerAccountId);
+            } catch {
+              /* ignore */
+            }
           }
 
           return NextResponse.json({
@@ -440,9 +466,11 @@ export async function GET(
 
         if (workerAsset.status === 'FAILED') {
           const failMsg = workerAsset.error || 'Generation failed upstream';
-          noteUnusualActivityFailure(failMsg, job.providerAccountId || undefined).catch((e) =>
-            console.warn('[proxy-rotate]', e)
-          );
+          noteUnusualActivityFailure(
+            failMsg,
+            job.providerAccountId || undefined,
+            job.id
+          ).catch((e) => console.warn('[proxy-rotate]', e));
           try {
             recordJobProxyOutcome(job, 'fail');
           } catch {

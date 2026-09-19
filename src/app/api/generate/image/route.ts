@@ -290,6 +290,7 @@ export async function POST(req: Request) {
           label: `api-image:${job.id}`,
           delayMs: 1800,
           providerAccountId: provider.id,
+          jobId: job.id,
           onRetry: async (err) => {
             if (!isImageModelQuotaError(err)) return;
             const prev = attemptModel;

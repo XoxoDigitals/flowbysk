@@ -1,5 +1,7 @@
+import fs from 'fs';
+import path from 'path';
 import { prisma } from './prisma';
-import { BrowserStatus } from '@prisma/client';
+import { BrowserStatus, JobStatus } from '@prisma/client';
 import {
   maskProxyUrl,
   rotateActiveEgressProxy,
@@ -27,11 +29,86 @@ import { writeSiteRuntimePatch, readSiteRuntime } from './siteRuntime';
 
 let rotating = false;
 
+const PENDING_RELAUNCH_PATH = path.join(process.cwd(), 'data', 'proxy-pending-relaunch.json');
+
+const ACTIVE_JOB_STATUSES: JobStatus[] = [
+  JobStatus.PREPARING,
+  JobStatus.GENERATING,
+  JobStatus.CHECKING_STATUS,
+  JobStatus.RETRYING,
+];
+
 const UNUSUAL_RE =
-  /UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC|RECAPTCHA|unusual\s*activity/i;
+  /UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC|RECAPTCHA|unusual\s*activity|mediaId could not be parsed|Upload submitted but mediaId|batchexecute error e=4|\be\s*=\s*4\b/i;
 
 export function isUnusualActivityError(raw: unknown): boolean {
   return UNUSUAL_RE.test(String(raw ?? ''));
+}
+
+type PendingRelaunchMap = Record<
+  string,
+  { pending: boolean; reason?: string; at?: string; deadTunnel?: boolean }
+>;
+
+function readPendingRelaunchMap(): PendingRelaunchMap {
+  try {
+    if (!fs.existsSync(PENDING_RELAUNCH_PATH)) return {};
+    const raw = JSON.parse(fs.readFileSync(PENDING_RELAUNCH_PATH, 'utf8'));
+    return raw && typeof raw === 'object' ? (raw as PendingRelaunchMap) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writePendingRelaunchMap(map: PendingRelaunchMap): void {
+  try {
+    fs.mkdirSync(path.dirname(PENDING_RELAUNCH_PATH), { recursive: true });
+    fs.writeFileSync(PENDING_RELAUNCH_PATH, JSON.stringify(map, null, 2), 'utf8');
+  } catch (e) {
+    console.warn('[proxy-rotate] pending relaunch write failed:', e);
+  }
+}
+
+export function setPendingProxyRelaunch(
+  accountId: string,
+  opts?: { reason?: string; deadTunnel?: boolean }
+): void {
+  if (!accountId) return;
+  const map = readPendingRelaunchMap();
+  map[accountId] = {
+    pending: true,
+    reason: String(opts?.reason || 'deferred').slice(0, 120),
+    at: new Date().toISOString(),
+    deadTunnel: !!opts?.deadTunnel,
+  };
+  writePendingRelaunchMap(map);
+}
+
+export function clearPendingProxyRelaunch(accountId: string): void {
+  if (!accountId) return;
+  const map = readPendingRelaunchMap();
+  if (!map[accountId]) return;
+  delete map[accountId];
+  writePendingRelaunchMap(map);
+}
+
+export function hasPendingProxyRelaunch(accountId: string): boolean {
+  return !!readPendingRelaunchMap()[accountId]?.pending;
+}
+
+/** Active sibling jobs on this Google account (shared BiB Chrome). */
+export async function countActiveJobsForAccount(
+  accountId: string,
+  exceptJobId?: string | null
+): Promise<number> {
+  if (!accountId) return 0;
+  return prisma.generationJob.count({
+    where: {
+      providerAccountId: accountId,
+      status: { in: ACTIVE_JOB_STATUSES },
+      ...(exceptJobId ? { id: { not: exceptJobId } } : {}),
+    },
+  });
 }
 
 export function resetUnusualActivityStreak(): void {
@@ -119,16 +196,28 @@ async function listRelaunchTargets(onlyAccountId?: string) {
   );
 }
 
+export type RotateAccountOpts = {
+  reason?: string;
+  /** Job that triggered rotate — excluded from sibling count. */
+  exceptJobId?: string | null;
+  /** Admin force: relaunch even if siblings are GENERATING. */
+  forceRelaunch?: boolean;
+  /** Tunnel/proxy dead — relaunch allowed with siblings (polls already broken). */
+  deadTunnel?: boolean;
+};
+
 /**
- * Rotate ONE account onto a different unique proxy and relaunch that Chrome only.
- * Used after unusual-activity: retry → rotate this account → retry again.
+ * Rotate ONE account onto a different unique proxy.
+ * Assigns new sticky always; relaunches Chrome only when safe
+ * (no sibling active jobs), unless forceRelaunch / deadTunnel.
  */
 export async function rotateProxyAndRelaunchForAccount(
   accountId: string,
-  opts?: { reason?: string }
+  opts?: RotateAccountOpts
 ): Promise<{
   ok: boolean;
   rotated: boolean;
+  deferred?: boolean;
   from: string | null;
   to: string | null;
   relaunched: number;
@@ -205,6 +294,34 @@ export async function rotateProxyAndRelaunchForAccount(
       console.warn('[proxy-rotate] clear-cache:', e);
     }
 
+    const siblings = await countActiveJobsForAccount(accountId, opts?.exceptJobId);
+    const allowRelaunch = !!opts?.forceRelaunch || !!opts?.deadTunnel || siblings === 0;
+
+    if (!allowRelaunch) {
+      setPendingProxyRelaunch(accountId, {
+        reason: opts?.reason || 'deferred siblings',
+        deadTunnel: false,
+      });
+      console.warn(
+        `[proxy-rotate] deferred relaunch account ${accountId.slice(0, 8)} — ${siblings} sibling job(s) still active`
+      );
+      writeSiteRuntimePatch({
+        lastProxyRotateAt: new Date().toISOString(),
+        lastProxyRotateReason: String(
+          opts?.reason || `account ${accountId.slice(0, 8)} deferred`
+        ).slice(0, 120),
+        unusualActivityStreak: 0,
+      });
+      return {
+        ok: true,
+        rotated: true,
+        deferred: true,
+        from: fromBefore,
+        to: toUrl,
+        relaunched: 0,
+      };
+    }
+
     const targets = await listRelaunchTargets(accountId);
     let relaunched = 0;
     for (const acc of targets) {
@@ -215,6 +332,7 @@ export async function rotateProxyAndRelaunchForAccount(
         console.warn(`[proxy-rotate] relaunch ${acc.id}:`, e);
       }
     }
+    clearPendingProxyRelaunch(accountId);
 
     writeSiteRuntimePatch({
       lastProxyRotateAt: new Date().toISOString(),
@@ -225,10 +343,57 @@ export async function rotateProxyAndRelaunchForAccount(
     return {
       ok: true,
       rotated: true,
+      deferred: false,
       from: fromBefore,
       to: toUrl,
       relaunched,
     };
+  } finally {
+    rotating = false;
+  }
+}
+
+/**
+ * After a job reaches terminal state: if this account has pending relaunch
+ * and no remaining active jobs, apply the deferred Chrome relaunch.
+ */
+export async function drainPendingProxyRelaunch(accountId?: string | null): Promise<void> {
+  if (!accountId) return;
+  if (!hasPendingProxyRelaunch(accountId)) return;
+  const active = await countActiveJobsForAccount(accountId);
+  if (active > 0) {
+    console.warn(
+      `[proxy-rotate] drain skip ${accountId.slice(0, 8)} — ${active} still active`
+    );
+    return;
+  }
+  if (rotating) return;
+
+  rotating = true;
+  try {
+    const pending = readPendingRelaunchMap()[accountId];
+    console.warn(
+      `[proxy-rotate] draining deferred relaunch for ${accountId.slice(0, 8)} (${pending?.reason || 'pending'})`
+    );
+    try {
+      await bibFetch('/egress-proxy/clear-cache', { method: 'POST', body: '{}' });
+    } catch {
+      /* ignore */
+    }
+    const targets = await listRelaunchTargets(accountId);
+    for (const acc of targets) {
+      try {
+        await relaunchAccount(acc);
+      } catch (e) {
+        console.warn(`[proxy-rotate] drain relaunch ${acc.id}:`, e);
+      }
+    }
+    clearPendingProxyRelaunch(accountId);
+    writeSiteRuntimePatch({
+      lastProxyRotateAt: new Date().toISOString(),
+      lastProxyRotateReason: `drain ${accountId.slice(0, 8)}`,
+      unusualActivityStreak: 0,
+    });
   } finally {
     rotating = false;
   }
@@ -403,9 +568,11 @@ export async function performEgressProxyRotateAndRelaunch(opts?: {
  */
 export async function noteUnusualActivityFailure(
   errorMessage: unknown,
-  accountId?: string
+  accountId?: string,
+  exceptJobId?: string | null
 ): Promise<{
   rotated: boolean;
+  deferred?: boolean;
   streak: number;
   proxy?: string | null;
 }> {
@@ -421,9 +588,11 @@ export async function noteUnusualActivityFailure(
   if (accountId) {
     const result = await rotateProxyAndRelaunchForAccount(accountId, {
       reason: 'unusual activity',
+      exceptJobId,
     });
     return {
       rotated: result.rotated,
+      deferred: result.deferred,
       streak: 0,
       proxy: result.to,
     };

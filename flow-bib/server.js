@@ -150,6 +150,15 @@ async function ensureAccountUsable(s, preferredProject) {
     throw err;
   }
 
+  if (typeof s.isEgressUnhealthy === 'function' && s.isEgressUnhealthy()) {
+    const err = new Error(
+      `Egress proxy dead — rotating (${s.egressError || 'no exit IP'})`
+    );
+    err.statusCode = 503;
+    err.retryable = true;
+    throw err;
+  }
+
   let auth = await s.refreshAuthStatus();
   if (auth.status === 'READY' && auth.at) return auth;
 
@@ -196,6 +205,14 @@ async function ensureAccountUsable(s, preferredProject) {
 /** Load project page until WIZ `at` exists; throw 401 only after retries.
  *  If user is mid-login, return a clear retryable error — do not navigate away. */
 async function requireWizContext(s, preferredProject) {
+  if (typeof s.isEgressUnhealthy === 'function' && s.isEgressUnhealthy()) {
+    const err = new Error(
+      `Egress proxy dead — rotating (${s.egressError || 'no exit IP'})`
+    );
+    err.statusCode = 503;
+    err.retryable = true;
+    throw err;
+  }
   if (await s.isOnLoginFlow()) {
     const err = new Error('Waiting for Google login — finish sign-in in BiB viewer');
     err.statusCode = 401;
@@ -820,6 +837,7 @@ app.get('/accounts/:id/network-captures', requireInternalSecret, (req, res) => {
 /** Single image generation via BiB (no CDP fetch). */
 app.post('/generate', requireInternalSecret, async (req, res) => {
   const t0 = Date.now();
+  let s = null;
   try {
     const {
       accountId,
@@ -835,8 +853,9 @@ app.post('/generate', requireInternalSecret, async (req, res) => {
     } = req.body || {};
     if (!accountId) return res.status(400).json({ error: 'accountId required' });
     if (!prompt) return res.status(400).json({ error: 'prompt required' });
-    const s = pool.get(accountId);
+    s = pool.get(accountId);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    s.beginOp();
     try {
       await ensureAccountUsable(s, preferredProject);
     } catch (e) {
@@ -999,6 +1018,12 @@ app.post('/generate', requireInternalSecret, async (req, res) => {
   } catch (e) {
     console.error('generate', e);
     res.status(500).json({ error: e.message, durationMs: Date.now() - t0 });
+  } finally {
+    try {
+      s?.endOp?.();
+    } catch {
+      /* ignore */
+    }
   }
 });
 
@@ -1094,6 +1119,7 @@ app.post('/batch-run', requireInternalSecret, async (req, res) => {
 
 app.post('/generate-video', requireInternalSecret, async (req, res) => {
   const t0 = Date.now();
+  let s = null;
   try {
     const {
       accountId,
@@ -1117,8 +1143,9 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
     } = req.body || {};
     if (!accountId) return res.status(400).json({ error: 'accountId required' });
     if (!prompt) return res.status(400).json({ error: 'prompt required' });
-    const s = pool.get(accountId);
+    s = pool.get(accountId);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    s.beginOp();
     try {
       await ensureAccountUsable(s, preferredProject);
     } catch (e) {
@@ -1405,12 +1432,19 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
   } catch (e) {
     console.error('video', e);
     res.status(500).json({ error: e.message, ms: Date.now() - t0 });
+  } finally {
+    try {
+      s?.endOp?.();
+    } catch {
+      /* ignore */
+    }
   }
 });
 
 /** Native Flow image upload via live BiB WIZ session (maseQ batchexecute — no CDP). */
 app.post('/accounts/:id/upload-image', requireInternalSecret, async (req, res) => {
   const t0 = Date.now();
+  let s = null;
   try {
     const accountId = req.params.id;
     const {
@@ -1423,8 +1457,9 @@ app.post('/accounts/:id/upload-image', requireInternalSecret, async (req, res) =
 
     if (!accountId) return res.status(400).json({ error: 'accountId required' });
 
-    const s = pool.get(accountId);
+    s = pool.get(accountId);
     if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    s.beginOp();
     try {
       await ensureAccountUsable(s, preferredProject);
     } catch (e) {
@@ -1547,7 +1582,22 @@ app.post('/accounts/:id/upload-image', requireInternalSecret, async (req, res) =
 
     if (!mediaId) {
       console.warn(`[${accountId}] upload-image: no mediaId in response`, text.slice(0, 400));
-      return res.status(502).json({ error: 'Upload submitted but mediaId could not be parsed', raw: text.slice(0, 400) });
+      const unusualMatch = text.match(/PUBLIC_ERROR_[A-Z0-9_]*UNUSUAL_ACTIVITY[A-Z0-9_]*/i);
+      const throttleMatch = /PUBLIC_ERROR_USER_REQUESTS_THROTTLED|USER_REQUESTS_THROTTLED/i.test(text);
+      const e4 = /\[\"e\",\s*4\b|\be\s*=\s*4\b/i.test(text);
+      let errMsg = 'Upload submitted but mediaId could not be parsed';
+      if (unusualMatch) {
+        errMsg = `${unusualMatch[0]} — upload mediaId could not be parsed (batchexecute e=4)`;
+      } else if (throttleMatch) {
+        errMsg = 'PUBLIC_ERROR_USER_REQUESTS_THROTTLED — upload mediaId could not be parsed';
+      } else if (e4) {
+        errMsg = 'PUBLIC_ERROR_UNUSUAL_ACTIVITY — upload mediaId could not be parsed (batchexecute e=4)';
+      }
+      return res.status(502).json({
+        error: errMsg,
+        unusual: !!(unusualMatch || e4),
+        raw: text.slice(0, 400),
+      });
     }
 
     const imageUrl = `https://flow.google.com/project/${projectId}/image/${mediaId}`;
@@ -1561,6 +1611,12 @@ app.post('/accounts/:id/upload-image', requireInternalSecret, async (req, res) =
     });
   } catch (e) {
     res.status(500).json({ error: e.message, ms: Date.now() - t0 });
+  } finally {
+    try {
+      s?.endOp?.();
+    } catch {
+      /* ignore */
+    }
   }
 });
 

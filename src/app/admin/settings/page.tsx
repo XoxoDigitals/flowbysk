@@ -13,6 +13,7 @@ import {
   Server,
 } from 'lucide-react';
 import { useSiteSettings } from '@/components/SiteSettingsProvider';
+import { SOCIAL_PLATFORMS, type SocialLinks } from '@/lib/socialLinks';
 
 const inputClass =
   'w-full rounded-[11px] border border-[var(--line)] bg-[var(--bg2)] px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink3)] outline-none focus:border-[var(--a1)]';
@@ -84,6 +85,7 @@ export default function AdminSettingsPage() {
   const [noticeBody, setNoticeBody] = useState('');
   const [noticeSeverity, setNoticeSeverity] = useState<'INFO' | 'WARNING' | 'SUCCESS'>('INFO');
   const [savingNotice, setSavingNotice] = useState(false);
+  const [socialLinks, setSocialLinks] = useState<SocialLinks>({});
 
   const [tools, setTools] = useState<ToolMap>({});
   const [toolLabels, setToolLabels] = useState<Record<string, string>>({});
@@ -117,6 +119,11 @@ export default function AdminSettingsPage() {
           );
           setLastProxyRotateAt(data.settings.lastProxyRotateAt || null);
           setLastProxyRotateReason(data.settings.lastProxyRotateReason || null);
+          setSocialLinks(
+            data.settings.socialLinks && typeof data.settings.socialLinks === 'object'
+              ? data.settings.socialLinks
+              : {}
+          );
         }
       }
       if (pRes.ok) {
@@ -192,6 +199,7 @@ export default function AdminSettingsPage() {
           maintenanceMode,
           proxyAutoRotateEnabled,
           proxyAutoRotateMinutes,
+          socialLinks,
         }),
       });
       const data = await res.json();
@@ -205,6 +213,9 @@ export default function AdminSettingsPage() {
           Math.max(1, Number(data.settings.proxyAutoRotateMinutes) || 60)
         );
         setLastProxyRotateAt(data.settings.lastProxyRotateAt || null);
+        if (data.settings.socialLinks && typeof data.settings.socialLinks === 'object') {
+          setSocialLinks(data.settings.socialLinks);
+        }
       }
       await refreshSiteSettings();
     } catch (err: any) {
@@ -835,7 +846,39 @@ export default function AdminSettingsPage() {
           <h3 className="text-base font-semibold">User notices</h3>
           <p className="mt-1 text-[13px] text-[var(--ink3)]">
             Active notices show at the top of every user dashboard until you turn them off or delete them.
+            Social icons below appear on those announcements when you set links and save site settings.
           </p>
+        </div>
+
+        <div className="space-y-3 rounded-[14px] border border-[var(--line)] bg-[var(--bg2)] p-4">
+          <p className="text-sm font-medium text-[var(--ink)]">Announcement social links</p>
+          <p className="text-[12px] text-[var(--ink3)]">
+            Leave blank to hide an icon. Saved with <b>Save site settings</b> above.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {SOCIAL_PLATFORMS.map((p) => (
+              <label key={p.id} className="block text-sm">
+                <span className="mb-1.5 block font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">
+                  {p.label.toUpperCase()}
+                </span>
+                <input
+                  type="url"
+                  value={socialLinks[p.id] || ''}
+                  onChange={(e) =>
+                    setSocialLinks((prev) => {
+                      const next = { ...prev };
+                      const v = e.target.value.trim();
+                      if (v) next[p.id] = v;
+                      else delete next[p.id];
+                      return next;
+                    })
+                  }
+                  placeholder={p.placeholder}
+                  className={inputClass}
+                />
+              </label>
+            ))}
+          </div>
         </div>
 
         <form onSubmit={createNotice} className="space-y-3 rounded-[14px] border border-[var(--line)] bg-[var(--bg2)] p-4">

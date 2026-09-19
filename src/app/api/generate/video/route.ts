@@ -255,6 +255,7 @@ export async function POST(req: Request) {
               maxAttempts: 3,
               throttleDelaysMs: [10000, 20000],
               providerAccountId: provider.id,
+              jobId: job.id,
             }
           );
           workerData = bibData;
@@ -322,7 +323,7 @@ export async function POST(req: Request) {
             },
             body: JSON.stringify(workerPayload),
           },
-          { label: `api-video:${job.id}`, delayMs: 1800, providerAccountId: provider.id }
+          { label: `api-video:${job.id}`, delayMs: 1800, providerAccountId: provider.id, jobId: job.id }
         );
         workerAsset = workerData.asset || {};
       }

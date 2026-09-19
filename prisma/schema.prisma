@@ -618,6 +618,9 @@ model SiteSettings {
   egressProxyUrl String?
   /// Proxy list: [{ id, url, enabled }]
   egressProxies  Json?
+  /// Public social profile URLs shown on dashboard announcements
+  /// { telegram, discord, twitter, instagram, youtube, whatsapp, facebook, tiktok }
+  socialLinks    Json?
   updatedAt      DateTime @updatedAt
 }
 

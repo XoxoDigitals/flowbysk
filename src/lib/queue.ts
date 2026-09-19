@@ -487,6 +487,7 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
         delayMs: 1800,
         throttleDelaysMs: [10000, 20000],
         providerAccountId: provider.id,
+        jobId: job.id,
         shouldContinue: async () => !(await isJobCancelled(job.id)),
         onRetry: async (err) => {
           if (isImageModelQuotaError(err) && attemptImageModel) {
@@ -597,6 +598,13 @@ export async function handleJobSuccess(jobId: string, outputUrl: string, metadat
   await settleCredits(job.userId, job.walletType, job.creditCost, job.id);
 
   try {
+    const { drainPendingProxyRelaunch } = await import('./unusualActivityProxyRotate');
+    await drainPendingProxyRelaunch(job.providerAccountId);
+  } catch {
+    /* ignore */
+  }
+
+  try {
     const { createStudioLog } = await import('./studioLogs');
     const params = (job.parameters as Record<string, any>) || {};
     const runId = String(params.run_id || job.id);
@@ -691,6 +699,13 @@ export async function handleJobFailure(jobId: string, errorMessage: string) {
   checkAndDispatchNextJobs(job.userId).catch(console.error);
 
   releaseProviderAccountIfIdle(job.userId).catch(() => false);
+
+  try {
+    const { drainPendingProxyRelaunch } = await import('./unusualActivityProxyRotate');
+    await drainPendingProxyRelaunch(job.providerAccountId);
+  } catch {
+    /* ignore */
+  }
 }
 
 export async function cancelJob(

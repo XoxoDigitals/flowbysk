@@ -37,13 +37,13 @@ export function toUserFacingError(internal?: string | null, fallback = 'Somethin
   const msg = String(internal);
   // Transient BiB / CDP — treat as still waiting, never "System Error" for customers
   if (
-    /browser not launched|Waiting for browser|Target closed|not attached|startScreencast|screencast|ECONNREFUSED|fetch failed/i.test(
+    /browser not launched|Waiting for browser|Target closed|not attached|startScreencast|screencast|ECONNREFUSED|fetch failed|Egress proxy dead/i.test(
       msg
     )
   ) {
     return USER_QUEUE_BUSY;
   }
-  if (/UNUSUAL_ACTIVITY|RECAPTCHA|unusual\s*activity/i.test(msg)) {
+  if (/UNUSUAL_ACTIVITY|RECAPTCHA|unusual\s*activity|mediaId could not be parsed|Upload submitted but mediaId/i.test(msg)) {
     return 'Unusual activity';
   }
   if (/PROMINENT_PEOPLE|PUBLIC_ERROR_PROMINENT_PEOPLE/i.test(msg)) {

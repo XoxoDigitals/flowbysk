@@ -296,51 +296,85 @@ export async function DELETE(req: Request) {
     }
 
     const { searchParams } = new URL(req.url);
-    const assignmentId = searchParams.get('assignmentId');
-    if (!assignmentId) {
-      return NextResponse.json({ error: 'assignmentId required' }, { status: 400 });
-    }
-
-    const assignment = await prisma.resellerUserAssignment.findFirst({
-      where: { id: assignmentId, resellerProfileId: profile.id, removedAt: null },
-    });
-    if (!assignment) {
-      return NextResponse.json({ error: 'Assignment not found' }, { status: 404 });
-    }
-
-    const now = new Date();
-    const sameDay = sameCalendarDay(new Date(assignment.addedAt), now);
-    const countsForAdmin = sameDay ? false : assignment.countsForAdmin;
-
-    await prisma.resellerUserAssignment.update({
-      where: { id: assignment.id },
-      data: { removedAt: now, countsForAdmin },
-    });
-
-    if (sameDay) {
-      const grant = profile.seatGrants.find((g) => g.planId === assignment.planId);
-      if (grant && grant.seatsUsed > 0) {
-        await prisma.resellerSeatGrant.update({
-          where: { id: grant.id },
-          data: { seatsUsed: { decrement: 1 } },
-        });
+    let assignmentIds: string[] = [];
+    const single = searchParams.get('assignmentId');
+    if (single) {
+      assignmentIds = [single];
+    } else {
+      const body = await req.json().catch(() => ({}));
+      if (Array.isArray(body.assignmentIds)) {
+        assignmentIds = body.assignmentIds.map((id: unknown) => String(id || '').trim()).filter(Boolean);
+      } else if (body.assignmentId) {
+        assignmentIds = [String(body.assignmentId).trim()].filter(Boolean);
       }
     }
 
-    // Ban/remove access for the customer
-    await prisma.user.update({
-      where: { id: assignment.customerId },
-      data: { status: UserStatus.BANNED, isLocked: true },
-    });
-    await prisma.subscription.updateMany({
-      where: { userId: assignment.customerId, status: 'ACTIVE' },
-      data: { status: 'CANCELLED' },
-    });
+    assignmentIds = [...new Set(assignmentIds)];
+    if (!assignmentIds.length) {
+      return NextResponse.json({ error: 'assignmentId or assignmentIds required' }, { status: 400 });
+    }
+    if (assignmentIds.length > 200) {
+      return NextResponse.json({ error: 'Max 200 users per bulk remove' }, { status: 400 });
+    }
+
+    const now = new Date();
+    let removed = 0;
+    let seatsRestored = 0;
+    const failed: { id: string; error: string }[] = [];
+
+    for (const assignmentId of assignmentIds) {
+      try {
+        const assignment = await prisma.resellerUserAssignment.findFirst({
+          where: { id: assignmentId, resellerProfileId: profile.id, removedAt: null },
+        });
+        if (!assignment) {
+          failed.push({ id: assignmentId, error: 'Assignment not found' });
+          continue;
+        }
+
+        const sameDay = sameCalendarDay(new Date(assignment.addedAt), now);
+        const countsForAdmin = sameDay ? false : assignment.countsForAdmin;
+
+        await prisma.resellerUserAssignment.update({
+          where: { id: assignment.id },
+          data: { removedAt: now, countsForAdmin },
+        });
+
+        if (sameDay) {
+          const grant = profile.seatGrants.find((g) => g.planId === assignment.planId);
+          if (grant && grant.seatsUsed > 0) {
+            await prisma.resellerSeatGrant.update({
+              where: { id: grant.id },
+              data: { seatsUsed: { decrement: 1 } },
+            });
+            seatsRestored += 1;
+            grant.seatsUsed = Math.max(0, grant.seatsUsed - 1);
+          }
+        }
+
+        await prisma.user.update({
+          where: { id: assignment.customerId },
+          data: { status: UserStatus.BANNED, isLocked: true },
+        });
+        await prisma.subscription.updateMany({
+          where: { userId: assignment.customerId, status: 'ACTIVE' },
+          data: { status: 'CANCELLED' },
+        });
+        removed += 1;
+      } catch (e: any) {
+        failed.push({ id: assignmentId, error: e?.message || 'Failed' });
+      }
+    }
 
     return NextResponse.json({
-      success: true,
-      seatRestored: sameDay,
-      countsForAdmin,
+      success: removed > 0,
+      removed,
+      seatsRestored,
+      failed,
+      message:
+        failed.length === 0
+          ? `Removed ${removed} user(s)`
+          : `Removed ${removed}; ${failed.length} failed`,
     });
   } catch (error: any) {
     return NextResponse.json({ error: error.message || 'Failed' }, { status: 400 });

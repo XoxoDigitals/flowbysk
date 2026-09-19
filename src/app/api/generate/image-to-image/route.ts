@@ -304,6 +304,7 @@ export async function POST(req: Request) {
           delayMs: 2000,
           maxAttempts: 3,
           providerAccountId: provider.id,
+          jobId: job.id,
           onRetry: async (err) => {
             if (!isImageModelQuotaError(err)) return;
             const prev = attemptModel;
