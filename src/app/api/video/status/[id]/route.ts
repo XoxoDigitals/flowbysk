@@ -4,10 +4,10 @@ import { settleCredits, releaseCredits } from '@/lib/credits';
 import { checkAndDispatchNextJobs } from '@/lib/queue';
 import { JobStatus } from '@prisma/client';
 import { createStudioLog } from '@/lib/studioLogs';
-import { bibVideoStatus } from '@/lib/bib';
 import { toUserFacingError } from '@/lib/userMessages';
 import { noteUnusualActivityFailure } from '@/lib/unusualActivityProxyRotate';
 import { recordJobProxyOutcome } from '@/lib/dataimpulse';
+import { extractJobBibRefs, pollJobBibStatus } from '@/lib/jobBibPoll';
 
 const PYTHON_WORKER_URL = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
 
@@ -59,6 +59,13 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    try {
+      const { startJobStatusResumeLoop } = await import('@/lib/jobStatusResume');
+      startJobStatusResumeLoop();
+    } catch {
+      /* ignore */
+    }
+
     const { id } = await params;
 
     // 1. Query database for job
@@ -124,18 +131,6 @@ export async function GET(
       });
     }
 
-    if (job.status === JobStatus.CANCELLED) {
-      return NextResponse.json({
-        success: false,
-        asset: {
-          id: job.id,
-          status: 'CANCELLED',
-          progress: 0,
-          error: job.errorMessage || 'Stop by user',
-        },
-      });
-    }
-
     if (job.status === JobStatus.FAILED) {
       return NextResponse.json({
         success: false,
@@ -148,237 +143,72 @@ export async function GET(
       });
     }
 
-    // 2. If status is GENERATING / PREPARING / CHECKING_STATUS, poll BiB (preferred) or Python
+    // 2. Prefer BiB poll whenever we have a provider account + Flow media UUID
     const metadata = (job.outputMetadata as Record<string, any>) || {};
-    const jobParams = (job.parameters as Record<string, any>) || {};
     const workerTaskId = metadata.workerTaskId || job.id;
-
-    // Prefer BiB poll whenever we have a provider account + Flow media UUID.
-    // Queue BiB path stores bibMediaId on parameters; some routes also put it on outputMetadata.
-    const flowMediaId = String(
-      metadata.bibMediaId ||
-        jobParams.bibMediaId ||
-        metadata.workerTaskId ||
-        metadata.primary_media_id ||
-        jobParams.primary_media_id ||
-        ''
-    ).trim();
-    const looksLikeFlowUuid = /^[a-f0-9-]{36}$/i.test(flowMediaId);
-    const providerAccountId =
-      metadata.bibAccountId || jobParams.bibAccountId || job.providerAccountId || null;
-    const flowProjectId =
-      metadata.bibProjectId ||
-      jobParams.bibProjectId ||
-      jobParams.flowProjectId ||
-      undefined;
+    const refs = extractJobBibRefs(job);
 
     if (
-      providerAccountId &&
-      looksLikeFlowUuid &&
+      refs.accountId &&
+      refs.mediaId &&
       (job.status === JobStatus.GENERATING ||
         job.status === JobStatus.PREPARING ||
-        job.status === JobStatus.CHECKING_STATUS)
+        job.status === JobStatus.CHECKING_STATUS ||
+        job.status === JobStatus.RETRYING)
     ) {
-      try {
-        const bib = await bibVideoStatus({
-          accountId: String(providerAccountId),
-          mediaId: flowMediaId,
-          projectId: flowProjectId || undefined,
+      const outcome = await pollJobBibStatus(job);
+      if (outcome.kind === 'failed') {
+        return NextResponse.json({
+          success: false,
+          asset: {
+            id: job.id,
+            status: 'FAILED',
+            progress: 0,
+            url: '',
+            error: toUserFacingError(outcome.error, outcome.error),
+            prompt: job.prompt,
+          },
         });
-        const mediaUrl = bib.videoUrl || bib.imageUrl || bib.url;
-        if (bib.status === 'FAILED') {
-          const failMsg = String(bib.error || 'Generation failed in Veo').slice(0, 300);
-          const userMsg = toUserFacingError(failMsg, failMsg);
-          const updateRes = await prisma.generationJob.updateMany({
-            where: {
-              id: job.id,
-              status: {
-                in: [
-                  JobStatus.GENERATING,
-                  JobStatus.PREPARING,
-                  JobStatus.CHECKING_STATUS,
-                  JobStatus.RETRYING,
-                ],
-              },
-            },
-            data: {
-              status: JobStatus.FAILED,
-              progress: 0,
-              errorMessage: userMsg,
-              completedAt: new Date(),
-            },
-          });
-          if (updateRes.count > 0) {
-            noteUnusualActivityFailure(
-              failMsg,
-              job.providerAccountId || undefined,
-              job.id
-            ).catch((e) => console.warn('[proxy-rotate]', e));
-            try {
-              recordJobProxyOutcome(job, 'fail');
-            } catch {
-              /* ignore */
-            }
-            await releaseCredits(
-              job.userId,
-              job.walletType,
-              job.creditCost,
-              job.id,
-              failMsg
-            );
-            checkAndDispatchNextJobs(job.userId).catch(console.error);
-            await logJobTerminal(job, 'failed', failMsg);
-            try {
-              const { drainPendingProxyRelaunch } = await import(
-                '@/lib/unusualActivityProxyRotate'
-              );
-              await drainPendingProxyRelaunch(job.providerAccountId);
-            } catch {
-              /* ignore */
-            }
-          }
-          return NextResponse.json({
-            success: false,
-            asset: {
-              id: job.id,
-              status: 'FAILED',
-              progress: 0,
-              url: '',
-              error: userMsg,
-              prompt: job.prompt,
-            },
-          });
-        }
-        if (bib.status === 'COMPLETED' && mediaUrl) {
-          const isImage =
-            /\/image\//i.test(mediaUrl) ||
-            /pix|narwhal|harbor|gem_pix|nano/i.test(String(job.modelKey || ''));
-          const updateRes = await prisma.generationJob.updateMany({
-            where: { id: job.id, status: { not: JobStatus.COMPLETED } },
-            data: {
-              status: JobStatus.COMPLETED,
-              progress: 100,
-              outputMediaUrl: mediaUrl,
-              completedAt: new Date(),
-            },
-          });
-          if (updateRes.count > 0) {
-            const shortId = job.id.substring(0, 8);
-            const urlPath = String(mediaUrl || '').split('?')[0];
-            try {
-              recordJobProxyOutcome(job, 'ok');
-            } catch {
-              /* ignore */
-            }
-            const existingAsset = await prisma.asset.findFirst({
-              where: {
-                userId: job.userId,
-                OR: [
-                  { fileName: { contains: shortId } },
-                  { url: mediaUrl },
-                  { storagePath: mediaUrl },
-                  ...(urlPath
-                    ? [{ url: { startsWith: urlPath } }, { storagePath: { startsWith: urlPath } }]
-                    : []),
-                ],
-              },
-            });
-            if (!existingAsset) {
-              await prisma.asset.create({
-                data: {
-                  userId: job.userId,
-                  projectId: job.projectId,
-                  fileName: isImage ? `i2i_${shortId}.png` : `veo_${shortId}.mp4`,
-                  fileType: isImage ? 'image' : 'video',
-                  mimeType: isImage ? 'image/png' : 'video/mp4',
-                  fileSize: 1024 * 1024,
-                  storagePath: mediaUrl,
-                  url: mediaUrl,
-                  upstreamAssetId: flowMediaId,
-                  expiresAt: job.expiresAt,
-                },
-              });
-            }
-            await settleCredits(job.userId, job.walletType, job.creditCost, job.id);
-            checkAndDispatchNextJobs(job.userId).catch(console.error);
-            const started = job.startedAt ? new Date(job.startedAt).getTime() : 0;
-            const dur =
-              started > 0 ? `${((Date.now() - started) / 1000).toFixed(1)}s` : undefined;
-            await logJobTerminal(job, 'complete', dur);
-            try {
-              const { drainPendingProxyRelaunch } = await import(
-                '@/lib/unusualActivityProxyRotate'
-              );
-              await drainPendingProxyRelaunch(job.providerAccountId);
-            } catch {
-              /* ignore */
-            }
-          }
-          return NextResponse.json({
-            success: true,
-            asset: {
-              id: job.id,
-              status: 'COMPLETED',
-              progress: 100,
-              url: mediaUrl,
-              prompt: job.prompt,
-            },
-          });
-        }
-
+      }
+      if (outcome.kind === 'completed') {
+        return NextResponse.json({
+          success: true,
+          asset: {
+            id: job.id,
+            status: 'COMPLETED',
+            progress: 100,
+            url: outcome.url,
+            prompt: job.prompt,
+          },
+        });
+      }
+      if (outcome.kind === 'processing') {
         return NextResponse.json({
           success: true,
           asset: {
             id: job.id,
             status: 'PROCESSING',
-            progress: Math.min(90, (job.progress || 15) + 5),
+            progress: outcome.progress ?? Math.min(90, (job.progress || 15) + 5),
             url: '',
             prompt: job.prompt,
           },
         });
-      } catch (bibErr: any) {
-        const msg = String(bibErr?.message || bibErr);
-        console.warn('[video/status] BiB poll failed:', msg);
-        // Transient: browser restarting / proxy rotate — keep user in queue, don't fail the card
-        if (
-          /browser not launched|Target closed|not attached|startScreencast|CDP|ECONNREFUSED|fetch failed|retryable|PROCESSING/i.test(
-            msg
-          )
-        ) {
-          try {
-            const acc = await prisma.providerAccount.findUnique({
-              where: { id: String(providerAccountId) },
-              select: {
-                id: true,
-                maxParallelLimit: true,
-                flowProjectIds: true,
-                profileDir: true,
-              },
-            });
-            if (acc) {
-              const { ensureBibAccountReady } = await import('@/lib/bib');
-              ensureBibAccountReady(acc).catch((e) =>
-                console.warn('[video/status] ensure launch:', e?.message || e)
-              );
-            }
-          } catch {
-            /* ignore */
-          }
-          return NextResponse.json({
-            success: true,
-            asset: {
-              id: job.id,
-              status: 'PROCESSING',
-              progress: Math.min(90, Math.max(5, job.progress || 15)),
-              url: '',
-              prompt: job.prompt,
-              error: 'Waiting for browser…',
-              inQueue: true,
-            },
-          });
-        }
-        // fall through to Python
       }
+      if (outcome.kind === 'transient') {
+        return NextResponse.json({
+          success: true,
+          asset: {
+            id: job.id,
+            status: 'PROCESSING',
+            progress: Math.min(90, Math.max(5, job.progress || 15)),
+            url: '',
+            prompt: job.prompt,
+            error: 'Waiting for browser…',
+            inQueue: true,
+          },
+        });
+      }
+      // skip → fall through to Python
     }
 
     try {
@@ -401,7 +231,6 @@ export async function GET(
             },
           });
 
-          // If this request was the one that marked the job COMPLETED, persist the asset and settle credits
           if (updateRes.count > 0) {
             const shortId = job.id.substring(0, 8);
             try {
@@ -506,7 +335,6 @@ export async function GET(
           });
         }
 
-        // Still rendering
         const currentProgress = Math.min(95, (job.progress || 25) + 5);
         await prisma.generationJob.update({
           where: { id: job.id },

@@ -178,6 +178,122 @@ export async function createStudioLog(input: StudioLogInput) {
   });
 }
 
+/** Label for "Generation queued (…)" — matches Studio / Bulk tool names. */
+export function resolveQueuedModeLabel(opts: {
+  source?: string | null;
+  kind?: 'video' | 'image' | 'image-to-video' | 'image-to-image';
+}): string {
+  const s = String(opts.source || '')
+    .toLowerCase()
+    .trim();
+  if (/bulkt2v|bulk[_-]?t2v/.test(s)) return 'bulkt2v';
+  if (/bulki2v|bulk[_-]?i2v/.test(s)) return 'bulki2v';
+  if (/bulkt2i|bulk[_-]?t2i/.test(s)) return 'bulkt2i';
+  if (/storyteller/.test(s)) return 'storyteller';
+  if (opts.kind === 'image-to-video') return 'i2v';
+  if (opts.kind === 'image-to-image') return 'i2i';
+  if (opts.kind === 'image') return 'image';
+  return 'video';
+}
+
+/**
+ * Studio-style queue trail for Bulk / Storyteller / plan-limit waits.
+ * Returns the user-facing queueMessage to store on the job.
+ */
+export async function logGenerationQueued(opts: {
+  runId?: string | null;
+  userId: string;
+  userEmail?: string | null;
+  flowEmail?: string | null;
+  prompt: string;
+  source?: string | null;
+  kind: 'video' | 'image' | 'image-to-video' | 'image-to-image';
+  planLimit: number;
+  activeJobs: number;
+  /** True when no Google provider was available. */
+  noProvider?: boolean;
+}): Promise<string> {
+  const { toUserFacingQueueMessage } = await import('@/lib/userMessages');
+  const mode = resolveQueuedModeLabel({ source: opts.source, kind: opts.kind });
+  const runId = String(opts.runId || '').trim() || undefined;
+  const atLimit = opts.activeJobs >= opts.planLimit;
+
+  const internal = opts.noProvider
+    ? 'In Queue: Waiting for a Google provider (BiB Launch / free user slot).'
+    : atLimit
+      ? `In Queue: Plan parallel generation limit (${opts.planLimit}) reached.`
+      : `In Queue: Bulk ${mode} background`;
+  const queueMsg = toUserFacingQueueMessage(internal);
+
+  await createStudioLog({
+    level: 'info',
+    source: 'ui',
+    message: `Generation queued (${mode}): ${String(opts.prompt || '').slice(0, 100)}`,
+    runId,
+    userId: opts.userId,
+    userEmail: opts.userEmail,
+    flowEmail: opts.flowEmail,
+  });
+
+  await createStudioLog({
+    level: 'info',
+    source: 'generate',
+    message: atLimit
+      ? `Waiting in queue. Your plan parallel limit (${opts.planLimit}) is reached — starts when a slot frees (${opts.activeJobs}/${opts.planLimit} active).`
+      : opts.noProvider
+        ? 'Waiting in queue. Waiting for a free Google account…'
+        : queueMsg,
+    runId,
+    userId: opts.userId,
+    userEmail: opts.userEmail,
+    flowEmail: opts.flowEmail,
+  });
+
+  return queueMsg;
+}
+
+/** When dispatcher/API actually submits to Flow — same wording as Studio T2V. */
+export async function logGenerationSubmitted(opts: {
+  runId?: string | null;
+  userId: string;
+  userEmail?: string | null;
+  flowEmail?: string | null;
+  kind: 't2v' | 'i2v' | 't2i' | 'i2i';
+}) {
+  const runId = String(opts.runId || '').trim() || undefined;
+  const message =
+    opts.kind === 'i2v'
+      ? 'I2V submitted — polling Flow for result…'
+      : opts.kind === 't2i'
+        ? 'T2I submitted — waiting for Flow…'
+        : opts.kind === 'i2i'
+          ? 'I2I submitted — waiting for Flow…'
+          : 'T2V submitted — polling Flow for result…';
+
+  // Dedupe: avoid double log if route already wrote the same line
+  if (runId) {
+    const existing = await prisma.studioLog.findFirst({
+      where: {
+        runId,
+        message: { startsWith: message.slice(0, 24) },
+        createdAt: { gte: new Date(Date.now() - 2 * 60 * 1000) },
+      },
+      select: { id: true },
+    });
+    if (existing) return;
+  }
+
+  await createStudioLog({
+    level: 'info',
+    source: 'generate',
+    message,
+    runId,
+    userId: opts.userId,
+    userEmail: opts.userEmail,
+    flowEmail: opts.flowEmail,
+  });
+}
+
 function isTerminalCompleteMessage(message: string): boolean {
   return /\b(?:t2[iv]|i2[iv])\s+complete\b|\bingredients?\s+complete\b|\bvideo complete\b|\bimage complete\b|\bi2i complete\b|\bupscale complete\b|\bcomplete:\s*\d+\s+asset|\basset\(s\)\s*$|\bupscaled to 1080p successfully\b/i.test(
     String(message || '')

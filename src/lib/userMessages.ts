@@ -16,7 +16,11 @@ export const USER_QUEUE_TOOL =
 export function toUserFacingQueueMessage(internal?: string | null): string {
   if (!internal) return USER_QUEUE_BUSY;
   const msg = String(internal);
-  if (/parallel generation limit|plan parallel/i.test(msg)) {
+  const limitMatch = msg.match(/plan parallel generation limit\s*\((\d+)\)/i);
+  if (limitMatch || /parallel generation limit|plan parallel/i.test(msg)) {
+    if (limitMatch) {
+      return `Waiting in queue. Your plan parallel limit (${limitMatch[1]}) is reached — starts when a slot frees.`;
+    }
     return USER_QUEUE_PLAN_LIMIT;
   }
   if (/In Queue:\s*(Storyteller|Bulk)\b/i.test(msg)) {

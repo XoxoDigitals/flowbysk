@@ -6,10 +6,15 @@
  *   1) rotate THAT account’s DataImpulse sticky + hard-relaunch BiB Chrome
  *   2) retry once on the new proxy
  *   then throw (do not keep burning the same IP).
+ *
+ * Browser down / disconnect:
+ *   1) soft ensure/launch (same sticky)
+ *   2) if same error again → rotate sticky + relaunch → retry
  */
 
 import { isUnusualActivityError, rotateProxyAndRelaunchForAccount } from './unusualActivityProxyRotate';
 import { recordProxyOutcome } from './dataimpulse';
+import { ensureBibAccountReady } from './bib';
 
 export function isPolicyGenerationError(raw: unknown): boolean {
   const text = String(raw ?? '').trim();
@@ -54,6 +59,13 @@ export function isThrottleGenerationError(raw: unknown): boolean {
   );
 }
 
+/** Chrome down / CDP detach — soft relaunch then rotate+relaunch ladder. */
+export function isBrowserDownError(raw: unknown): boolean {
+  return /browser not launched|Target closed|not attached|Waiting for browser/i.test(
+    String(raw ?? '')
+  );
+}
+
 export type SystemRetryOptions = {
   delayMs?: number;
   /** @deprecated Prefer throttleDelaysMs — single wait applied to every throttle retry. */
@@ -62,6 +74,11 @@ export type SystemRetryOptions = {
   throttleDelaysMs?: number[];
   /** Total attempts including the first for normal system errors (default 5). */
   maxAttempts?: number;
+  /**
+   * Extra attempts allowed for browser-down heal ladder (default 10).
+   * Soft relaunch first; repeat → rotate sticky + relaunch.
+   */
+  browserHealMaxAttempts?: number;
   label?: string;
   /** Provider account id — required for per-account unusual proxy rotate. */
   providerAccountId?: string;
@@ -77,6 +94,7 @@ export type SystemRetryOptions = {
  * Run `fn`. On system-class errors, retry up to maxAttempts-1 more times.
  * Policy errors propagate immediately.
  * Unusual: rotate account proxy + relaunch → retry → then fail.
+ * Browser down: soft launch → if same, rotate+relaunch → retry.
  * Throttle: wait 10s then 20s (default), then stop — no endless throttle retries.
  */
 export async function withSystemErrorRetry<T>(
@@ -91,12 +109,14 @@ export async function withSystemErrorRetry<T>(
         ? [Math.max(0, Number(opts.throttleDelayMs) || 10000)]
         : [10000, 20000];
   const maxAttempts = Math.max(1, opts.maxAttempts ?? 5);
+  const browserHealMax = Math.max(maxAttempts, opts.browserHealMaxAttempts ?? 10);
   const label = opts.label || 'generation';
 
   let lastErr: unknown;
   let unusualHits = 0;
   let normalAttempts = 0;
   let throttleAttempts = 0;
+  let browserDownHits = 0;
 
   while (true) {
     try {
@@ -210,6 +230,65 @@ export async function withSystemErrorRetry<T>(
           `[system-retry] ${label}: throttle attempt ${throttleAttempts}/${throttleDelaysMs.length} failed — ${msg.slice(0, 180)}; retrying in ${waitMs}ms…`
         );
         if (opts.onRetry) await opts.onRetry(err, throttleAttempts);
+        if (opts.shouldContinue && !(await opts.shouldContinue())) {
+          throw new Error('Stop by user');
+        }
+        await new Promise((r) => setTimeout(r, waitMs));
+        if (opts.shouldContinue && !(await opts.shouldContinue())) {
+          throw new Error('Stop by user');
+        }
+        continue;
+      }
+
+      // Browser down: soft relaunch → if same again, rotate sticky + relaunch
+      if (isBrowserDownError(msg)) {
+        browserDownHits += 1;
+        if (browserDownHits > browserHealMax) {
+          console.warn(
+            `[system-retry] ${label}: browser-heal exhausted (${browserDownHits - 1}/${browserHealMax}) — giving up`
+          );
+          break;
+        }
+
+        if (opts.providerAccountId) {
+          if (browserDownHits === 1) {
+            console.warn(
+              `[system-retry] ${label}: browser down #1 — soft relaunch (same sticky)…`
+            );
+            try {
+              await ensureBibAccountReady({ id: opts.providerAccountId });
+            } catch (e) {
+              console.warn(`[system-retry] ${label}: soft relaunch failed:`, e);
+            }
+          } else {
+            console.warn(
+              `[system-retry] ${label}: browser down #${browserDownHits} — rotate sticky + relaunch…`
+            );
+            try {
+              const rot = await rotateProxyAndRelaunchForAccount(opts.providerAccountId, {
+                reason: 'browser down heal',
+                exceptJobId: opts.jobId,
+                forceRelaunch: true,
+              });
+              console.warn(
+                `[system-retry] ${label}: heal rotate ${rot.rotated ? 'ok' : 'skip'} relaunched=${rot.relaunched} → ${rot.to || rot.error || 'n/a'}`
+              );
+            } catch (e) {
+              console.warn(`[system-retry] ${label}: heal rotate failed:`, e);
+              try {
+                await ensureBibAccountReady({ id: opts.providerAccountId });
+              } catch {
+                /* ignore */
+              }
+            }
+          }
+        }
+
+        const waitMs = Math.max(delayMs, 4000);
+        console.warn(
+          `[system-retry] ${label}: browser-heal ${browserDownHits}/${browserHealMax} — ${msg.slice(0, 160)}; retrying in ${waitMs}ms…`
+        );
+        if (opts.onRetry) await opts.onRetry(err, browserDownHits);
         if (opts.shouldContinue && !(await opts.shouldContinue())) {
           throw new Error('Stop by user');
         }

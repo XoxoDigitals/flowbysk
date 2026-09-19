@@ -331,6 +331,33 @@ async function launchAccountEntry(a) {
 }
 
 /**
+ * Soft-heal: if Chrome is down, relaunch from pool/autolaunch state.
+ * Used by generate / upload / status so jobs don't hard-fail on disconnect.
+ */
+async function ensureBrowserOrLaunch(accountId) {
+  let s = pool.get(accountId);
+  if (s?.browser) return s;
+
+  const remembered =
+    readAutolaunchState().accounts.find((a) => a.id === accountId) || { id: accountId };
+  console.warn(`[${accountId}] browser down — auto-launching`);
+  await launchAccountEntry({
+    id: accountId,
+    maxSlots: remembered.maxSlots || s?.maxSlots,
+    projectIds: remembered.projectIds || s?.projectIds,
+    profileDir: remembered.profileDir || s?.profileDir,
+  });
+  s = pool.get(accountId);
+  if (!s?.browser) {
+    const err = new Error('Account browser not launched');
+    err.statusCode = 409;
+    err.retryable = true;
+    throw err;
+  }
+  return s;
+}
+
+/**
  * Fetch the authoritative account roster from the app (DB-backed).
  * Retries while the Next app is still booting; returns null if unreachable so
  * the caller can fall back to the local JSON cache.
@@ -620,8 +647,12 @@ app.get('/accounts/:id/status', async (req, res) => {
 // generate*, create-character) stay secret-gated below.
 app.post('/accounts/:id/navigate', async (req, res) => {
   try {
-    const s = pool.get(req.params.id);
-    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    let s;
+    try {
+      s = await ensureBrowserOrLaunch(req.params.id);
+    } catch (e) {
+      return res.status(409).json({ error: e.message || 'Account browser not launched', retryable: true });
+    }
     if (s.cdp) await s.cdp.send('Fetch.disable').catch(() => {});
     s.allowMedia = true;
     s._mediaGuardInstalled = false;
@@ -647,8 +678,12 @@ app.post('/accounts/:id/navigate', async (req, res) => {
 
 app.post('/accounts/:id/ensure-projects', async (req, res) => {
   try {
-    const s = pool.get(req.params.id);
-    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    let s;
+    try {
+      s = await ensureBrowserOrLaunch(req.params.id);
+    } catch (e) {
+      return res.status(409).json({ error: e.message || 'Account browser not launched', retryable: true });
+    }
     const auth = await s.refreshAuthStatus();
     if (!auth.authenticated && s.status !== 'READY') {
       return res.status(401).json({ error: 'Not logged in — complete BiB login first' });
@@ -665,8 +700,12 @@ app.post('/accounts/:id/ensure-projects', async (req, res) => {
 /** Scrape existing flow.google.com project IDs only (no create). */
 app.post('/accounts/:id/scrape-projects', async (req, res) => {
   try {
-    const s = pool.get(req.params.id);
-    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    let s;
+    try {
+      s = await ensureBrowserOrLaunch(req.params.id);
+    } catch (e) {
+      return res.status(409).json({ error: e.message || 'Account browser not launched', retryable: true });
+    }
     const ids = await s.scrapeProjects();
     s.projectIds = [...new Set([...ids, ...s.projectIds])];
     if (s.projectIds[0]) {
@@ -688,8 +727,12 @@ app.post('/accounts/:id/set-projects', requireInternalSecret, (req, res) => {
 
 app.get('/accounts/:id/export-cookies', requireInternalSecret, async (req, res) => {
   try {
-    const s = pool.get(req.params.id);
-    if (!s?.browser) return res.status(409).json({ error: 'not launched' });
+    let s;
+    try {
+      s = await ensureBrowserOrLaunch(req.params.id);
+    } catch (e) {
+      return res.status(409).json({ error: 'not launched', retryable: true });
+    }
     // Warm aisandbox auth (API/sniff — never labs tools UI)
     if (req.query.warmLabs !== '0') {
       await s.ensureLabsSession({ force: true }).catch(() => null);
@@ -732,8 +775,15 @@ app.post('/create-character', requireInternalSecret, async (req, res) => {
     const charName = String(displayName || name || '').trim() || 'Untitled character';
     if (!accountId) return res.status(400).json({ error: 'accountId required' });
 
-    const s = pool.get(accountId);
-    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    let s;
+    try {
+      s = await ensureBrowserOrLaunch(accountId);
+    } catch (e) {
+      return res.status(409).json({
+        error: e.message || 'Account browser not launched',
+        retryable: true,
+      });
+    }
     try {
       await ensureAccountUsable(s, preferredProject);
     } catch (e) {
@@ -866,8 +916,12 @@ app.post('/create-character', requireInternalSecret, async (req, res) => {
 /** Force aisandbox Bearer mint (Flow sniff + labs NextAuth API — multi-ref / first+last). */
 app.post('/accounts/:id/ensure-labs', async (req, res) => {
   try {
-    const s = pool.get(req.params.id);
-    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    let s;
+    try {
+      s = await ensureBrowserOrLaunch(req.params.id);
+    } catch (e) {
+      return res.status(409).json({ error: e.message || 'Account browser not launched', retryable: true });
+    }
     const token = await s.fetchLabsAccessToken({ force: true });
     if (token) {
       const pid = s.projectIds[0];
@@ -932,8 +986,14 @@ app.post('/generate', requireInternalSecret, async (req, res) => {
     } = req.body || {};
     if (!accountId) return res.status(400).json({ error: 'accountId required' });
     if (!prompt) return res.status(400).json({ error: 'prompt required' });
-    s = pool.get(accountId);
-    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    try {
+      s = await ensureBrowserOrLaunch(accountId);
+    } catch (e) {
+      return res.status(409).json({
+        error: e.message || 'Account browser not launched',
+        retryable: true,
+      });
+    }
     s.beginOp();
     try {
       await ensureAccountUsable(s, preferredProject);
@@ -1120,8 +1180,15 @@ app.post('/batch-run', requireInternalSecret, async (req, res) => {
       tasks: bodyTasks,
     } = req.body || {};
     if (!accountId) return res.status(400).json({ error: 'accountId required' });
-    const s = pool.get(accountId);
-    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    let s;
+    try {
+      s = await ensureBrowserOrLaunch(accountId);
+    } catch (e) {
+      return res.status(409).json({
+        error: e.message || 'Account browser not launched',
+        retryable: true,
+      });
+    }
     try {
       await ensureAccountUsable(s);
     } catch (e) {
@@ -1222,8 +1289,14 @@ app.post('/generate-video', requireInternalSecret, async (req, res) => {
     } = req.body || {};
     if (!accountId) return res.status(400).json({ error: 'accountId required' });
     if (!prompt) return res.status(400).json({ error: 'prompt required' });
-    s = pool.get(accountId);
-    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    try {
+      s = await ensureBrowserOrLaunch(accountId);
+    } catch (e) {
+      return res.status(409).json({
+        error: e.message || 'Account browser not launched',
+        retryable: true,
+      });
+    }
     s.beginOp();
     try {
       await ensureAccountUsable(s, preferredProject);
@@ -1536,8 +1609,14 @@ app.post('/accounts/:id/upload-image', requireInternalSecret, async (req, res) =
 
     if (!accountId) return res.status(400).json({ error: 'accountId required' });
 
-    s = pool.get(accountId);
-    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    try {
+      s = await ensureBrowserOrLaunch(accountId);
+    } catch (e) {
+      return res.status(409).json({
+        error: e.message || 'Account browser not launched',
+        retryable: true,
+      });
+    }
     s.beginOp();
     try {
       await ensureAccountUsable(s, preferredProject);
@@ -1712,8 +1791,15 @@ app.post('/upsample-video', requireInternalSecret, async (req, res) => {
     if (!accountId || !mediaId) {
       return res.status(400).json({ error: 'accountId and mediaId required' });
     }
-    const s = pool.get(accountId);
-    if (!s?.browser) return res.status(409).json({ error: 'Account browser not launched' });
+    let s;
+    try {
+      s = await ensureBrowserOrLaunch(accountId);
+    } catch (e) {
+      return res.status(409).json({
+        error: e.message || 'Account browser not launched',
+        retryable: true,
+      });
+    }
     try {
       await ensureAccountUsable(s, preferredProject);
     } catch (e) {
@@ -1818,12 +1904,10 @@ app.post('/video-status', requireInternalSecret, async (req, res) => {
       return res.status(400).json({ error: 'accountId and mediaId required' });
     }
     let s = pool.get(accountId);
-    // Auto-relaunch after BiB restart — don't fail the user's in-flight job
+    // Auto-relaunch after BiB restart / disconnect — don't fail in-flight jobs
     if (!s?.browser) {
       try {
-        console.warn(`[${accountId}] video-status: browser down — auto-launching`);
-        await launchAccountEntry({ id: accountId });
-        s = pool.get(accountId);
+        s = await ensureBrowserOrLaunch(accountId);
       } catch (e) {
         console.warn(`[${accountId}] video-status auto-launch:`, e.message || e);
       }

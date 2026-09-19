@@ -57,6 +57,14 @@ export async function countUserActiveJobs(userId: string): Promise<number> {
 }
 
 export async function checkAndDispatchNextJobs(userId?: string) {
+  // Keep resume loop alive whenever queue traffic runs (no admin UI needed)
+  try {
+    const { startJobStatusResumeLoop } = await import('./jobStatusResume');
+    startJobStatusResumeLoop();
+  } catch {
+    /* ignore */
+  }
+
   // Global admin pause — keep jobs IN_QUEUE but do not start them
   try {
     const { getStudioQueueControl } = await import('./studioTools');
@@ -198,6 +206,25 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
             params.last_frame_staged_id ||
             params.frame_mode
           );
+
+        // Studio-style submit log when bulk/queue finally gets a slot
+        try {
+          const { logGenerationSubmitted } = await import('./studioLogs');
+          const user = await prisma.user.findUnique({
+            where: { id: job.userId },
+            select: { email: true },
+          });
+          await logGenerationSubmitted({
+            runId: params.run_id || job.id,
+            userId: job.userId,
+            userEmail: user?.email || null,
+            flowEmail: provider.accountEmail || null,
+            kind: isI2V ? 'i2v' : isVideo ? 't2v' : 't2i',
+          });
+        } catch (logErr) {
+          console.warn('[queue] submit studio log failed', logErr);
+        }
+
         const endpoint = isI2V
           ? '/api/generate/image-to-video'
           : isVideo

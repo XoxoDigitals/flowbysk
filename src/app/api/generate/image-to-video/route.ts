@@ -2,14 +2,13 @@ import { NextResponse } from 'next/server';
 import { getOrCreateStudioUser } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { getModelPricing, reserveCredits, settleCredits, releaseCredits, resolveModelPricing } from '@/lib/credits';
-import { toUserFacingQueueMessage } from '@/lib/userMessages';
 import { resolveVideoFrontendModel } from '@/lib/modelWire';
 import { selectProviderAccountForJobDetailed } from '@/lib/routing';
 import { getUserPlanLimit, countUserActiveJobs, checkAndDispatchNextJobs } from '@/lib/queue';
 import { JobStatus, WalletType } from '@prisma/client';
 import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
 import { prepareProviderWorkerSession, ensureFlowReadyMediaId } from '@/lib/providerSession';
-import { createStudioLog } from '@/lib/studioLogs';
+import { createStudioLog, logGenerationQueued } from '@/lib/studioLogs';
 import { bibGenerateVideo, ensureBibAccountReady, bibEnsureLabs } from '@/lib/bib';
 import { resolveVideoWireModel } from '@/lib/modelWire';
 
@@ -102,7 +101,18 @@ export async function POST(req: Request) {
 
     // Bulk I2V background: enqueue only — dispatcher starts jobs as slots free.
     if (body.enqueue_only === true || body.background === true) {
-      const queueMsg = toUserFacingQueueMessage('In Queue: Bulk I2V background');
+      const planLimit = await getUserPlanLimit(session.userId);
+      const activeJobs = await countUserActiveJobs(session.userId);
+      const queueMsg = await logGenerationQueued({
+        runId: body.run_id || job.id,
+        userId: session.userId,
+        userEmail: session.email,
+        prompt: job.prompt,
+        source: body.source || 'bulki2v',
+        kind: 'image-to-video',
+        planLimit,
+        activeJobs,
+      });
       await prisma.generationJob.update({
         where: { id: job.id },
         data: { errorMessage: queueMsg },
@@ -136,12 +146,24 @@ export async function POST(req: Request) {
     );
 
     if (!provider || activeJobs >= planLimit) {
-      const internal = !provider
-        ? providerReason ||
-          'In Queue: Waiting for a Google provider (BiB Launch / free user slot).'
-        : `In Queue: Plan parallel generation limit (${planLimit}) reached.`;
-      if (!provider) console.warn('[generate/i2v]', internal);
-      const queueMsg = toUserFacingQueueMessage(internal);
+      const queueMsg = await logGenerationQueued({
+        runId: body.run_id || job.id,
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider?.accountEmail || null,
+        prompt: job.prompt,
+        source: body.source || 'i2v',
+        kind: 'image-to-video',
+        planLimit,
+        activeJobs,
+        noProvider: !provider,
+      });
+      if (!provider) {
+        console.warn(
+          '[generate/i2v]',
+          providerReason || 'In Queue: Waiting for a Google provider (BiB Launch / free user slot).'
+        );
+      }
       await prisma.generationJob.update({
         where: { id: job.id },
         data: { errorMessage: queueMsg },
@@ -254,6 +276,7 @@ export async function POST(req: Request) {
           runId: String(body.run_id),
           userId: session.userId,
           userEmail: session.email,
+          flowEmail: provider.accountEmail || null,
         }).catch(() => 0);
       }
 
@@ -373,6 +396,7 @@ export async function POST(req: Request) {
             runId: String(body.run_id),
             userId: session.userId,
             userEmail: session.email,
+            flowEmail: provider.accountEmail || null,
           }).catch(() => 0);
         }
         await ensureBibAccountReady({

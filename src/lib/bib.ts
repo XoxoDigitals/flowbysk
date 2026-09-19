@@ -84,22 +84,14 @@ export async function ensureBibAccountReady(account: {
   let live: any = null;
   try {
     live = await bibAccountStatus(account.id);
-    if (live?.running || live?.status === 'READY' || live?.status === 'NEEDS_LOGIN' || live?.status === 'ERROR') {
-      // keep going — may still need launch if not READY
-    } else {
-      live = null;
-    }
   } catch {
     live = null;
   }
 
-  if (
-    !live ||
-    (live.status !== 'READY' &&
-      live.status !== 'NEEDS_LOGIN' &&
-      live.status !== 'ERROR' &&
-      !live.running)
-  ) {
+  // Launch when Chrome is down. STARTING = already coming up — don't double-launch.
+  const needsLaunch = !live || !live.running || live.status === 'STOPPED';
+
+  if (needsLaunch && live?.status !== 'STARTING') {
     live = await bibLaunchAccount(account.id, {
       maxSlots: account.maxParallelLimit || 5,
       projectIds: Array.isArray(account.flowProjectIds)
@@ -256,63 +248,111 @@ export async function bibGenerateImage(payload: {
   /** Bind remix output onto an existing Flow character entity (C4BZMd id) */
   destinationCharacterId?: string;
 }) {
-  const res = await bibFetch('/generate', {
-    method: 'POST',
-    body: JSON.stringify({
-      ...payload,
-      destinationCharacterId: payload.destinationCharacterId,
-      destination_character_id: payload.destinationCharacterId,
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.success === false) {
-    const base = data.error || data.raw || `BiB generate failed (${res.status})`;
-    const hint = unusualHintFromBibData(data);
-    throw new Error(
-      hint && !/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC|USER_REQUESTS_THROTTLED|THROTTLED/i.test(String(base))
-        ? `${base} (${hint})`
-        : String(base)
-    );
-  }
-  return data as {
-    success: boolean;
-    status?: string;
-    imageUrl?: string | null;
-    url?: string | null;
-    mediaId?: string | null;
-    projectId?: string;
-    seed?: number;
-    assets?: { url?: string; id?: string; status?: string }[];
+  const run = async () => {
+    const res = await bibFetch('/generate', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...payload,
+        destinationCharacterId: payload.destinationCharacterId,
+        destination_character_id: payload.destinationCharacterId,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) {
+      const base = data.error || data.raw || `BiB generate failed (${res.status})`;
+      const hint = unusualHintFromBibData(data);
+      const err: any = new Error(
+        hint && !/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC|USER_REQUESTS_THROTTLED|THROTTLED/i.test(String(base))
+          ? `${base} (${hint})`
+          : String(base)
+      );
+      err.status = res.status;
+      err.retryable = data.retryable === true || res.status === 409;
+      throw err;
+    }
+    return data as {
+      success: boolean;
+      status?: string;
+      imageUrl?: string | null;
+      url?: string | null;
+      mediaId?: string | null;
+      projectId?: string;
+      seed?: number;
+      assets?: { url?: string; id?: string; status?: string }[];
+    };
   };
+
+  try {
+    return await run();
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    if (
+      e?.retryable ||
+      /browser not launched|Target closed|not attached|ECONNREFUSED|fetch failed/i.test(msg)
+    ) {
+      try {
+        await ensureBibAccountReady({ id: payload.accountId });
+        return await run();
+      } catch {
+        /* still down — outer retry / ladder heals */
+      }
+    }
+    throw e;
+  }
 }
 
 export async function bibGenerateVideo(payload: Record<string, unknown>) {
-  const res = await bibFetch('/generate-video', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.success === false) {
-    const stage = data.stage ? ` [${data.stage}]` : '';
-    const base =
-      data.error || data.raw || `BiB video failed (${res.status})${stage}`;
-    const hint = unusualHintFromBibData(data);
-    throw new Error(
-      hint && !/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC|USER_REQUESTS_THROTTLED|THROTTLED/i.test(String(base))
-        ? `${base} (${hint})`
-        : String(base)
-    );
-  }
-  return data as {
-    success: boolean;
-    status?: string;
-    videoUrl?: string | null;
-    url?: string | null;
-    mediaId?: string;
-    projectId?: string;
-    accountId?: string;
-    error?: string;
+  const accountId = String(payload.accountId || '');
+  const run = async () => {
+    const res = await bibFetch('/generate-video', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) {
+      const stage = data.stage ? ` [${data.stage}]` : '';
+      const base =
+        data.error || data.raw || `BiB video failed (${res.status})${stage}`;
+      const hint = unusualHintFromBibData(data);
+      const err: any = new Error(
+        hint && !/UNUSUAL_ACTIVITY|TOO_MUCH_TRAFFIC|USER_REQUESTS_THROTTLED|THROTTLED/i.test(String(base))
+          ? `${base} (${hint})`
+          : String(base)
+      );
+      err.status = res.status;
+      err.retryable = data.retryable === true || res.status === 409;
+      throw err;
+    }
+    return data as {
+      success: boolean;
+      status?: string;
+      videoUrl?: string | null;
+      url?: string | null;
+      mediaId?: string;
+      projectId?: string;
+      accountId?: string;
+      error?: string;
+    };
   };
+
+  try {
+    return await run();
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    if (
+      accountId &&
+      (e?.retryable ||
+        /browser not launched|Target closed|not attached|ECONNREFUSED|fetch failed/i.test(msg))
+    ) {
+      try {
+        await ensureBibAccountReady({ id: accountId });
+        return await run();
+      } catch {
+        /* still down — outer retry / ladder heals */
+      }
+    }
+    throw e;
+  }
 }
 
 export async function bibVideoStatus(payload: {

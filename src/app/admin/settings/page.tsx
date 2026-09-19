@@ -878,10 +878,14 @@ export default function AdminSettingsPage() {
           </p>
         </div>
 
-        <div className="space-y-3 rounded-[14px] border border-[var(--line)] bg-[var(--bg2)] p-4">
+        <form
+          onSubmit={onSaveSocialLinks}
+          className="space-y-3 rounded-[14px] border border-[var(--line)] bg-[var(--bg2)] p-4"
+        >
           <p className="text-sm font-medium text-[var(--ink)]">Announcement social links</p>
           <p className="text-[12px] text-[var(--ink3)]">
-            Leave blank to hide an icon. Saved with <b>Save site settings</b> above.
+            Paste full links (e.g. https://t.me/yourchannel). Leave blank to hide that icon. Click{' '}
+            <b>Save social links</b> below — icons appear on the user dashboard announcement bar.
           </p>
           <div className="grid gap-3 sm:grid-cols-2">
             {SOCIAL_PLATFORMS.map((p) => (
@@ -890,7 +894,8 @@ export default function AdminSettingsPage() {
                   {p.label.toUpperCase()}
                 </span>
                 <input
-                  type="url"
+                  type="text"
+                  inputMode="url"
                   value={socialLinks[p.id] || ''}
                   onChange={(e) =>
                     setSocialLinks((prev) => {
@@ -907,7 +912,13 @@ export default function AdminSettingsPage() {
               </label>
             ))}
           </div>
-        </div>
+          {socialMsg && <p className="text-sm text-[var(--a1)]">{socialMsg}</p>}
+          {socialErr && <p className="text-sm text-rose-500">{socialErr}</p>}
+          <button type="submit" disabled={savingSocial} className="btn-primary !text-[13px]">
+            <Save className="h-3.5 w-3.5" />
+            {savingSocial ? 'Saving…' : 'Save social links'}
+          </button>
+        </form>
 
         <form onSubmit={createNotice} className="space-y-3 rounded-[14px] border border-[var(--line)] bg-[var(--bg2)] p-4">
           <div className="grid gap-3 sm:grid-cols-[1fr_140px]">

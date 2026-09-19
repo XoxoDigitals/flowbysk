@@ -2,13 +2,12 @@ import { NextResponse } from 'next/server';
 import { getOrCreateStudioUser } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { getModelPricing, reserveCredits, settleCredits, releaseCredits, resolveModelPricing } from '@/lib/credits';
-import { toUserFacingQueueMessage } from '@/lib/userMessages';
 import { selectProviderAccountForJobDetailed } from '@/lib/routing';
-import { checkAndDispatchNextJobs } from '@/lib/queue';
+import { checkAndDispatchNextJobs, getUserPlanLimit, countUserActiveJobs } from '@/lib/queue';
 import { JobStatus } from '@prisma/client';
 import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
 import { resolveImageFrontendModel, resolveImageWireModel, nextImageWireModel, isImageModelQuotaError } from '@/lib/modelWire';
-import { createStudioLog } from '@/lib/studioLogs';
+import { createStudioLog, logGenerationQueued } from '@/lib/studioLogs';
 import { prepareProviderWorkerSession, ensureFlowReadyMediaId } from '@/lib/providerSession';
 import { bibGenerateImage, ensureBibAccountReady } from '@/lib/bib';
 
@@ -100,7 +99,18 @@ export async function POST(req: Request) {
     }
 
     if (body.enqueue_only === true || body.background === true) {
-      const queueMsg = toUserFacingQueueMessage('In Queue: Storyteller background');
+      const planLimit = await getUserPlanLimit(session.userId);
+      const activeJobs = await countUserActiveJobs(session.userId);
+      const queueMsg = await logGenerationQueued({
+        runId: body.run_id || job.id,
+        userId: session.userId,
+        userEmail: session.email,
+        prompt: job.prompt,
+        source: body.source || 'storyteller',
+        kind: 'image-to-image',
+        planLimit,
+        activeJobs,
+      });
       await prisma.generationJob.update({
         where: { id: job.id },
         data: { errorMessage: queueMsg },
@@ -131,11 +141,23 @@ export async function POST(req: Request) {
     );
 
     if (!provider) {
-      const internal =
-        providerReason ||
-        'In Queue: Waiting for a Google provider (BiB Launch / free user slot).';
-      console.warn('[generate/i2i]', internal);
-      const queueMsg = toUserFacingQueueMessage(internal);
+      const planLimit = await getUserPlanLimit(session.userId);
+      const activeJobs = await countUserActiveJobs(session.userId);
+      console.warn(
+        '[generate/i2i]',
+        providerReason || 'In Queue: Waiting for a Google provider (BiB Launch / free user slot).'
+      );
+      const queueMsg = await logGenerationQueued({
+        runId: body.run_id || job.id,
+        userId: session.userId,
+        userEmail: session.email,
+        prompt: job.prompt,
+        source: body.source || 'i2i',
+        kind: 'image-to-image',
+        planLimit,
+        activeJobs,
+        noProvider: true,
+      });
       await prisma.generationJob.update({
         where: { id: job.id },
         data: { errorMessage: queueMsg },

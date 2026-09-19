@@ -122,6 +122,44 @@ class AccountSession {
     /** When false (default), Chrome aborts Image/Media/Font — saves residential proxy GB. */
     this.allowMedia = false;
     this._mediaGuardInstalled = false;
+    /** Set by disconnect()/admin stop so crash handler does not fight intentional teardown. */
+    this._intentionalStop = false;
+    this._autoRelaunchTimer = null;
+    /** Timestamps of auto-relaunches in the last window (crash-loop guard). */
+    this._autoRelaunchAttempts = [];
+  }
+
+  /**
+   * Soft-heal after unexpected Chrome death. Skips intentional admin/rotate stop.
+   * Max 3 attempts / 60s; reuses same profile + current egress sticky.
+   */
+  _scheduleAutoRelaunch() {
+    if (this._intentionalStop) return;
+    if (this._autoRelaunchTimer) return;
+    const now = Date.now();
+    this._autoRelaunchAttempts = (this._autoRelaunchAttempts || []).filter(
+      (t) => now - t < 60000
+    );
+    if (this._autoRelaunchAttempts.length >= 3) {
+      console.warn(
+        `[${this.accountId}] auto-relaunch exhausted (${this._autoRelaunchAttempts.length}/3 in 60s) — leaving STOPPED`
+      );
+      return;
+    }
+    this._autoRelaunchTimer = setTimeout(() => {
+      this._autoRelaunchTimer = null;
+      if (this._intentionalStop || this.browser) return;
+      this._autoRelaunchAttempts.push(Date.now());
+      console.warn(
+        `[${this.accountId}] auto-relaunch after disconnect (${this._autoRelaunchAttempts.length}/3)…`
+      );
+      this.launch().catch((e) => {
+        console.warn(
+          `[${this.accountId}] auto-relaunch failed:`,
+          e?.message || e
+        );
+      });
+    }, 2500);
   }
 
   beginOp() {
@@ -224,6 +262,7 @@ class AccountSession {
 
   async launch() {
     if (this.browser) return this.publicStatus();
+    this._intentionalStop = false;
     this.status = 'STARTING';
     this.lastError = null;
     this.authLostNotified = false;
@@ -281,6 +320,8 @@ class AccountSession {
         this.cdp = null;
         this.screencasting = false;
         if (this.status !== 'STOPPED') this.status = 'STOPPED';
+        // Soft heal unexpected crashes; intentional disconnect() sets _intentionalStop.
+        this._scheduleAutoRelaunch();
       });
 
       const pages = await this.browser.pages();
@@ -340,6 +381,12 @@ class AccountSession {
   }
 
   async disconnect({ clearProfile = false } = {}) {
+    // Prevent disconnected handler from auto-relaunching during admin/rotate stop.
+    this._intentionalStop = true;
+    if (this._autoRelaunchTimer) {
+      clearTimeout(this._autoRelaunchTimer);
+      this._autoRelaunchTimer = null;
+    }
     this._stopHealthLoop();
     this.screencasting = false;
     if (this._shotTimer) {
