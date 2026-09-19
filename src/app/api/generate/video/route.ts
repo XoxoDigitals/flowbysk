@@ -10,7 +10,7 @@ import { PYTHON_WORKER_URL, formatWorkerFetchError, workerIdentityHeaders } from
 import { fetchWorkerJsonWithSystemRetry, withSystemErrorRetry } from '@/lib/systemErrorRetry';
 import { bibGenerateVideo, BIB_WORKER_URL, ensureBibAccountReady } from '@/lib/bib';
 import { resolveTargetFlowProject } from '@/lib/flowProjects';
-import { createStudioLog, logGenerationQueued } from '@/lib/studioLogs';
+import { createStudioLog, logGenerationQueued, logGenerationSubmitted } from '@/lib/studioLogs';
 
 export async function POST(req: Request) {
   try {
@@ -431,15 +431,14 @@ export async function POST(req: Request) {
         },
       });
 
-      if (body.run_id) {
-        createStudioLog({
-          level: 'info',
-          source: 'generate',
-          message: `T2V submitted — polling Flow for result…`,
-          runId: String(body.run_id),
+      if (body.run_id || job.id) {
+        await logGenerationSubmitted({
+          runId: String(body.run_id || job.id),
           userId: session.userId,
           userEmail: session.email,
           flowEmail: provider.accountEmail || null,
+          kind: 't2v',
+          prompt: job.prompt,
         }).catch(() => 0);
       }
 

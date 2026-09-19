@@ -519,7 +519,7 @@ export function deriveRunStatus(
 
   // Past the initial queue ack — worker accepted / rendering / ingredients / started / upload / upscale
   if (
-    /\bgenerating\b|\bdispatch|\brender|\bwaiting|\bupload|\bupscal|\bwhisking\b|\bwhisky\b|\bstarted\b|\bingredient mode\b|\bingredients?\s+(?:video|image)\b|\bt2[iv]\s+generate\b|\bi2[iv]\s+generate\b|\banimat/.test(
+    /\bgenerating\b|\bdispatch|\brender|\bwaiting|\bupload|\bupscal|\bwhisking\b|\bwhisky\b|\bstarted\b|\bingredient mode\b|\bingredients?\s+(?:video|image)\b|\bt2[iv]\s+generate\b|\bi2[iv]\s+generate\b|\banimat|\bsubmitted\b|\bpolling\b/.test(
       text
     )
   ) {
@@ -547,6 +547,10 @@ export function deriveRunStatus(
 
 export function extractRunTitle(message: string): string {
   const m = String(message || '');
+  // Submit/polling lines are follow-ups — never use them as the run title
+  if (isSubmitOnlyMessage(m)) {
+    return promptFromSubmitMessage(m);
+  }
   if (/\bcomplete\b|\bfailed\b/i.test(m) && /asset\(s\)|^\s*T2[IV]\s+complete/i.test(m)) {
     return '';
   }
@@ -559,16 +563,18 @@ export function extractRunTitle(message: string): string {
     /Ingredient mode\s*\([^)]*\):\s*(.+)$/i,
     /Ingredients?\s+(?:video|image):\s*(.+)$/i,
     /(?:I2I|Remix)[^:]*:\s*(.+)$/i,
-    /T2V[^:]*:\s*(.+)$/i,
+    /T2V\s+generate[^:]*:\s*(.+)$/i,
   ];
   for (const re of patterns) {
     const hit = m.match(re);
     if (hit?.[1]) {
       const title = hit[1].trim();
       if (!title || /^\d+\s+asset/i.test(title)) continue;
+      if (/^submitted\b/i.test(title)) continue;
       return title.slice(0, 140);
     }
   }
+  if (/^[TI]2[IV]\s+submitted\b/i.test(m)) return '';
   return m.slice(0, 140) || 'Studio event';
 }
 
@@ -638,6 +644,21 @@ export function deriveRunLabels(events: Array<{ message: string; source?: string
   return { mediaKind, toolLabel, mode };
 }
 
+function isSubmitOnlyMessage(message: string): boolean {
+  return /^[TI]2[IV]\s+submitted\b/i.test(String(message || ''));
+}
+
+/** Prompt slice after "T2V submitted — … — prompt" when present. */
+function promptFromSubmitMessage(message: string): string {
+  const m = String(message || '');
+  if (!isSubmitOnlyMessage(m)) return '';
+  const parts = m.split(/\s+[—–-]\s+/);
+  if (parts.length < 2) return '';
+  const last = parts[parts.length - 1].trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!last || /polling|waiting for flow|result/i.test(last)) return '';
+  return last.slice(0, 80);
+}
+
 function isRunStartMessage(message: string): boolean {
   return (
     /Generation queued|T2[IV]\s+generate(?!ing)|I2[IV]\s+generate(?!ing)|Ingredient mode|Ingredients?\s+(?:video|image)|Whisk composition/i.test(
@@ -647,7 +668,7 @@ function isRunStartMessage(message: string): boolean {
 }
 
 function isRunFollowupMessage(message: string): boolean {
-  return /\bcomplete\b|\bfailed\b|\berror\b|\bgenerating\b|\bupload|\bdispatch|\bstarted\b|\banimat|\bwaiting\b|\bcharacter|\bupscal/i.test(
+  return /\bcomplete\b|\bfailed\b|\berror\b|\bgenerating\b|\bupload|\bdispatch|\bstarted\b|\banimat|\bwaiting\b|\bcharacter|\bupscal|\bsubmitted\b|\bpolling\b/i.test(
     message
   );
 }
@@ -702,11 +723,27 @@ export function groupStudioLogsIntoRuns<
 
   for (const log of chronological) {
     if (log.runId) {
+      const at = new Date(log.createdAt).getTime();
+      const who = whoKey(log);
+      // Orphan "T2V submitted" rows often share a different runId than the bulk
+      // "Generation queued" line — fold them into the open start for same prompt/user.
+      if (isSubmitOnlyMessage(log.message)) {
+        const submitPrompt = promptFromSubmitMessage(log.message);
+        if (submitPrompt) {
+          const openKey = findOpen(who, at, submitPrompt);
+          if (openKey) {
+            keyById.set(log.id, openKey);
+            continue;
+          }
+        }
+      }
       const key = `run:${log.runId}`;
       keyById.set(log.id, key);
       const prompt = extractRunTitle(log.message).toLowerCase().replace(/\s+/g, ' ').trim();
-      if (isRunStartMessage(log.message) || prompt) {
-        pushOpen(whoKey(log), key, prompt, new Date(log.createdAt).getTime());
+      if (isRunStartMessage(log.message) && prompt) {
+        pushOpen(who, key, prompt, at);
+      } else if (prompt && !isSubmitOnlyMessage(log.message)) {
+        pushOpen(who, key, prompt, at);
       }
       continue;
     }
@@ -726,11 +763,18 @@ export function groupStudioLogsIntoRuns<
       continue;
     }
 
-    if (isRunFollowupMessage(log.message)) {
-      const openKey = findOpen(who, at, meaningfulPrompt || undefined);
-      if (openKey) {
-        keyById.set(log.id, openKey);
-        continue;
+    if (isRunFollowupMessage(log.message) || isSubmitOnlyMessage(log.message)) {
+      const followPrompt =
+        meaningfulPrompt || promptFromSubmitMessage(log.message) || undefined;
+      // Require prompt match for submit-only so we don't glue every submit onto the latest bulk row
+      if (isSubmitOnlyMessage(log.message) && !followPrompt) {
+        /* fall through — second pass drops bare submit orphans */
+      } else {
+        const openKey = findOpen(who, at, followPrompt);
+        if (openKey) {
+          keyById.set(log.id, openKey);
+          continue;
+        }
       }
     }
 
@@ -739,6 +783,12 @@ export function groupStudioLogsIntoRuns<
       const key = `h:${who}:${bucket}:${meaningfulPrompt.slice(0, 80)}`;
       keyById.set(log.id, key);
       pushOpen(who, key, meaningfulPrompt, at);
+      continue;
+    }
+
+    // Bare submit without prompt → drop in second pass (don't create solo INFO rows)
+    if (isSubmitOnlyMessage(log.message)) {
+      keyById.set(log.id, `drop:submit:${log.id}`);
       continue;
     }
 
@@ -751,6 +801,55 @@ export function groupStudioLogsIntoRuns<
     const list = map.get(key) || [];
     list.push(log);
     map.set(key, list);
+  }
+
+  // Second pass: fold submit-only run buckets into a real start for same user+prompt
+  const submitOnlyKeys: string[] = [];
+  for (const [key, events] of map.entries()) {
+    if (key.startsWith('drop:submit:')) {
+      map.delete(key);
+      continue;
+    }
+    if (events.length > 0 && events.every((e) => isSubmitOnlyMessage(e.message))) {
+      submitOnlyKeys.push(key);
+    }
+  }
+  for (const orphanKey of submitOnlyKeys) {
+    const orphanEvents = map.get(orphanKey);
+    if (!orphanEvents?.length) continue;
+    const sample = orphanEvents[0];
+    const who = whoKey(sample);
+    const at = new Date(sample.createdAt).getTime();
+    const submitPrompt = promptFromSubmitMessage(sample.message);
+    let targetKey: string | null = null;
+    if (submitPrompt) {
+      for (const [key, events] of map.entries()) {
+        if (key === orphanKey) continue;
+        if (!events.some((e) => isRunStartMessage(e.message))) continue;
+        if (whoKey(events[0]) !== who && !events.some((e) => whoKey(e) === who)) continue;
+        const title = extractRunTitle(
+          events.find((e) => isRunStartMessage(e.message))?.message || events[0].message
+        )
+          .toLowerCase()
+          .replace(/\s+/g, ' ')
+          .trim();
+        const started = new Date(events[0].createdAt).getTime();
+        if (Math.abs(started - at) > 10 * 60 * 1000) continue;
+        if (title && (title === submitPrompt || title.includes(submitPrompt) || submitPrompt.includes(title))) {
+          targetKey = key;
+          break;
+        }
+      }
+    }
+    if (targetKey) {
+      const merged = map.get(targetKey) || [];
+      merged.push(...orphanEvents);
+      map.set(targetKey, merged);
+      map.delete(orphanKey);
+    } else {
+      // Hide bare submit-only orphans from the run list (noise)
+      map.delete(orphanKey);
+    }
   }
 
   const runs = [...map.entries()].map(([key, events]) => {
@@ -766,10 +865,20 @@ export function groupStudioLogsIntoRuns<
       }) ||
       sorted.find((e) => {
         const t = extractRunTitle(e.message);
-        return Boolean(t && t !== 'Studio event' && !/^\d+\s+asset/i.test(t));
+        return Boolean(
+          t &&
+            t !== 'Studio event' &&
+            !/^\d+\s+asset/i.test(t) &&
+            !isSubmitOnlyMessage(e.message)
+        );
       }) ||
       first;
-    const title = extractRunTitle(titleEvent.message) || first.message.slice(0, 140);
+    const rawTitle = extractRunTitle(titleEvent.message);
+    const title =
+      rawTitle ||
+      (isSubmitOnlyMessage(first.message)
+        ? promptFromSubmitMessage(first.message) || 'Generation'
+        : first.message.slice(0, 140));
     const startedMs = new Date(first.createdAt).getTime();
     const updatedMs = new Date(last.createdAt).getTime();
     const durationMs = Math.max(0, updatedMs - startedMs);
