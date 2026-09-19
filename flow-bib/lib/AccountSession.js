@@ -311,21 +311,13 @@ class AccountSession {
   async launch() {
     // One launch at a time per account — avoids "browser is already running" races
     // between ensureBrowserOrLaunch, auto-relaunch, and proxy rotate.
-    if (this._launchPromise) {
-      try {
-        await this._launchPromise;
-      } catch {
-        /* prior launch failed — continue to try again */
-      }
-      if (this.browser) return this.publicStatus();
-    }
+    if (this.browser) return this.publicStatus();
+    if (this._launchPromise) return this._launchPromise;
 
-    this._launchPromise = this._launchInternal();
-    try {
-      return await this._launchPromise;
-    } finally {
+    this._launchPromise = this._launchInternal().finally(() => {
       this._launchPromise = null;
-    }
+    });
+    return this._launchPromise;
   }
 
   async _launchInternal() {
