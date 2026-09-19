@@ -178,37 +178,64 @@ export async function createStudioLog(input: StudioLogInput) {
   });
 }
 
+function isTerminalCompleteMessage(message: string): boolean {
+  return /\b(?:t2[iv]|i2[iv])\s+complete\b|\bingredients?\s+complete\b|\bvideo complete\b|\bimage complete\b|\bi2i complete\b|\bupscale complete\b|\bcomplete:\s*\d+\s+asset|\basset\(s\)\s*$|\bupscaled to 1080p successfully\b/i.test(
+    String(message || '')
+  );
+}
+
+/** Real generation failure — not transient UI/network noise like "Failed to fetch". */
+function isTerminalFailMessage(message: string): boolean {
+  const msg = String(message || '');
+  if (/failed to fetch|networkerror|load failed|aborted|err_network|econnreset|econnrefused|socket hang up/i.test(msg)) {
+    return false;
+  }
+  return (
+    /\b(?:t2[iv]|i2[iv]|video|image|i2i|upscale|generation|ingredient)\s+failed\b/i.test(msg) ||
+    /^video failed:/i.test(msg) ||
+    /^generation failed\b/i.test(msg) ||
+    /\bfailed:\s*(?:no |empty |timeout|unusual|captcha|login|account)/i.test(msg)
+  );
+}
+
 export function deriveRunStatus(
-  events: Array<{ level: string; message: string }>
+  events: Array<{ level: string; message: string; createdAt?: Date | string }>
 ): StudioRunStatus {
-  const text = events.map((e) => `${e.level} ${e.message}`).join('\n').toLowerCase();
   if (events.some((e) => isUserCancelLogMessage(e.message))) {
     return 'CANCELLED';
   }
-  const hasExplicitFail = events.some(
-    (e) =>
-      e.level === 'ERROR' ||
-      /\b(?:t2[iv]|i2[iv]|video|image|i2i|upscale|generation|ingredient)\s+failed\b/i.test(e.message) ||
-      /^video failed:/i.test(e.message)
-  );
-  const hasComplete = /\b(?:t2[iv]|i2[iv])\s+complete\b|\bingredients?\s+complete\b|\bvideo complete\b|\bimage complete\b|\bi2i complete\b|\bupscale complete\b|\bcomplete:\s*\d+\s+asset|\basset\(s\)|\bupscaled to 1080p successfully\b/.test(
-    text
-  );
 
-  // Terminal success wins over mid-run WARN chatter ("reCAPTCHA evaluation failed", CDP timeouts, etc.)
-  if (hasComplete && !hasExplicitFail) {
-    return 'COMPLETED';
+  // Chronological last terminal wins so retry-after-fail → COMPLETED (not stuck FAILED).
+  const sorted = [...events].sort((a, b) => {
+    const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return ta - tb;
+  });
+
+  let lastTerminal: StudioRunStatus | null = null;
+  for (const e of sorted) {
+    if (isUserCancelLogMessage(e.message)) {
+      lastTerminal = 'CANCELLED';
+      continue;
+    }
+    if (isTerminalCompleteMessage(e.message)) {
+      lastTerminal = 'COMPLETED';
+      continue;
+    }
+    if (isTerminalFailMessage(e.message)) {
+      lastTerminal = 'FAILED';
+      continue;
+    }
   }
-  if (hasExplicitFail) {
-    return 'FAILED';
-  }
+  if (lastTerminal) return lastTerminal;
+
+  const text = events.map((e) => `${e.level} ${e.message}`).join('\n').toLowerCase();
+
   // Past the initial queue ack — worker accepted / rendering / ingredients / started / upload / upscale
-  // Note: "T2I complete" must NOT match as generating — check complete/failed first above.
   if (
     /\bgenerating\b|\bdispatch|\brender|\bwaiting|\bupload|\bupscal|\bwhisking\b|\bwhisky\b|\bstarted\b|\bingredient mode\b|\bingredients?\s+(?:video|image)\b|\bt2[iv]\s+generate\b|\bi2[iv]\s+generate\b|\banimat/.test(
       text
-    ) &&
-    !/\bcomplete\b|\bfailed\b/.test(text)
+    )
   ) {
     return 'GENERATING';
   }
@@ -216,6 +243,19 @@ export function deriveRunStatus(
     return 'QUEUED';
   }
   if (events.some((e) => e.level === 'WARN')) return 'WARN';
+  // Lone ERROR without a real generation-fail message → still surface as failed
+  if (events.some((e) => e.level === 'ERROR' && isTerminalFailMessage(e.message))) {
+    return 'FAILED';
+  }
+  if (
+    events.some(
+      (e) =>
+        e.level === 'ERROR' &&
+        !/failed to fetch|networkerror|load failed|aborted|err_network/i.test(e.message)
+    )
+  ) {
+    return 'FAILED';
+  }
   return 'INFO';
 }
 
