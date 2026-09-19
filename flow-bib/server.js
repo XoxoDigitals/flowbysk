@@ -338,15 +338,46 @@ async function ensureBrowserOrLaunch(accountId) {
   let s = pool.get(accountId);
   if (s?.browser) return s;
 
+  // Join an in-flight launch instead of starting a second Chrome on the same profile
+  if (s?._launchPromise) {
+    try {
+      await s._launchPromise;
+    } catch {
+      /* will retry below */
+    }
+    if (s.browser) return s;
+  }
+
   const remembered =
     readAutolaunchState().accounts.find((a) => a.id === accountId) || { id: accountId };
   console.warn(`[${accountId}] browser down — auto-launching`);
-  await launchAccountEntry({
-    id: accountId,
-    maxSlots: remembered.maxSlots || s?.maxSlots,
-    projectIds: remembered.projectIds || s?.projectIds,
-    profileDir: remembered.profileDir || s?.profileDir,
-  });
+  try {
+    await launchAccountEntry({
+      id: accountId,
+      maxSlots: remembered.maxSlots || s?.maxSlots,
+      projectIds: remembered.projectIds || s?.projectIds,
+      profileDir: remembered.profileDir || s?.profileDir,
+    });
+  } catch (e) {
+    // Profile lock / race — one more pass after joining any concurrent launch
+    s = pool.get(accountId);
+    if (s?._launchPromise) {
+      try {
+        await s._launchPromise;
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!s?.browser) {
+      console.warn(`[${accountId}] ensure relaunch retry:`, e.message || e);
+      await launchAccountEntry({
+        id: accountId,
+        maxSlots: remembered.maxSlots || s?.maxSlots,
+        projectIds: remembered.projectIds || s?.projectIds,
+        profileDir: remembered.profileDir || s?.profileDir,
+      });
+    }
+  }
   s = pool.get(accountId);
   if (!s?.browser) {
     const err = new Error('Account browser not launched');

@@ -28,7 +28,7 @@ const PROFILES_ROOT_RESOLVED = path.resolve(PROFILES_ROOT);
 
 /** Remove Chrome profile lock files so relaunch can reuse the same logged-in profile. */
 function clearProfileLockFiles(profileDir) {
-  for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+  for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'lockfile']) {
     try {
       fs.unlinkSync(path.join(profileDir, name));
     } catch {
@@ -37,8 +37,16 @@ function clearProfileLockFiles(profileDir) {
   }
 }
 
+function isProfileLockError(err) {
+  const msg = String(err?.message || err || '');
+  return /already running|userDataDir|SingletonLock|profile.*in use|The browser is already running/i.test(
+    msg
+  );
+}
+
 /**
  * Kill orphan Chrome processes still holding this user-data-dir (profile stays intact → no logout).
+ * Stronger on Linux: pgrep → SIGTERM → SIGKILL, then clear Singleton* locks.
  */
 async function killOrphanChromeForProfile(profileDir) {
   const dir = path.resolve(profileDir);
@@ -55,12 +63,50 @@ async function killOrphanChromeForProfile(profileDir) {
         windowsHide: true,
       }).catch(() => {});
     } else {
-      await execFileAsync('pkill', ['-f', dir], { timeout: 10000 }).catch(() => {});
+      // Match user-data-dir / profile path in chrome command lines
+      let pids = [];
+      try {
+        const { stdout } = await execFileAsync(
+          'pgrep',
+          ['-f', dir],
+          { timeout: 8000, encoding: 'utf8' }
+        );
+        pids = String(stdout || '')
+          .split(/\s+/)
+          .map((s) => s.trim())
+          .filter((s) => /^\d+$/.test(s));
+      } catch {
+        /* no matches */
+      }
+      if (!pids.length) {
+        await execFileAsync('pkill', ['-f', dir], { timeout: 10000 }).catch(() => {});
+      } else {
+        for (const pid of pids) {
+          try {
+            process.kill(Number(pid), 'SIGTERM');
+          } catch {
+            /* ignore */
+          }
+        }
+        await sleep(800);
+        for (const pid of pids) {
+          try {
+            process.kill(Number(pid), 0);
+            process.kill(Number(pid), 'SIGKILL');
+          } catch {
+            /* already dead */
+          }
+        }
+      }
+      // Second sweep — chrome sometimes respawns briefly
+      await execFileAsync('pkill', ['-9', '-f', dir], { timeout: 10000 }).catch(() => {});
     }
   } catch {
     /* ignore */
   }
-  await sleep(600);
+  await sleep(900);
+  clearProfileLockFiles(dir);
+  await sleep(200);
   clearProfileLockFiles(dir);
 }
 
@@ -127,6 +173,8 @@ class AccountSession {
     this._autoRelaunchTimer = null;
     /** Timestamps of auto-relaunches in the last window (crash-loop guard). */
     this._autoRelaunchAttempts = [];
+    /** Serialize launch / ensureBrowserOrLaunch / auto-relaunch / proxy recover. */
+    this._launchPromise = null;
   }
 
   /**
@@ -261,14 +309,37 @@ class AccountSession {
   }
 
   async launch() {
+    // One launch at a time per account — avoids "browser is already running" races
+    // between ensureBrowserOrLaunch, auto-relaunch, and proxy rotate.
+    if (this._launchPromise) {
+      try {
+        await this._launchPromise;
+      } catch {
+        /* prior launch failed — continue to try again */
+      }
+      if (this.browser) return this.publicStatus();
+    }
+
+    this._launchPromise = this._launchInternal();
+    try {
+      return await this._launchPromise;
+    } finally {
+      this._launchPromise = null;
+    }
+  }
+
+  async _launchInternal() {
     if (this.browser) return this.publicStatus();
+    // Cancel pending soft auto-relaunch — we are launching now
+    if (this._autoRelaunchTimer) {
+      clearTimeout(this._autoRelaunchTimer);
+      this._autoRelaunchTimer = null;
+    }
     this._intentionalStop = false;
     this.status = 'STARTING';
     this.lastError = null;
     this.authLostNotified = false;
     fs.mkdirSync(this.profileDir, { recursive: true });
-    // Ensure no orphan Chrome holds this profile (keeps cookies — no Google logout).
-    await killOrphanChromeForProfile(this.profileDir);
 
     const chromePath = findChrome();
     if (!chromePath) {
@@ -279,6 +350,38 @@ class AccountSession {
       throw new Error(tip);
     }
 
+    const maxAttempts = 3;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Ensure no orphan Chrome holds this profile (keeps cookies — no Google logout).
+      await killOrphanChromeForProfile(this.profileDir);
+      try {
+        return await this._launchPuppeteerOnce(chromePath);
+      } catch (e) {
+        lastErr = e;
+        this.browser = null;
+        this.page = null;
+        this.cdp = null;
+        if (isProfileLockError(e) && attempt < maxAttempts) {
+          console.warn(
+            `[${this.accountId}] launch attempt ${attempt}/${maxAttempts} profile lock — kill+retry:`,
+            e.message || e
+          );
+          await killOrphanChromeForProfile(this.profileDir);
+          await sleep(1200 * attempt);
+          continue;
+        }
+        this.status = 'ERROR';
+        this.lastError = e.message || String(e);
+        throw e;
+      }
+    }
+    this.status = 'ERROR';
+    this.lastError = lastErr?.message || String(lastErr);
+    throw lastErr;
+  }
+
+  async _launchPuppeteerOnce(chromePath) {
     try {
       const launchArgs = [
         '--no-sandbox',
@@ -373,9 +476,14 @@ class AccountSession {
       this._startHealthLoop();
       return st;
     } catch (e) {
-      this.status = 'ERROR';
-      this.lastError = e.message || String(e);
+      try {
+        if (this.browser) await this.browser.close();
+      } catch {
+        /* ignore */
+      }
       this.browser = null;
+      this.page = null;
+      this.cdp = null;
       throw e;
     }
   }
@@ -386,6 +494,14 @@ class AccountSession {
     if (this._autoRelaunchTimer) {
       clearTimeout(this._autoRelaunchTimer);
       this._autoRelaunchTimer = null;
+    }
+    // Wait out an in-flight launch so we don't leave a half-started Chrome
+    if (this._launchPromise) {
+      try {
+        await this._launchPromise;
+      } catch {
+        /* ignore */
+      }
     }
     this._stopHealthLoop();
     this.screencasting = false;
