@@ -591,11 +591,33 @@ class AccountSession {
             if (attempt > 1) {
               console.log(`[${this.accountId}] reCAPTCHA mint ok on attempt ${attempt} (${action})`);
             }
+            if (typeof AccountSession.onMintOk === 'function') {
+              try {
+                AccountSession.onMintOk(this.accountId, { action });
+              } catch {
+                /* ignore */
+              }
+            }
             return token;
           }
           console.warn(
             `[${this.accountId}] reCAPTCHA mint empty (attempt ${attempt}/4, action=${action})`
           );
+
+          // After 2 empty tokens in a row, hard-restart ALL BiB browsers then continue minting.
+          if (attempt === 2 && typeof AccountSession.onEmptyMintStorm === 'function') {
+            console.warn(
+              `[${this.accountId}] empty reCAPTCHA tokens — hard restarting all BiB browsers`
+            );
+            try {
+              await AccountSession.onEmptyMintStorm(this.accountId, { action, attempt });
+            } catch (stormErr) {
+              console.warn(
+                `[${this.accountId}] empty-mint hard restart failed:`,
+                stormErr?.message || stormErr
+              );
+            }
+          }
         } catch (e) {
           const msg = e && e.message ? e.message : String(e);
           console.warn(`[${this.accountId}] reCAPTCHA mint error attempt ${attempt}:`, msg);
@@ -2079,5 +2101,8 @@ class AccountSession {
 }
 
 AccountSession.onAuthLost = null;
+AccountSession.onMintOk = null;
+/** Fired when reCAPTCHA mint returns empty — server hard-restarts all browsers. */
+AccountSession.onEmptyMintStorm = null;
 
 module.exports = { AccountSession, PROFILES_ROOT };

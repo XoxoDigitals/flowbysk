@@ -437,6 +437,81 @@ AccountSession.onAuthLost = (accountId, detail) => {
   notifyAuthLost(accountId, detail);
 };
 
+/** Cooldown so empty-mint storms don't restart Chrome in a loop. */
+let emptyMintHardRestartInFlight = null;
+let emptyMintHardRestartAt = 0;
+const EMPTY_MINT_HARD_RESTART_COOLDOWN_MS = 3 * 60 * 1000;
+
+AccountSession.onMintOk = () => {
+  /* successful mint — no streak tracking needed beyond cooldown */
+};
+
+/**
+ * Hard restart every BiB Chrome (same profile — stay logged in).
+ * Triggered when reCAPTCHA mint starts returning empty tokens.
+ */
+AccountSession.onEmptyMintStorm = async (accountId, detail = {}) => {
+  const now = Date.now();
+  if (emptyMintHardRestartInFlight) {
+    console.warn(
+      `[empty-mint] hard restart already in flight — waiting (from ${String(accountId).slice(0, 8)})`
+    );
+    try {
+      await emptyMintHardRestartInFlight;
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+  if (now - emptyMintHardRestartAt < EMPTY_MINT_HARD_RESTART_COOLDOWN_MS && !detail.final) {
+    console.warn(
+      `[empty-mint] skip hard restart (cooldown ${Math.round(
+        (EMPTY_MINT_HARD_RESTART_COOLDOWN_MS - (now - emptyMintHardRestartAt)) / 1000
+      )}s left)`
+    );
+    return;
+  }
+
+  emptyMintHardRestartAt = now;
+  emptyMintHardRestartInFlight = (async () => {
+    const ids = [...pool.keys()];
+    console.warn(
+      `[empty-mint] HARD restarting ${ids.length} BiB browser(s) — trigger=${String(accountId).slice(0, 8)} action=${detail.action || '?'} attempt=${detail.attempt || '?'}`
+    );
+    for (const id of ids) {
+      const s = pool.get(id);
+      if (!s) continue;
+      try {
+        await s.disconnect({ clearProfile: false });
+      } catch (e) {
+        console.warn(`[empty-mint] disconnect ${id.slice(0, 8)}:`, e.message || e);
+      }
+    }
+    await sleep(1200);
+    for (const id of ids) {
+      const s = pool.get(id);
+      if (!s) continue;
+      try {
+        await s.launch();
+        // Land on a project page so grecaptcha is available
+        if (Array.isArray(s.projectIds) && s.projectIds[0]) {
+          await s.ensureOnAnyProjectPage(s.projectIds[0]).catch(() => {});
+        }
+        console.log(`[empty-mint] relaunched ${id.slice(0, 8)} status=${s.status}`);
+      } catch (e) {
+        console.warn(`[empty-mint] relaunch ${id.slice(0, 8)}:`, e.message || e);
+      }
+    }
+    console.warn(`[empty-mint] hard restart complete`);
+  })();
+
+  try {
+    await emptyMintHardRestartInFlight;
+  } finally {
+    emptyMintHardRestartInFlight = null;
+  }
+};
+
 const app = express();
 app.use(express.json({ limit: '12mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
