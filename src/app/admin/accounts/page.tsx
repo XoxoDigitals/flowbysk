@@ -74,6 +74,8 @@ interface AccountItem {
   egressIp?: string | null;
   egressCountry?: string | null;
   egressProxyId?: string | null;
+  egressPort?: number | null;
+  egressLastRotatedAt?: string | null;
 }
 
 export default function AdminAccountsPage() {
@@ -158,16 +160,17 @@ export default function AdminAccountsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Rotate failed');
-      if (data.lastProxyRotateAt) setLastProxyRotateAt(data.lastProxyRotateAt);
-      if (typeof data.lastProxyRotateReason === 'string') {
-        setLastProxyRotateReason(data.lastProxyRotateReason);
-      }
       await fetchAccounts();
+      const bits = [
+        data.rotated ? 'Rotated' : null,
+        data.port != null ? `port ${data.port}` : null,
+        data.exitIp ? `IP ${data.exitIp}` : null,
+        data.exitCountry ? String(data.exitCountry).toUpperCase() : null,
+        data.relaunched != null ? `relaunched ${data.relaunched}` : null,
+      ].filter(Boolean);
       setRotateMsgById((m) => ({
         ...m,
-        [accountId]: data.rotated
-          ? `Rotated · relaunched ${data.relaunched || 0}`
-          : data.error || 'Rotate did not complete',
+        [accountId]: bits.length ? bits.join(' · ') : data.error || 'Rotate did not complete',
       }));
     } catch (err: any) {
       setRotateMsgById((m) => ({ ...m, [accountId]: err.message || 'Rotate failed' }));
@@ -179,7 +182,7 @@ export default function AdminAccountsPage() {
           delete next[accountId];
           return next;
         });
-      }, 6000);
+      }, 8000);
     }
   };
 
@@ -805,17 +808,19 @@ export default function AdminAccountsPage() {
                         >
                           {acc.egressProxyMasked || acc.egressProxyUrl || 'Unassigned (set on launch)'}
                         </p>
-                        {(acc.egressIp || acc.egressCountry) && (
-                          <p className="mt-0.5 text-[11px] text-[var(--ink3)]">
-                            {[acc.egressIp, acc.egressCountry].filter(Boolean).join(' · ')}
-                          </p>
-                        )}
-                        {lastProxyRotateAt ? (
+                        <p className="mt-0.5 font-mono text-[11px] text-[var(--ink2)]">
+                          {[
+                            acc.egressIp ? `IP ${acc.egressIp}` : 'IP —',
+                            acc.egressPort != null ? `port ${acc.egressPort}` : null,
+                            acc.egressCountry || null,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </p>
+                        {acc.egressLastRotatedAt ? (
                           <p className="mt-1 flex items-center gap-1 text-[10px] text-[var(--ink3)]">
                             <Clock className="h-3 w-3 shrink-0" />
-                            Last rotate:{' '}
-                            {new Date(lastProxyRotateAt).toLocaleString()}
-                            {lastProxyRotateReason ? ` · ${lastProxyRotateReason}` : ''}
+                            Last rotate: {new Date(acc.egressLastRotatedAt).toLocaleString()}
                           </p>
                         ) : null}
                         {rotateMsgById[acc.id] ? (

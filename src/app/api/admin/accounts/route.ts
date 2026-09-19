@@ -18,6 +18,7 @@ import {
   maskProxyUrl,
   readEgressProxyMirror,
 } from '@/lib/egressProxy';
+import { readDataImpulseConfig } from '@/lib/dataimpulse';
 
 function extractProjectDetails(input?: string | null): { projectId: string; projectUrl: string } {
   if (!input || !input.trim()) return { projectId: '', projectUrl: '' };
@@ -124,8 +125,26 @@ export async function GET(req: Request) {
       }
       const proxiesNow = egressUrl ? readEgressProxyMirror().proxies : mirror.proxies;
       const egressEntry = egressUrl
-        ? proxiesNow.find((p) => p.enabled !== false && p.url === egressUrl)
+        ? proxiesNow.find(
+            (p) =>
+              p.enabled !== false &&
+              (p.url === egressUrl || p.id === `di-${acc.id}`)
+          )
         : null;
+
+      let diPort: number | null = null;
+      let diLastRotatedAt: string | null = null;
+      let diCountry: string | null = null;
+      try {
+        const meta = readDataImpulseConfig().accountMeta[acc.id];
+        if (meta) {
+          diPort = meta.port ?? null;
+          diLastRotatedAt = meta.updatedAt || null;
+          diCountry = meta.country ? meta.country.toUpperCase() : null;
+        }
+      } catch {
+        /* ignore */
+      }
 
       return {
         id: acc.id,
@@ -162,8 +181,10 @@ export async function GET(req: Request) {
         egressProxyUrl: egressUrl,
         egressProxyMasked: egressUrl ? maskProxyUrl(egressUrl) : null,
         egressIp: egressEntry?.ip ?? null,
-        egressCountry: egressEntry?.country ?? null,
+        egressCountry: egressEntry?.country ?? diCountry,
         egressProxyId: egressEntry?.id ?? null,
+        egressPort: diPort,
+        egressLastRotatedAt: diLastRotatedAt,
       };
     });
 

@@ -159,10 +159,47 @@ export async function POST(req: Request) {
         '@/lib/unusualActivityProxyRotate'
       );
       const { maskProxyUrl } = await import('@/lib/egressProxy');
+      // Manual rotate: always hard-relaunch THIS account only (new sticky must bind in Chrome).
       const result = await rotateProxyAndRelaunchForAccount(accountId, {
-        reason: 'manual account',
-        forceRelaunch: !!body.force || !!body.forceRelaunch,
+        reason: `manual account ${accountId.slice(0, 8)}`,
+        forceRelaunch: true,
       });
+
+      let exitIp: string | null = null;
+      let exitCountry: string | null = null;
+      let port: number | null = null;
+      if (result.ok && result.to) {
+        try {
+          const probe = await probeProxyEgress(result.to);
+          if (probe.ok) {
+            exitIp = probe.ip || null;
+            exitCountry = probe.country || probe.countryCode || null;
+            const mirrorNow = readEgressProxyMirror();
+            const nextProxies = mirrorNow.proxies.map((p) => {
+              if (p.url !== result.to && p.id !== `di-${accountId}`) return p;
+              return {
+                ...p,
+                ip: exitIp,
+                country: exitCountry,
+                countryCode: probe.countryCode || null,
+                lastCheckedAt: new Date().toISOString(),
+                lastError: null,
+              };
+            });
+            writeEgressProxyMirror(nextProxies, mirrorNow.assignments, mirrorNow.cycleUsed);
+          }
+        } catch (e) {
+          console.warn('[egress-proxies] post-rotate probe:', e);
+        }
+        try {
+          const { readDataImpulseConfig } = await import('@/lib/dataimpulse');
+          const meta = readDataImpulseConfig().accountMeta[accountId];
+          if (meta?.port) port = meta.port;
+        } catch {
+          /* ignore */
+        }
+      }
+
       const mirror = readEgressProxyMirror();
       const rt = readSiteRuntime();
       return NextResponse.json(
@@ -175,6 +212,10 @@ export async function POST(req: Request) {
           accountId,
           relaunched: result.relaunched,
           error: result.error,
+          exitIp,
+          exitCountry,
+          port,
+          lastRotatedAt: new Date().toISOString(),
           proxies: mirror.proxies,
           assignments: mirror.assignments,
           lastProxyRotateAt: rt.lastProxyRotateAt,

@@ -69,22 +69,39 @@ const DEFAULTS: DataImpulseConfig = {
 
 /**
  * Unique sticky port per account: 10000, 10001, 10002… (DataImpulse sticky range).
- * Keeps an account’s existing port; otherwise takes the lowest free port from base.
+ * Default: keep an account’s existing port.
+ * advance=true (rotate): move to the next free port so rotate visibly changes port.
  */
 function allocateUniqueStickyPort(
   cfg: DataImpulseConfig,
-  accountId: string
+  accountId: string,
+  opts?: { advance?: boolean }
 ): number {
   const base = Math.max(10000, Math.min(19999, Math.floor(cfg.stickyPortBase) || 10000));
   const existing = cfg.accountMeta[accountId];
-  if (existing?.port && existing.port >= 10000 && existing.port <= 20000) {
-    return existing.port;
-  }
   const used = new Set<number>();
   for (const [id, m] of Object.entries(cfg.accountMeta)) {
     if (id === accountId) continue;
     const p = Number(m.port);
     if (p >= 10000 && p <= 20000) used.add(p);
+  }
+
+  if (opts?.advance) {
+    const start =
+      existing?.port && existing.port >= 10000 && existing.port <= 20000
+        ? existing.port + 1
+        : base;
+    for (let p = start; p <= 20000; p++) {
+      if (!used.has(p)) return p;
+    }
+    for (let p = base; p < start; p++) {
+      if (!used.has(p)) return p;
+    }
+    return Math.min(20000, start);
+  }
+
+  if (existing?.port && existing.port >= 10000 && existing.port <= 20000) {
+    return existing.port;
   }
   for (let p = base; p <= 20000; p++) {
     if (!used.has(p)) return p;
@@ -362,8 +379,10 @@ export function allocateDataImpulseForAccount(
   const gen = (existing?.gen || 0) + (opts?.forceNew || !existing ? 1 : 0);
   const country = pickCountry(cfg, opts?.forceNew ? existing?.country : undefined);
   const sessId = newSessId(accountId, gen || 1);
-  // Unique sticky port per account (10000, 10001, …). Rotate keeps the port; new sessid → new IP.
-  const port = allocateUniqueStickyPort(cfg, accountId);
+  // On rotate (forceNew): new sessid + next free port. First assign: sticky unique port.
+  const port = allocateUniqueStickyPort(cfg, accountId, {
+    advance: !!(opts?.forceNew && existing),
+  });
   const url = buildResidentialProxyUrl({
     login: cfg.proxyLogin,
     password: cfg.proxyPassword,
