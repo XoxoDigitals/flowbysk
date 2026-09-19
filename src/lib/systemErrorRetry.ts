@@ -3,10 +3,9 @@
  * Policy violations are NOT retried (user-facing rejection stays).
  *
  * Unusual activity / too-much-traffic:
- *   1) retry once on same proxy
- *   2) rotate THAT account’s proxy + relaunch BiB
- *   3) retry once more
- *   then throw (do not fail on the first unusual hit).
+ *   1) rotate THAT account’s DataImpulse sticky + hard-relaunch BiB Chrome
+ *   2) retry once on the new proxy
+ *   then throw (do not keep burning the same IP).
  */
 
 import { isUnusualActivityError, rotateProxyAndRelaunchForAccount } from './unusualActivityProxyRotate';
@@ -77,7 +76,7 @@ export type SystemRetryOptions = {
 /**
  * Run `fn`. On system-class errors, retry up to maxAttempts-1 more times.
  * Policy errors propagate immediately.
- * Unusual: retry → rotate account proxy → retry → then fail.
+ * Unusual: rotate account proxy + relaunch → retry → then fail.
  * Throttle: wait 10s then 20s (default), then stop — no endless throttle retries.
  */
 export async function withSystemErrorRetry<T>(
@@ -121,6 +120,7 @@ export async function withSystemErrorRetry<T>(
               reason: 'egress proxy dead',
               exceptJobId: opts.jobId,
               deadTunnel: true,
+              forceRelaunch: true,
             });
             console.warn(
               `[system-retry] ${label}: dead-proxy rotate ${rot.rotated ? 'ok' : 'skip'} relaunched=${rot.relaunched}`
@@ -135,7 +135,8 @@ export async function withSystemErrorRetry<T>(
         break;
       }
 
-      // Unusual / too-much-traffic: never fail on first hit.
+      // Unusual / too-much-traffic: rotate sticky + hard-relaunch Chrome on first hit
+      // (retrying the same burned IP never helps; deferred relaunch left Chrome on old proxy).
       if (isUnusualActivityError(msg)) {
         unusualHits += 1;
         try {
@@ -150,30 +151,21 @@ export async function withSystemErrorRetry<T>(
           `[system-retry] ${label}: unusual #${unusualHits} — ${msg.slice(0, 160)}`
         );
 
-        if (unusualHits === 1) {
-          console.warn(`[system-retry] ${label}: retrying same proxy…`);
-          if (opts.onRetry) await opts.onRetry(err, unusualHits);
-          await new Promise((r) => setTimeout(r, Math.max(delayMs, 3000)));
-          if (opts.shouldContinue && !(await opts.shouldContinue())) {
-            throw new Error('Stop by user');
-          }
-          continue;
-        }
-
-        if (unusualHits === 2) {
+        if (unusualHits <= 2) {
           if (opts.providerAccountId) {
             console.warn(
-              `[system-retry] ${label}: rotating proxy for account ${opts.providerAccountId.slice(0, 8)}…`
+              `[system-retry] ${label}: rotating proxy for account ${opts.providerAccountId.slice(0, 8)} (hard relaunch)…`
             );
             try {
               const rot = await rotateProxyAndRelaunchForAccount(opts.providerAccountId, {
                 reason: 'unusual activity',
                 exceptJobId: opts.jobId,
+                forceRelaunch: true,
                 deadTunnel: /tunnel|egress proxy dead|ERR_TUNNEL|no exit IP/i.test(msg),
               });
               console.warn(
-                `[system-retry] ${label}: proxy rotate ${rot.rotated ? 'ok' : 'skipped'}${
-                  rot.deferred ? ' (deferred relaunch)' : ''
+                `[system-retry] ${label}: proxy rotate ${rot.rotated ? 'ok' : 'skipped'} relaunched=${rot.relaunched}${
+                  rot.deferred ? ' (deferred)' : ''
                 } → ${rot.to || rot.error || 'n/a'}`
               );
             } catch (e) {
@@ -181,7 +173,7 @@ export async function withSystemErrorRetry<T>(
             }
           } else {
             console.warn(
-              `[system-retry] ${label}: unusual #2 but no providerAccountId — cannot rotate`
+              `[system-retry] ${label}: unusual #${unusualHits} but no providerAccountId — cannot rotate`
             );
           }
           if (opts.onRetry) await opts.onRetry(err, unusualHits);
