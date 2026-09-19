@@ -7,7 +7,7 @@ import { selectProviderAccountForJobDetailed } from '@/lib/routing';
 import { getUserPlanLimit, countUserActiveJobs, checkAndDispatchNextJobs } from '@/lib/queue';
 import { JobStatus, WalletType } from '@prisma/client';
 import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
-import { prepareProviderWorkerSession, refreshFlowMediaId } from '@/lib/providerSession';
+import { prepareProviderWorkerSession, ensureFlowReadyMediaId } from '@/lib/providerSession';
 import { createStudioLog } from '@/lib/studioLogs';
 import { bibGenerateImage, bibGenerateVideo, ensureBibAccountReady, bibEnsureLabs } from '@/lib/bib';
 import {
@@ -44,14 +44,15 @@ async function repairFlowRefs(opts: {
   const out: string[] = [];
   for (const mid of opts.refs) {
     const next =
-      (await refreshFlowMediaId({
-        accountId: opts.accountId,
+      (await ensureFlowReadyMediaId({
+        accountId: opts.accountId!,
         mediaId: mid,
         cookies: opts.cookies,
         projectId: opts.projectId,
-        forceReupload: opts.forceReupload !== false,
+        maxAttempts: opts.forceReupload === false ? 2 : 3,
+        label: 'ingredients-repair',
       })) || mid;
-    if (next && !out.includes(next)) out.push(next);
+    if (next && isFlowUuid(next) && !out.includes(next)) out.push(next);
   }
   return out;
 }
@@ -207,16 +208,18 @@ export async function POST(req: Request) {
         return id;
       };
 
-      const refreshOne = async (id?: string) => {
+      const refreshOne = async (id?: string, imageUrl?: string) => {
         const resolved = await resolveMediaId(id);
-        if (!resolved) return resolved;
-        // Includes staged-* → Flow UUID via HTTP upload (not CDP generation)
+        if (!resolved && !imageUrl) return resolved;
         return (
-          (await refreshFlowMediaId({
+          (await ensureFlowReadyMediaId({
             accountId: provider.id,
             mediaId: resolved,
+            imageUrl,
             cookies: liveCookies,
             projectId: targetProjectId,
+            maxAttempts: 3,
+            label: `ingredients-ref:${job.id.slice(0, 8)}`,
           })) || resolved
         );
       };
@@ -250,18 +253,28 @@ export async function POST(req: Request) {
         .map((id) => String(id || '').trim())
         .filter(Boolean);
 
+      // Upload any leftover non-UUID refs instead of failing
       const unresolved = flowRefs.filter((id) => !isFlowUuid(id));
       if (unresolved.length) {
-        throw new Error(
-          `Ingredient image(s) not uploaded to Flow yet (${unresolved
-            .map((id) => id.slice(0, 24))
-            .join(', ')}). Wait until Ready, then retry.`
-        );
+        const repaired: string[] = [];
+        for (const mid of unresolved) {
+          const next = await ensureFlowReadyMediaId({
+            accountId: provider.id,
+            mediaId: mid,
+            cookies: liveCookies,
+            projectId: targetProjectId,
+            maxAttempts: 3,
+            label: `ingredients-promote:${job.id.slice(0, 8)}`,
+          });
+          if (next && isFlowUuid(next)) repaired.push(next);
+        }
+        flowRefs = [...flowRefs.filter(isFlowUuid), ...repaired];
       }
-      flowRefs = flowRefs.filter(isFlowUuid);
+      flowRefs = [...new Set(flowRefs.filter(isFlowUuid))];
       if (requestedRefCount > 0 && flowRefs.length < requestedRefCount) {
-        throw new Error(
-          `Only ${flowRefs.length}/${requestedRefCount} ingredient images are Flow-ready. Wait until all show Ready, then retry.`
+        // Keep going with what we have if at least one ref uploaded; only fail if zero
+        console.warn(
+          `[ingredients] only ${flowRefs.length}/${requestedRefCount} refs ready after upload retries`
         );
       }
 
@@ -273,21 +286,30 @@ export async function POST(req: Request) {
               character_id: c.character_id || c.flow_character_id || null,
               name: c.name || c.display_name || 'Character',
               image_media_id: c.image_media_id || null,
+              image_url: c.image_url || c.portraitUrl || null,
+              local_image_path: c.local_image_path || null,
             }))
             .filter((c: any) => c.entity_id && c.flow_entity_id)
         : [];
 
-      // Refresh character portraits into this Flow project when present.
-      // Do NOT merge portraits into flowRefs — that falsely triggers multi-ref aisandbox.
+      // Refresh/upload character portraits into this Flow project when present.
       for (const c of charRefs) {
-        if (!c.image_media_id) continue;
-        const mid = await refreshOne(String(c.image_media_id));
+        const mid = await ensureFlowReadyMediaId({
+          accountId: provider.id,
+          projectId: targetProjectId,
+          cookies: liveCookies,
+          mediaId: c.image_media_id,
+          imageUrl: c.image_url,
+          localPath: c.local_image_path,
+          maxAttempts: 3,
+          label: `ingredients-char:${job.id.slice(0, 8)}`,
+        });
         if (mid && isFlowUuid(mid)) c.image_media_id = mid;
       }
 
       if (!flowRefs.length && !charRefs.length) {
         throw new Error(
-          'No Flow-ready ingredient image or character. Wait until the reference shows Ready, then retry.'
+          'Could not upload ingredient image into Flow after retries — check BiB project and try again'
         );
       }
 

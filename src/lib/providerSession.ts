@@ -569,3 +569,176 @@ export async function refreshFlowMediaId(opts: {
   }
   return mediaId;
 }
+
+const FLOW_MEDIA_UUID = /^[a-f0-9-]{36}$/i;
+
+function isFlowMediaUuid(id?: string | null): boolean {
+  return FLOW_MEDIA_UUID.test(String(id || '').trim());
+}
+
+/**
+ * Ensure a reference is a Flow-ready media UUID in the target account/project.
+ * If missing/not ready/local staged — upload via BiB (retries) instead of failing.
+ */
+export async function ensureFlowReadyMediaId(opts: {
+  accountId: string;
+  projectId?: string | null;
+  cookies?: string;
+  mediaId?: string | null;
+  imageUrl?: string | null;
+  localPath?: string | null;
+  mimeType?: string | null;
+  filename?: string | null;
+  maxAttempts?: number;
+  label?: string;
+}): Promise<string | undefined> {
+  const label = opts.label || 'ensureFlowReady';
+  const maxAttempts = Math.max(1, Math.min(5, opts.maxAttempts ?? 3));
+  let mediaId = String(opts.mediaId || '').trim() || undefined;
+  const imageUrl = String(opts.imageUrl || '').trim() || undefined;
+  let localPath = String(opts.localPath || '').trim() || undefined;
+
+  if (!opts.accountId) return mediaId && isFlowMediaUuid(mediaId) ? mediaId : undefined;
+  if (!opts.projectId) {
+    console.warn(`[${label}] no projectId — cannot upload reference into Flow`);
+  }
+
+  // Resolve local file from prisma asset when we only have upload-/staged-/asset id
+  if ((!localPath || !fs.existsSync(localPath)) && mediaId) {
+    const assetRec = await prisma.asset.findFirst({
+      where: { OR: [{ upstreamAssetId: mediaId }, { id: mediaId }] },
+      select: { url: true, storagePath: true, mimeType: true },
+    });
+    if (assetRec?.storagePath && !String(assetRec.storagePath).startsWith('http')) {
+      if (fs.existsSync(assetRec.storagePath)) localPath = assetRec.storagePath;
+    }
+    if ((!localPath || !fs.existsSync(localPath)) && assetRec?.url) {
+      const m = String(assetRec.url).match(/^\/api\/assets\/file\/(.+)$/);
+      if (m?.[1]) {
+        const candidate = path.join(UPLOAD_DIR, path.basename(m[1]));
+        if (fs.existsSync(candidate)) localPath = candidate;
+      }
+    }
+  }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // Already a Flow UUID — try reuse / refresh first
+    if (mediaId && isFlowMediaUuid(mediaId) && opts.projectId) {
+      try {
+        const refreshed = await refreshFlowMediaId({
+          accountId: opts.accountId,
+          mediaId,
+          cookies: opts.cookies,
+          projectId: opts.projectId,
+          forceReupload: attempt > 1,
+        });
+        if (refreshed && isFlowMediaUuid(refreshed)) {
+          const ready = await waitFlowMediaReady(refreshed, { attempts: 15, intervalMs: 400 });
+          if (ready || attempt === maxAttempts) {
+            console.info(
+              `[${label}] ready ${refreshed.slice(0, 8)} (attempt ${attempt}/${maxAttempts}, waitReady=${ready})`
+            );
+            return refreshed;
+          }
+        }
+      } catch (e: any) {
+        console.warn(`[${label}] refresh attempt ${attempt} failed:`, e?.message || e);
+      }
+    }
+
+    // Promote staged/upload/local via refresh
+    if (mediaId && opts.projectId && (mediaId.startsWith('staged-') || mediaId.startsWith('upload-') || !isFlowMediaUuid(mediaId))) {
+      try {
+        const refreshed = await refreshFlowMediaId({
+          accountId: opts.accountId,
+          mediaId,
+          cookies: opts.cookies,
+          projectId: opts.projectId,
+          forceReupload: true,
+        });
+        if (refreshed && isFlowMediaUuid(refreshed)) {
+          await waitFlowMediaReady(refreshed, { attempts: 15, intervalMs: 400 });
+          return refreshed;
+        }
+      } catch (e: any) {
+        console.warn(`[${label}] promote ${String(mediaId).slice(0, 12)} attempt ${attempt}:`, e?.message || e);
+      }
+    }
+
+    // Direct BiB upload from local bytes or URL
+    if (opts.projectId && (localPath || imageUrl)) {
+      try {
+        const { bibUploadImage } = await import('@/lib/bib');
+        let imageBase64: string | undefined;
+        let uploadUrl: string | undefined;
+        let mimeType = opts.mimeType || 'image/jpeg';
+        let filename = opts.filename || 'reference.jpg';
+
+        if (localPath && fs.existsSync(localPath)) {
+          const buf = fs.readFileSync(localPath);
+          if (buf.length >= 100) {
+            imageBase64 = buf.toString('base64');
+            mimeType = opts.mimeType || mimeFromPath(localPath);
+            filename = opts.filename || path.basename(localPath);
+          }
+        } else if (imageUrl) {
+          if (/^data:image\//i.test(imageUrl)) {
+            const m = imageUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+            if (m?.[2]) {
+              imageBase64 = m[2];
+              mimeType = m[1] || mimeType;
+            }
+          } else if (/^https?:\/\//i.test(imageUrl) || imageUrl.startsWith('/api/assets/')) {
+            uploadUrl = imageUrl.startsWith('/')
+              ? `${(process.env.NEXTAUTH_URL || process.env.APP_URL || 'http://127.0.0.1:3100').replace(/\/$/, '')}${imageUrl}`
+              : imageUrl;
+            // Prefer pulling bytes ourselves for Google CDN
+            if (/flow-content\.google|googleusercontent\.com|\/api\/assets\//i.test(uploadUrl)) {
+              try {
+                const proxied = await fetch(uploadUrl, {
+                  headers: opts.cookies ? { Cookie: opts.cookies } : undefined,
+                }).catch(() => null);
+                if (proxied?.ok) {
+                  const buf = Buffer.from(await proxied.arrayBuffer());
+                  if (buf.length >= 100) {
+                    imageBase64 = buf.toString('base64');
+                    mimeType = proxied.headers.get('content-type') || mimeType;
+                    uploadUrl = undefined;
+                  }
+                }
+              } catch {
+                /* keep uploadUrl */
+              }
+            }
+          }
+        }
+
+        if (imageBase64 || uploadUrl) {
+          const bibResult = await bibUploadImage({
+            accountId: opts.accountId,
+            projectId: opts.projectId,
+            imageBase64,
+            imageUrl: uploadUrl,
+            mimeType,
+            filename,
+          });
+          if (bibResult?.mediaId && isFlowMediaUuid(bibResult.mediaId)) {
+            console.info(
+              `[${label}] uploaded → ${bibResult.mediaId.slice(0, 8)} (attempt ${attempt}/${maxAttempts})`
+            );
+            await waitFlowMediaReady(bibResult.mediaId, { attempts: 15, intervalMs: 400 });
+            return bibResult.mediaId;
+          }
+        }
+      } catch (e: any) {
+        console.warn(`[${label}] upload attempt ${attempt} failed:`, e?.message || e);
+      }
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 1500 * attempt));
+    }
+  }
+
+  return mediaId && isFlowMediaUuid(mediaId) ? mediaId : undefined;
+}

@@ -9,8 +9,10 @@ import { JobStatus } from '@prisma/client';
 import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
 import { resolveImageFrontendModel, resolveImageWireModel, nextImageWireModel, isImageModelQuotaError } from '@/lib/modelWire';
 import { createStudioLog } from '@/lib/studioLogs';
-import { prepareProviderWorkerSession, refreshFlowMediaId } from '@/lib/providerSession';
+import { prepareProviderWorkerSession, ensureFlowReadyMediaId } from '@/lib/providerSession';
 import { bibGenerateImage, ensureBibAccountReady } from '@/lib/bib';
+
+const FLOW_UUID = /^[a-f0-9-]{36}$/i;
 
 async function resolveMediaId(id?: string | null) {
   if (!id) return id || undefined;
@@ -201,50 +203,120 @@ export async function POST(req: Request) {
         await Promise.all([...rawIds, ...stagedIds].map((id) => resolveMediaId(id)))
       ).filter(Boolean) as string[];
 
-      // Re-upload refs into THIS Google account/project so media becomes Ready
-      const freshIds: string[] = [];
-      for (const mid of resolvedIds) {
-        const refreshed = await refreshFlowMediaId({
-          accountId: provider.id,
-          mediaId: mid,
-          cookies: liveCookies,
-          projectId: targetProjectId,
-        });
-        freshIds.push(refreshed || mid);
+      const refUrls: string[] = [];
+      if (body.image_url) refUrls.push(String(body.image_url));
+      if (body.reference_url) refUrls.push(String(body.reference_url));
+      if (Array.isArray(body.image_urls)) {
+        for (const u of body.image_urls) if (u) refUrls.push(String(u));
       }
 
-      // Characters: use portrait Flow media ids as remix refs (BiB; no Python CDP)
-      const characters = Array.isArray(body.characters)
-        ? body.characters
-            .map((c: any) => ({
-              entity_id: c.flow_entity_id || c.entity_id,
-              flow_entity_id: c.flow_entity_id || c.entity_id || null,
+      // Upload / promote every reference into THIS Google account until Flow-ready (retry).
+      // Never fail early with "select a ready image" — upload first, then generate.
+      const freshIds: string[] = [];
+      for (let i = 0; i < Math.max(resolvedIds.length, refUrls.length || 0); i++) {
+        const mid = resolvedIds[i];
+        const url = refUrls[i] || refUrls[0];
+        if (!mid && !url) continue;
+        const ensured = await ensureFlowReadyMediaId({
+          accountId: provider.id,
+          projectId: targetProjectId,
+          cookies: liveCookies,
+          mediaId: mid,
+          imageUrl: url,
+          label: `i2i-ref:${job.id.slice(0, 8)}`,
+          maxAttempts: 3,
+        });
+        if (ensured && FLOW_UUID.test(ensured)) freshIds.push(ensured);
+      }
+      // If only URLs were sent (no ids)
+      if (!resolvedIds.length && refUrls.length) {
+        for (const url of refUrls) {
+          const ensured = await ensureFlowReadyMediaId({
+            accountId: provider.id,
+            projectId: targetProjectId,
+            cookies: liveCookies,
+            imageUrl: url,
+            label: `i2i-url:${job.id.slice(0, 8)}`,
+            maxAttempts: 3,
+          });
+          if (ensured && FLOW_UUID.test(ensured)) freshIds.push(ensured);
+        }
+      }
+
+      // Characters: upload portrait if needed, keep entity ids for BiB remix
+      const charactersRaw = Array.isArray(body.characters) ? body.characters : [];
+      const characters = (
+        await Promise.all(
+          charactersRaw.map(async (c: any) => {
+            const entity = c.flow_entity_id || c.entity_id;
+            if (!entity) return null;
+            let imageMediaId = c.image_media_id || null;
+            if (!imageMediaId || !FLOW_UUID.test(String(imageMediaId))) {
+              const ensured = await ensureFlowReadyMediaId({
+                accountId: provider.id,
+                projectId: targetProjectId,
+                cookies: liveCookies,
+                mediaId: imageMediaId,
+                imageUrl: c.image_url || c.portraitUrl || null,
+                localPath: c.local_image_path || null,
+                label: `i2i-char:${job.id.slice(0, 8)}`,
+                maxAttempts: 3,
+              });
+              if (ensured) imageMediaId = ensured;
+            } else {
+              const refreshed = await ensureFlowReadyMediaId({
+                accountId: provider.id,
+                projectId: targetProjectId,
+                cookies: liveCookies,
+                mediaId: imageMediaId,
+                imageUrl: c.image_url || c.portraitUrl || null,
+                localPath: c.local_image_path || null,
+                label: `i2i-char:${job.id.slice(0, 8)}`,
+                maxAttempts: 2,
+              });
+              if (refreshed) imageMediaId = refreshed;
+            }
+            if (imageMediaId && FLOW_UUID.test(String(imageMediaId))) {
+              freshIds.push(String(imageMediaId));
+            }
+            return {
+              entity_id: entity,
+              flow_entity_id: entity,
               character_id: c.character_id || c.flow_character_id || null,
               name: c.name || c.display_name || 'Character',
-              image_media_id: c.image_media_id || null,
+              image_media_id: imageMediaId,
               image_url: c.image_url || c.portraitUrl || null,
               local_image_path: c.local_image_path || null,
-            }))
-            .filter((c: any) => c.entity_id && c.flow_entity_id)
-        : [];
+            };
+          })
+        )
+      ).filter(Boolean) as any[];
 
-      for (const c of characters) {
-        const mid = c.image_media_id;
-        if (!mid) continue;
-        const refreshed = await refreshFlowMediaId({
-          accountId: provider.id,
-          mediaId: mid,
-          cookies: liveCookies,
-          projectId: targetProjectId,
-        });
-        if (refreshed) freshIds.push(refreshed);
+      let flowRefs = [...new Set(freshIds.map((id) => String(id || '').trim()))].filter((id) =>
+        FLOW_UUID.test(id)
+      );
+
+      if (!flowRefs.length && !characters.length) {
+        // One last upload pass from any leftover staged/local ids before failing
+        for (const mid of [...rawIds, ...stagedIds]) {
+          const ensured = await ensureFlowReadyMediaId({
+            accountId: provider.id,
+            projectId: targetProjectId,
+            cookies: liveCookies,
+            mediaId: mid,
+            imageUrl: refUrls[0],
+            label: `i2i-last:${job.id.slice(0, 8)}`,
+            maxAttempts: 3,
+          });
+          if (ensured && FLOW_UUID.test(ensured)) flowRefs.push(ensured);
+        }
+        flowRefs = [...new Set(flowRefs)];
       }
 
-      const flowRefs = [...new Set(freshIds.map((id) => String(id || '').trim()))].filter((id) =>
-        /^[a-f0-9-]{36}$/i.test(id)
-      );
       if (!flowRefs.length && !characters.length) {
-        throw new Error('No Flow-ready reference image for I2I — select a ready image and retry');
+        throw new Error(
+          'Could not upload reference image into Flow after retries — check BiB project and try again'
+        );
       }
 
       console.info(
@@ -254,7 +326,9 @@ export async function POST(req: Request) {
         createStudioLog({
           level: 'info',
           source: 'generate',
-          message: `I2I dispatching to Flow via BiB (project ${String(targetProjectId || 'default').slice(0, 8)}…)`,
+          message: flowRefs.length
+            ? `I2I uploaded ${flowRefs.length} ref(s), dispatching to Flow (project ${String(targetProjectId || 'default').slice(0, 8)}…)`
+            : `I2I dispatching to Flow via BiB (project ${String(targetProjectId || 'default').slice(0, 8)}…)`,
           runId: String(body.run_id),
           userId: session.userId,
           userEmail: session.email,
@@ -395,6 +469,7 @@ export async function POST(req: Request) {
 
         return NextResponse.json({
           success: true,
+          uploaded_image_id: flowRefs[0] || null,
           asset: returnedAsset,
           assets: [returnedAsset],
         });
@@ -424,6 +499,7 @@ export async function POST(req: Request) {
 
       return NextResponse.json({
         success: true,
+        uploaded_image_id: flowRefs[0] || null,
         asset: {
           id: job.id,
           workerTaskId: primary.id,

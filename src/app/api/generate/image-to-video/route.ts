@@ -8,7 +8,7 @@ import { selectProviderAccountForJobDetailed } from '@/lib/routing';
 import { getUserPlanLimit, countUserActiveJobs, checkAndDispatchNextJobs } from '@/lib/queue';
 import { JobStatus, WalletType } from '@prisma/client';
 import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
-import { prepareProviderWorkerSession, refreshFlowMediaId } from '@/lib/providerSession';
+import { prepareProviderWorkerSession, ensureFlowReadyMediaId } from '@/lib/providerSession';
 import { createStudioLog } from '@/lib/studioLogs';
 import { bibGenerateVideo, ensureBibAccountReady, bibEnsureLabs } from '@/lib/bib';
 import { resolveVideoWireModel } from '@/lib/modelWire';
@@ -199,16 +199,18 @@ export async function POST(req: Request) {
         return id;
       };
 
-      const refreshOne = async (id?: string, forceReupload = false) => {
+      const refreshOne = async (id?: string, forceReupload = false, imageUrl?: string) => {
         const resolved = await resolveMediaId(id);
-        if (!resolved) return resolved;
+        if (!resolved && !imageUrl) return resolved;
         return (
-          (await refreshFlowMediaId({
+          (await ensureFlowReadyMediaId({
             accountId: provider.id,
             mediaId: resolved,
+            imageUrl: imageUrl || body.image_url || undefined,
             cookies: liveCookies,
             projectId: targetProjectId,
-            forceReupload,
+            maxAttempts: forceReupload ? 3 : 2,
+            label: `i2v-ref:${job.id.slice(0, 8)}`,
           })) || resolved
         );
       };
@@ -219,12 +221,12 @@ export async function POST(req: Request) {
         Boolean(body.first_frame_staged_id && body.last_frame_staged_id);
 
       const [resFirst, resLast, resImg, resStaged, resFirstStaged, resLastStaged] = await Promise.all([
-        refreshOne(first_frame_id, dualFrames),
-        refreshOne(last_frame_id, dualFrames),
-        refreshOne(image_id, dualFrames),
-        refreshOne(body.staged_id, dualFrames),
-        refreshOne(body.first_frame_staged_id, dualFrames),
-        refreshOne(body.last_frame_staged_id, dualFrames),
+        refreshOne(first_frame_id, dualFrames, body.first_frame_url),
+        refreshOne(last_frame_id, dualFrames, body.last_frame_url),
+        refreshOne(image_id, dualFrames, body.image_url),
+        refreshOne(body.staged_id, dualFrames, body.image_url),
+        refreshOne(body.first_frame_staged_id, dualFrames, body.first_frame_url),
+        refreshOne(body.last_frame_staged_id, dualFrames, body.last_frame_url),
       ]);
 
       const feModel = resolveVideoFrontendModel(model);
@@ -255,18 +257,18 @@ export async function POST(req: Request) {
         }).catch(() => 0);
       }
 
-      const firstId =
+      let firstId =
         [resFirst, resImg, resStaged, resFirstStaged]
           .map((id) => String(id || '').trim())
           .find((id) => /^[a-f0-9-]{36}$/i.test(id)) || null;
-      const lastId =
+      let lastId =
         [resLast, resLastStaged]
           .map((id) => String(id || '').trim())
           .find((id) => /^[a-f0-9-]{36}$/i.test(id)) || null;
 
       if (dualFrames && (!firstId || !lastId)) {
         throw new Error(
-          'First and last frames must both be Flow-ready UUIDs. Re-upload the frames and retry.'
+          'Could not upload first/last frames into Flow after retries — re-select the frames and try again'
         );
       }
 
@@ -290,9 +292,22 @@ export async function POST(req: Request) {
       if (frame_mode === 'last_only' && lastId && !firstId) {
         // last-only: use last as start frame
       } else if (!firstId && !lastId && !charRefs.length) {
-        throw new Error(
-          'No Flow-ready frame image. Wait until the reference shows Ready, then retry.'
-        );
+        const fallback = await ensureFlowReadyMediaId({
+          accountId: provider.id,
+          projectId: targetProjectId,
+          cookies: liveCookies,
+          mediaId: image_id || body.staged_id,
+          imageUrl: body.image_url,
+          label: `i2v-last:${job.id.slice(0, 8)}`,
+          maxAttempts: 3,
+        });
+        if (fallback && /^[a-f0-9-]{36}$/i.test(fallback)) {
+          firstId = fallback;
+        } else {
+          throw new Error(
+            'Could not upload frame image into Flow after retries — check BiB project and try again'
+          );
+        }
       }
 
       await ensureBibAccountReady({
@@ -382,12 +397,13 @@ export async function POST(req: Request) {
         const repairedRefs: string[] = [];
         for (const mid of ingredientRefs) {
           const next =
-            (await refreshFlowMediaId({
+            (await ensureFlowReadyMediaId({
               accountId: provider.id,
               mediaId: mid,
               cookies: liveCookies,
               projectId: targetProjectId,
-              forceReupload,
+              maxAttempts: forceReupload ? 3 : 2,
+              label: `i2v-repair:${job.id.slice(0, 8)}`,
             })) || mid;
           if (next && /^[a-f0-9-]{36}$/i.test(next) && !repairedRefs.includes(next)) {
             repairedRefs.push(next);

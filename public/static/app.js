@@ -3736,9 +3736,9 @@
       }
       const ref = state.referenceImage;
       const isStaged = ref && ref.staged_id && (!ref.id || String(ref.id).startsWith('staged-'));
+      // Not-ready refs are uploaded into Flow by the server — do not block generate.
       if (!hasChars && !hasMulti && hasRef && !isStaged && ref.ready === false) {
-        showToast('Wait until the reference shows “Ready” in Flow before generating.', 'warning');
-        return;
+        showToast('Reference not ready yet — uploading into Flow, then generating…', 'info');
       }
     }
 
@@ -4145,18 +4145,17 @@
     }
 
     if (!hasMultiRefs && !characters && hasFlowRef && state.referenceImage.ready === false) {
-      showToast('Reference image is still processing in Flow. Wait for Ready.', 'warning');
-      failPendingTask(localId, 'Reference not ready');
-      return;
+      showToast('Reference not ready — uploading into Flow, then generating…', 'info');
+      setTaskPhase(localId, 'upload', 'Uploading reference into Flow…');
     }
 
     ensureModelForMode('image-to-image');
     const count = Math.max(1, Math.min(state.imageCount || 1, 4));
     setTaskPhase(
       localId,
-      stagedId ? 'upload' : 'submit',
-      stagedId
-        ? 'Uploading staged image to Flow…'
+      stagedId || (hasFlowRef && state.referenceImage.ready === false) ? 'upload' : 'submit',
+      stagedId || (hasFlowRef && state.referenceImage.ready === false)
+        ? 'Uploading reference image to Flow…'
         : count > 1
           ? `Dispatching ${count} parallel I2I jobs…`
           : 'Dispatching Image-to-Image…'
@@ -4166,7 +4165,9 @@
       'info',
       stagedId
         ? `I2I will upload staged ${stagedId} then generate ×${count}`
-        : `I2I ×${count}…`,
+        : hasFlowRef && state.referenceImage.ready === false
+          ? `I2I will upload/ensure ref then generate ×${count}`
+          : `I2I ×${count}…`,
       runId
     );
 
@@ -4180,6 +4181,9 @@
     };
     if (stagedId) body.staged_id = stagedId;
     else if (hasFlowRef) body.image_id = state.referenceImage.id;
+    if (state.referenceImage && state.referenceImage.url) {
+      body.image_url = state.referenceImage.url;
+    }
     if (characters) body.characters = characters;
 
     // Multi-reference images
@@ -4309,21 +4313,26 @@
     }
 
     if (!hasFrameRefs && !characters && hasFlowRef && state.referenceImage.ready === false) {
-      showToast('Wait until the image is Ready in Flow before animating.', 'warning');
-      failPendingTask(localId, 'Reference not ready');
-      return;
+      showToast('Reference not ready — uploading into Flow, then animating…', 'info');
+      setTaskPhase(localId, 'upload', 'Uploading reference into Flow…');
     }
 
     ensureModelForMode('image-to-video');
     setTaskPhase(
       localId,
-      stagedId ? 'upload' : 'submit',
-      stagedId ? 'Uploading staged image to Flow…' : 'Dispatching Image-to-Video…'
+      stagedId || (hasFlowRef && state.referenceImage.ready === false) ? 'upload' : 'submit',
+      stagedId || (hasFlowRef && state.referenceImage.ready === false)
+        ? 'Uploading reference image to Flow…'
+        : 'Dispatching Image-to-Video…'
     );
     const runId = (state.activeTasks.get(localId) || {}).runId;
     studioLog(
       'info',
-      stagedId ? `I2V will upload staged ${stagedId} then animate` : 'I2V animating…',
+      stagedId
+        ? `I2V will upload staged ${stagedId} then animate`
+        : hasFlowRef && state.referenceImage.ready === false
+          ? 'I2V will upload/ensure ref then animate'
+          : 'I2V animating…',
       runId
     );
 
@@ -4336,6 +4345,9 @@
     };
     if (stagedId) body.staged_id = stagedId;
     else if (hasFlowRef) body.image_id = state.referenceImage.id;
+    if (state.referenceImage && state.referenceImage.url) {
+      body.image_url = state.referenceImage.url;
+    }
     if (characters) body.characters = characters;
 
     // Attach First & Last Frame if specified (first_only, last_only, or first_and_last)
