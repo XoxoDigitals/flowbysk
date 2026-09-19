@@ -61,6 +61,7 @@ async function logJobTerminal(
     userId: string;
     prompt: string | null;
     parameters: unknown;
+    providerAccountId?: string | null;
   },
   kind: 'complete' | 'failed',
   detail?: string
@@ -68,9 +69,13 @@ async function logJobTerminal(
   try {
     const params = (job.parameters as Record<string, any>) || {};
     const runId = String(params.run_id || job.id);
+    const promptSlice = String(job.prompt || '').trim().slice(0, 80);
+    const errSlice = String(detail || 'Generation failed').replace(/\s+/g, ' ').trim().slice(0, 120);
     const message =
       kind === 'failed'
-        ? `Video failed: ${(detail || 'Generation failed').slice(0, 200)}`
+        ? promptSlice
+          ? `Video failed: ${errSlice} — ${promptSlice}`
+          : `Video failed: ${errSlice}`
         : `Video complete${detail ? ` (${detail})` : ''}: ${(job.prompt || 'video').slice(0, 80)}`;
 
     const existing = await prisma.studioLog.findFirst({
@@ -83,7 +88,34 @@ async function logJobTerminal(
       },
       select: { id: true },
     });
-    if (existing) return;
+    if (existing) {
+      if (kind === 'failed' && job.providerAccountId) {
+        const provider = await prisma.providerAccount.findUnique({
+          where: { id: job.providerAccountId },
+          select: { accountEmail: true },
+        });
+        if (provider?.accountEmail) {
+          await prisma.studioLog
+            .updateMany({
+              where: { id: existing.id, flowEmail: null },
+              data: { flowEmail: provider.accountEmail },
+            })
+            .catch(() => 0);
+        }
+      }
+      return;
+    }
+
+    const provider = job.providerAccountId
+      ? await prisma.providerAccount.findUnique({
+          where: { id: job.providerAccountId },
+          select: { accountEmail: true },
+        })
+      : null;
+    const user = await prisma.user.findUnique({
+      where: { id: job.userId },
+      select: { email: true },
+    });
 
     await createStudioLog({
       level: kind === 'failed' ? 'error' : 'info',
@@ -91,6 +123,8 @@ async function logJobTerminal(
       source: 'generate',
       runId,
       userId: job.userId,
+      userEmail: user?.email || null,
+      flowEmail: provider?.accountEmail || null,
     });
   } catch (err) {
     console.warn('[jobBibPoll] studio log terminal write failed', err);

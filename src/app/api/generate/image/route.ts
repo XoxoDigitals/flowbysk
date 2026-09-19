@@ -9,7 +9,7 @@ import { PYTHON_WORKER_URL, workerIdentityHeaders } from '@/lib/worker';
 import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
 import { resolveMediaExpiresAt } from '@/lib/mediaExpiry';
 import { bibGenerateImage, ensureBibAccountReady } from '@/lib/bib';
-import { createStudioLog, logGenerationQueued } from '@/lib/studioLogs';
+import { logGenerationQueued, logGenerationAccepted, logGenerationSubmitted, logGenerationComplete } from '@/lib/studioLogs';
 import { resolveTargetFlowProject } from '@/lib/flowProjects';
 import { resolveImageFrontendModel, resolveImageWireModel, nextImageWireModel, isImageModelQuotaError } from '@/lib/modelWire';
 // image remaps: Python remaps FE→wire once; BiB needs wire keys directly.
@@ -186,6 +186,28 @@ export async function POST(req: Request) {
 
     // 7. Forward to BiB worker (preferred) or legacy Python CDP worker
     const genStartedAt = Date.now();
+    const runId = String(body.run_id || job.id);
+    try {
+      await logGenerationAccepted({
+        runId,
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider.accountEmail || null,
+        prompt: job.prompt,
+        source: body.source || 'image',
+        kind: 'image',
+      });
+      await logGenerationSubmitted({
+        runId,
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider.accountEmail || null,
+        kind: 't2i',
+        prompt: job.prompt,
+      });
+    } catch {
+      /* ignore studio log */
+    }
     try {
       const flowIds = Array.isArray(provider.flowProjectIds)
         ? (provider.flowProjectIds as string[])
@@ -356,13 +378,14 @@ export async function POST(req: Request) {
       }
 
       try {
-        const runId = String(body.run_id || job.id);
-        await createStudioLog({
-          level: 'info',
-          message: `T2I complete (${durationSec.toFixed(1)}s): ${(job.prompt || 'image').slice(0, 80)}`,
-          source: 'generate',
-          runId,
+        await logGenerationComplete({
+          runId: String(body.run_id || job.id),
           userId: session.userId,
+          userEmail: session.email,
+          flowEmail: provider.accountEmail || null,
+          kind: 't2i',
+          prompt: job.prompt,
+          durationSec,
         });
       } catch {
         /* ignore */
@@ -430,6 +453,16 @@ export async function POST(req: Request) {
         workerErr.message || 'Generation failed'
       );
       checkAndDispatchNextJobs(session.userId).catch(console.error);
+      const { logGenerationFailed } = await import('@/lib/studioLogs');
+      await logGenerationFailed({
+        runId: String(body.run_id || job.id),
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider?.accountEmail || null,
+        kind: 't2i',
+        error: workerErr.message || 'Image generation failed',
+        prompt: job.prompt,
+      }).catch(() => 0);
 
       return NextResponse.json(
         {

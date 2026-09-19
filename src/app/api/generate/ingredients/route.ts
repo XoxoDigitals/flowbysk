@@ -9,6 +9,7 @@ import { JobStatus, WalletType } from '@prisma/client';
 import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
 import { prepareProviderWorkerSession, ensureFlowReadyMediaId } from '@/lib/providerSession';
 import { createStudioLog } from '@/lib/studioLogs';
+import { switchJobToAlternateProviderAccount } from '@/lib/uploadAccountFailover';
 import { bibGenerateImage, bibGenerateVideo, ensureBibAccountReady, bibEnsureLabs } from '@/lib/bib';
 import {
   resolveImageFrontendModel,
@@ -135,11 +136,12 @@ export async function POST(req: Request) {
       );
     }
 
-    const { account: provider, reason: providerReason } = await selectProviderAccountForJobDetailed(
+    const { account: selectedProvider, reason: providerReason } = await selectProviderAccountForJobDetailed(
       pricing.walletType,
       modelKey,
       session.userId
     );
+    let provider = selectedProvider;
 
     if (!provider) {
       const internal =
@@ -183,8 +185,8 @@ export async function POST(req: Request) {
 
     try {
       const sessionPrep = await prepareProviderWorkerSession(provider, session.userId);
-      const liveCookies = sessionPrep.cookies || provider?.cookies || undefined;
-      const targetProjectId = sessionPrep.projectId;
+      let liveCookies = sessionPrep.cookies || provider?.cookies || undefined;
+      let targetProjectId = sessionPrep.projectId;
 
       const resolveMediaId = async (id?: string) => {
         if (!id) return id;
@@ -278,7 +280,7 @@ export async function POST(req: Request) {
         );
       }
 
-      const charRefs = Array.isArray(characters)
+      let charRefs = Array.isArray(characters)
         ? characters
             .map((c: any) => ({
               entity_id: c.flow_entity_id || c.entity_id,
@@ -305,6 +307,62 @@ export async function POST(req: Request) {
           label: `ingredients-char:${job.id.slice(0, 8)}`,
         });
         if (mid && isFlowUuid(mid)) c.image_media_id = mid;
+      }
+
+      if (!flowRefs.length && !charRefs.length && provider?.id) {
+        const alt = await switchJobToAlternateProviderAccount({
+          userId: session.userId,
+          walletType: pricing.walletType,
+          modelKey,
+          jobId: job.id,
+          excludeAccountId: provider.id,
+          runId: body.run_id || job.id,
+          userEmail: session.email,
+          prompt: job.prompt,
+          failedEmail: provider.accountEmail || null,
+        });
+        if (alt) {
+          provider = alt.provider;
+          liveCookies = alt.cookies || provider.cookies || undefined;
+          targetProjectId = alt.projectId;
+          const reIng = (
+            await Promise.all((ingredient_ids || []).map((id: string) => refreshOne(id)))
+          ).filter(Boolean) as string[];
+          const reStaged = (
+            await Promise.all((staged_ids || []).map((id: string) => refreshOne(id)))
+          ).filter(Boolean) as string[];
+          flowRefs = [...reIng, ...reStaged].map((id) => String(id || '').trim()).filter(Boolean);
+          const unresolved2 = flowRefs.filter((id) => !isFlowUuid(id));
+          if (unresolved2.length) {
+            const repaired: string[] = [];
+            for (const mid of unresolved2) {
+              const next = await ensureFlowReadyMediaId({
+                accountId: provider.id,
+                mediaId: mid,
+                cookies: liveCookies,
+                projectId: targetProjectId,
+                maxAttempts: 3,
+                label: `ingredients-failover:${job.id.slice(0, 8)}`,
+              });
+              if (next && isFlowUuid(next)) repaired.push(next);
+            }
+            flowRefs = [...flowRefs.filter(isFlowUuid), ...repaired];
+          }
+          flowRefs = [...new Set(flowRefs.filter(isFlowUuid))];
+          for (const c of charRefs) {
+            const mid = await ensureFlowReadyMediaId({
+              accountId: provider.id,
+              projectId: targetProjectId,
+              cookies: liveCookies,
+              mediaId: c.image_media_id,
+              imageUrl: c.image_url,
+              localPath: c.local_image_path,
+              maxAttempts: 3,
+              label: `ingredients-char-failover:${job.id.slice(0, 8)}`,
+            });
+            if (mid && isFlowUuid(mid)) c.image_media_id = mid;
+          }
+        }
       }
 
       if (!flowRefs.length && !charRefs.length) {
@@ -570,6 +628,16 @@ export async function POST(req: Request) {
         workerErr.message || 'Generation failed'
       );
       checkAndDispatchNextJobs(session.userId).catch(console.error);
+      const { logGenerationFailed } = await import('@/lib/studioLogs');
+      await logGenerationFailed({
+        runId: String(body.run_id || job.id),
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider?.accountEmail || null,
+        kind: 'ingredients',
+        error: workerErr.message || 'Ingredients generation failed',
+        prompt: job.prompt,
+      }).catch(() => 0);
 
       return NextResponse.json(
         {

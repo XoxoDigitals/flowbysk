@@ -36,6 +36,9 @@ interface StudioRun {
   runId: string | null;
   title: string;
   status: 'QUEUED' | 'GENERATING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'WARN' | 'INFO';
+  mediaKind?: 'img' | 'video' | null;
+  toolLabel?: string | null;
+  mode?: string | null;
   startedAt: string;
   updatedAt: string;
   durationMs?: number;
@@ -58,6 +61,15 @@ function statusClass(status: string) {
   if (status === 'QUEUED') return 'bg-amber-500/15 text-amber-600';
   if (status === 'WARN') return 'bg-[var(--a2soft)] text-[var(--a2)]';
   return 'bg-[var(--a1soft)] text-[var(--a1)]';
+}
+
+function mediaKindClass(kind: string) {
+  if (kind === 'video') return 'bg-violet-500/15 text-violet-400';
+  return 'bg-orange-500/15 text-orange-500';
+}
+
+function toolLabelClass() {
+  return 'bg-[var(--bg3)] text-[var(--ink2)]';
 }
 
 function levelClass(level: string) {
@@ -375,6 +387,22 @@ export default function AdminStudioLogsPage() {
                     >
                       {run.status}
                     </span>
+                    {run.mediaKind ? (
+                      <span
+                        className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${mediaKindClass(run.mediaKind)}`}
+                        title="Media type"
+                      >
+                        {run.mediaKind === 'video' ? 'VIDEO' : 'IMG'}
+                      </span>
+                    ) : null}
+                    {run.toolLabel ? (
+                      <span
+                        className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${toolLabelClass()}`}
+                        title={run.mode ? `Mode: ${run.mode}` : 'Tool'}
+                      >
+                        {run.toolLabel}
+                      </span>
+                    ) : null}
                     <span className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--ink)]">
                       {run.title}
                     </span>

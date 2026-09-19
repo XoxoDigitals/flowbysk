@@ -259,9 +259,11 @@ export async function logGenerationSubmitted(opts: {
   userEmail?: string | null;
   flowEmail?: string | null;
   kind: 't2v' | 'i2v' | 't2i' | 'i2i';
+  prompt?: string | null;
 }) {
   const runId = String(opts.runId || '').trim() || undefined;
-  const message =
+  const promptSlice = String(opts.prompt || '').trim().slice(0, 60);
+  const base =
     opts.kind === 'i2v'
       ? 'I2V submitted — polling Flow for result…'
       : opts.kind === 't2i'
@@ -269,13 +271,14 @@ export async function logGenerationSubmitted(opts: {
         : opts.kind === 'i2i'
           ? 'I2I submitted — waiting for Flow…'
           : 'T2V submitted — polling Flow for result…';
+  const message = promptSlice ? `${base} — ${promptSlice}` : base;
 
   // Dedupe: avoid double log if route already wrote the same line
   if (runId) {
     const existing = await prisma.studioLog.findFirst({
       where: {
         runId,
-        message: { startsWith: message.slice(0, 24) },
+        message: { startsWith: base.slice(0, 24) },
         createdAt: { gte: new Date(Date.now() - 2 * 60 * 1000) },
       },
       select: { id: true },
@@ -285,6 +288,173 @@ export async function logGenerationSubmitted(opts: {
 
   await createStudioLog({
     level: 'info',
+    source: 'generate',
+    message,
+    runId,
+    userId: opts.userId,
+    userEmail: opts.userEmail,
+    flowEmail: opts.flowEmail,
+  });
+}
+
+/**
+ * Immediate accept log for sync Studio/tool gens (not waiting in queue).
+ * Dedupe so UI + server don't double-write.
+ */
+export async function logGenerationAccepted(opts: {
+  runId?: string | null;
+  userId: string;
+  userEmail?: string | null;
+  flowEmail?: string | null;
+  prompt: string;
+  source?: string | null;
+  kind: 'video' | 'image' | 'image-to-video' | 'image-to-image';
+}) {
+  const mode = resolveQueuedModeLabel({ source: opts.source, kind: opts.kind });
+  const runId = String(opts.runId || '').trim() || undefined;
+  const message = `Generation queued (${mode}): ${String(opts.prompt || '').slice(0, 100)}`;
+
+  if (runId) {
+    const existing = await prisma.studioLog.findFirst({
+      where: {
+        runId,
+        message: { startsWith: 'Generation queued' },
+        createdAt: { gte: new Date(Date.now() - 2 * 60 * 1000) },
+      },
+      select: { id: true },
+    });
+    if (existing) return;
+  }
+
+  await createStudioLog({
+    level: 'info',
+    source: 'generate',
+    message,
+    runId,
+    userId: opts.userId,
+    userEmail: opts.userEmail,
+    flowEmail: opts.flowEmail,
+  });
+}
+
+/** Terminal complete line — short prompt slice; includes Google flowEmail when known. */
+export async function logGenerationComplete(opts: {
+  runId?: string | null;
+  userId: string;
+  userEmail?: string | null;
+  flowEmail?: string | null;
+  kind: 't2v' | 'i2v' | 't2i' | 'i2i';
+  prompt?: string | null;
+  durationSec?: number;
+}) {
+  const runId = String(opts.runId || '').trim() || undefined;
+  const secs =
+    opts.durationSec != null && Number.isFinite(opts.durationSec)
+      ? ` (${Math.max(0.1, opts.durationSec).toFixed(1)}s)`
+      : '';
+  const label =
+    opts.kind === 'i2v'
+      ? 'I2V'
+      : opts.kind === 't2i'
+        ? 'T2I'
+        : opts.kind === 'i2i'
+          ? 'I2I'
+          : 'T2V';
+  const message = `${label} complete${secs}: ${String(opts.prompt || 'scene').slice(0, 80)}`;
+
+  if (runId) {
+    const existing = await prisma.studioLog.findFirst({
+      where: {
+        runId,
+        OR: [
+          { message: { startsWith: `${label} complete` } },
+          { message: { startsWith: 'Video complete' } },
+          { message: { startsWith: 'Image complete' } },
+        ],
+        createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      // Backfill flowEmail on older complete row if missing
+      if (opts.flowEmail) {
+        await prisma.studioLog
+          .updateMany({
+            where: { id: existing.id, flowEmail: null },
+            data: { flowEmail: opts.flowEmail },
+          })
+          .catch(() => 0);
+      }
+      return;
+    }
+  }
+
+  await createStudioLog({
+    level: 'info',
+    source: 'generate',
+    message,
+    runId,
+    userId: opts.userId,
+    userEmail: opts.userEmail,
+    flowEmail: opts.flowEmail,
+  });
+}
+
+/** Terminal fail line — keeps Studio Logs off GENERATING when the job is FAILED. */
+export async function logGenerationFailed(opts: {
+  runId?: string | null;
+  userId: string;
+  userEmail?: string | null;
+  flowEmail?: string | null;
+  kind: 't2v' | 'i2v' | 't2i' | 'i2i' | 'ingredients';
+  error?: string | null;
+  prompt?: string | null;
+}) {
+  const runId = String(opts.runId || '').trim() || undefined;
+  const label =
+    opts.kind === 'i2v'
+      ? 'I2V'
+      : opts.kind === 't2i'
+        ? 'T2I'
+        : opts.kind === 'i2i'
+          ? 'I2I'
+          : opts.kind === 'ingredients'
+            ? 'Ingredients'
+            : 'Video';
+  const errSlice = String(opts.error || 'Generation failed').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const promptSlice = String(opts.prompt || '').trim().slice(0, 80);
+  const message = promptSlice
+    ? `${label} failed: ${errSlice} — ${promptSlice}`
+    : `${label} failed: ${errSlice}`;
+
+  if (runId) {
+    const existing = await prisma.studioLog.findFirst({
+      where: {
+        runId,
+        OR: [
+          { message: { startsWith: `${label} failed` } },
+          { message: { startsWith: 'Video failed' } },
+          { message: { startsWith: 'Generation failed' } },
+        ],
+        createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      if (opts.flowEmail) {
+        await prisma.studioLog
+          .updateMany({
+            where: { id: existing.id, flowEmail: null },
+            data: { flowEmail: opts.flowEmail },
+          })
+          .catch(() => 0);
+      }
+      return;
+    }
+  }
+
+  await createStudioLog({
+    level: 'error',
     source: 'generate',
     message,
     runId,
@@ -409,6 +579,63 @@ function whoKey(log: {
   user?: { id: string; email: string } | null;
 }): string {
   return log.userId || log.user?.id || log.userEmail || log.flowEmail || 'anon';
+}
+
+/** Parse media + tool chips from queued/mode messages already written on the run. */
+export function deriveRunLabels(events: Array<{ message: string; source?: string }>): {
+  mediaKind: 'img' | 'video' | null;
+  toolLabel: string | null;
+  mode: string | null;
+} {
+  let mode: string | null = null;
+  for (const e of events) {
+    const queued = String(e.message || '').match(/Generation queued\s*\(([^)]+)\)/i);
+    if (queued?.[1]) {
+      mode = queued[1].trim().toLowerCase();
+      break;
+    }
+  }
+  const joined = events.map((e) => e.message).join('\n');
+  if (!mode) {
+    if (/\b(?:bulkt2v|bulk[_-]?t2v)\b/i.test(joined)) mode = 'bulkt2v';
+    else if (/\b(?:bulki2v|bulk[_-]?i2v)\b/i.test(joined)) mode = 'bulki2v';
+    else if (/\b(?:bulkt2i|bulk[_-]?t2i)\b/i.test(joined)) mode = 'bulkt2i';
+    else if (/\bstoryteller\b/i.test(joined)) mode = 'storyteller';
+    else if (/\bwhisk\b/i.test(joined) || events.some((e) => /whisk/i.test(String(e.source || ''))))
+      mode = 'whisk';
+    else if (/\bextend\b/i.test(joined) || events.some((e) => /extend/i.test(String(e.source || ''))))
+      mode = 'extend';
+    else if (/\bingredients?\b/i.test(joined)) mode = 'ingredients';
+    else if (/\bi2i\b/i.test(joined)) mode = 'i2i';
+    else if (/\bi2v\b/i.test(joined)) mode = 'i2v';
+    else if (/\bt2i\b/i.test(joined)) mode = 'image';
+    else if (/\bt2v\b/i.test(joined)) mode = 'video';
+    else if (/\bimage complete\b|\bimage failed\b/i.test(joined)) mode = 'image';
+    else if (/\bvideo complete\b|\bvideo failed\b/i.test(joined)) mode = 'video';
+  }
+
+  if (!mode) return { mediaKind: null, toolLabel: null, mode: null };
+
+  let mediaKind: 'img' | 'video' | null = null;
+  if (mode === 'ingredients') {
+    mediaKind = /\bvideo\b/i.test(joined) && !/\bimage complete\b|\bt2i\b|\bi2i\b/i.test(joined)
+      ? 'video'
+      : 'img';
+  } else if (/bulkt2v|bulki2v|^video$|i2v|t2v|extend/.test(mode)) {
+    mediaKind = 'video';
+  } else if (/bulkt2i|i2i|^image$|whisk|t2i|storyteller/.test(mode)) {
+    mediaKind = 'img';
+  }
+
+  let toolLabel: string | null = null;
+  if (/^bulk/.test(mode)) toolLabel = 'bulk';
+  else if (mode === 'storyteller') toolLabel = 'storyteller';
+  else if (mode === 'whisk') toolLabel = 'whisk';
+  else if (mode === 'extend') toolLabel = 'extend';
+  else if (mode === 'ingredients') toolLabel = 'ingredients';
+  else toolLabel = 'studio';
+
+  return { mediaKind, toolLabel, mode };
 }
 
 function isRunStartMessage(message: string): boolean {
@@ -555,11 +782,15 @@ export function groupStudioLogsIntoRuns<
         break;
       }
     }
+    const labels = deriveRunLabels(sorted);
     return {
       id: key,
       runId: first.runId || sorted.find((e) => e.runId)?.runId || null,
       title: title || 'Studio event',
       status: deriveRunStatus(sorted),
+      mediaKind: labels.mediaKind,
+      toolLabel: labels.toolLabel,
+      mode: labels.mode,
       startedAt: first.createdAt,
       updatedAt: last.createdAt,
       durationMs: Math.round(durationSec * 1000),

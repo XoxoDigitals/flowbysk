@@ -208,8 +208,13 @@ export async function selectProviderAccountForJobDetailed(
   walletType: WalletType,
   _modelKey: string,
   requestingUserId: string,
-  preferredAccountId?: string | null
+  preferredAccountId?: string | null,
+  opts?: { excludeAccountIds?: string[] }
 ): Promise<{ account: any | null; reason?: string }> {
+  const exclude = new Set(
+    (opts?.excludeAccountIds || []).map((id) => String(id || '').trim()).filter(Boolean)
+  );
+
   // Include CREDENTIALS_EXPIRED — BiB READY still generates; cookie flag is often stale.
   let accounts = await prisma.providerAccount.findMany({
     where: {
@@ -230,7 +235,7 @@ export async function selectProviderAccountForJobDetailed(
     },
   });
 
-  let dispatchable = accounts.filter(isDispatchableAccount);
+  let dispatchable = accounts.filter(isDispatchableAccount).filter((a) => !exclude.has(a.id));
   let readyAccounts = dispatchable.filter((a) => a.browserStatus === BrowserStatus.READY);
   let poolBase = readyAccounts.length > 0 ? readyAccounts : dispatchable;
 
@@ -255,7 +260,7 @@ export async function selectProviderAccountForJobDetailed(
         },
       },
     });
-    dispatchable = accounts.filter(isDispatchableAccount);
+    dispatchable = accounts.filter(isDispatchableAccount).filter((a) => !exclude.has(a.id));
     readyAccounts = dispatchable.filter((a) => a.browserStatus === BrowserStatus.READY);
     poolBase = readyAccounts.length > 0 ? readyAccounts : dispatchable;
   }
@@ -272,7 +277,9 @@ export async function selectProviderAccountForJobDetailed(
     return {
       account: null,
       reason:
-        'In Queue: Google provider needs BiB Launch / Login (browser not READY). Not a user-slot limit.',
+        exclude.size > 0
+          ? 'In Queue: No alternate Google account available after upload failover.'
+          : 'In Queue: Google provider needs BiB Launch / Login (browser not READY). Not a user-slot limit.',
     };
   }
 
@@ -284,14 +291,15 @@ export async function selectProviderAccountForJobDetailed(
     return acc.assignedUsers.length < limit;
   };
 
-  let targetAccountId = preferredAccountId;
+  let targetAccountId =
+    preferredAccountId && !exclude.has(preferredAccountId) ? preferredAccountId : null;
   if (!targetAccountId && requestingUserId) {
     try {
       const userRec = await prisma.user.findUnique({
         where: { id: requestingUserId },
         select: { assignedProviderAccountId: true, providerAssignmentManual: true },
       });
-      if (userRec?.assignedProviderAccountId) {
+      if (userRec?.assignedProviderAccountId && !exclude.has(userRec.assignedProviderAccountId)) {
         targetAccountId = userRec.assignedProviderAccountId;
       }
     } catch (lookupErr) {
@@ -305,22 +313,25 @@ export async function selectProviderAccountForJobDetailed(
       return { account: sticky };
     }
     // Sticky account is dead / not READY — auto users get reassigned; manual pins stay blocked
-    const userRec = requestingUserId
-      ? await prisma.user.findUnique({
-          where: { id: requestingUserId },
-          select: { providerAssignmentManual: true },
-        })
-      : null;
-    if (userRec?.providerAssignmentManual) {
-      const pinned = await prisma.providerAccount.findUnique({ where: { id: targetAccountId } });
-      if (pinned && isDispatchableAccount(pinned)) {
-        return { account: pinned };
+    // (unless we're explicitly excluding it for upload failover)
+    if (!exclude.has(targetAccountId)) {
+      const userRec = requestingUserId
+        ? await prisma.user.findUnique({
+            where: { id: requestingUserId },
+            select: { providerAssignmentManual: true },
+          })
+        : null;
+      if (userRec?.providerAssignmentManual) {
+        const pinned = await prisma.providerAccount.findUnique({ where: { id: targetAccountId } });
+        if (pinned && isDispatchableAccount(pinned) && !exclude.has(pinned.id)) {
+          return { account: pinned };
+        }
+        return {
+          account: null,
+          reason:
+            'In Queue: Your pinned Google account is offline (BiB not READY). Launch it in Admin → Accounts.',
+        };
       }
-      return {
-        account: null,
-        reason:
-          'In Queue: Your pinned Google account is offline (BiB not READY). Launch it in Admin → Accounts.',
-      };
     }
     // fall through to pick a new READY account
   }

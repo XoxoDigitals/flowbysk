@@ -483,6 +483,16 @@ export async function POST(req: Request) {
         workerMsg || 'Generation failed'
       );
       checkAndDispatchNextJobs(session.userId).catch(console.error);
+      const { logGenerationFailed } = await import('@/lib/studioLogs');
+      await logGenerationFailed({
+        runId: String(body.run_id || job.id),
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider?.accountEmail || null,
+        kind: 't2v',
+        error: workerMsg || 'Video generation failed',
+        prompt: job.prompt,
+      }).catch(() => 0);
 
       return NextResponse.json(
         {

@@ -7,9 +7,10 @@ import { checkAndDispatchNextJobs, getUserPlanLimit, countUserActiveJobs } from 
 import { JobStatus } from '@prisma/client';
 import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
 import { resolveImageFrontendModel, resolveImageWireModel, nextImageWireModel, isImageModelQuotaError } from '@/lib/modelWire';
-import { createStudioLog, logGenerationQueued } from '@/lib/studioLogs';
+import { createStudioLog, logGenerationQueued, logGenerationAccepted, logGenerationSubmitted, logGenerationComplete, logGenerationFailed } from '@/lib/studioLogs';
 import { prepareProviderWorkerSession, ensureFlowReadyMediaId } from '@/lib/providerSession';
 import { bibGenerateImage, ensureBibAccountReady } from '@/lib/bib';
+import { switchJobToAlternateProviderAccount } from '@/lib/uploadAccountFailover';
 
 const FLOW_UUID = /^[a-f0-9-]{36}$/i;
 
@@ -134,11 +135,12 @@ export async function POST(req: Request) {
       });
     }
 
-    const { account: provider, reason: providerReason } = await selectProviderAccountForJobDetailed(
+    const { account: selectedProvider, reason: providerReason } = await selectProviderAccountForJobDetailed(
       pricing.walletType,
       modelKey,
       session.userId
     );
+    let provider = selectedProvider;
 
     if (!provider) {
       const planLimit = await getUserPlanLimit(session.userId);
@@ -182,8 +184,8 @@ export async function POST(req: Request) {
     }
 
     const sessionPrep = await prepareProviderWorkerSession(provider, session.userId);
-    const liveCookies = sessionPrep.cookies || provider?.cookies || undefined;
-    const targetProjectId = sessionPrep.projectId;
+    let liveCookies = sessionPrep.cookies || provider?.cookies || undefined;
+    let targetProjectId = sessionPrep.projectId;
 
     const feModel = resolveImageFrontendModel(String(model || 'GEM_PIX_2'));
     const wireModel = resolveImageWireModel(feModel);
@@ -208,6 +210,30 @@ export async function POST(req: Request) {
         },
       },
     });
+
+    const runId = String(body.run_id || job.id);
+    const genStartedAt = Date.now();
+    try {
+      await logGenerationAccepted({
+        runId,
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider.accountEmail || null,
+        prompt: job.prompt,
+        source: body.source || 'i2i',
+        kind: 'image-to-image',
+      });
+      await logGenerationSubmitted({
+        runId,
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider.accountEmail || null,
+        kind: 'i2i',
+        prompt: job.prompt,
+      });
+    } catch {
+      /* ignore */
+    }
 
     try {
       const rawIds: string[] = Array.isArray(image_ids)
@@ -335,6 +361,57 @@ export async function POST(req: Request) {
         flowRefs = [...new Set(flowRefs)];
       }
 
+      if (!flowRefs.length && !characters.length && provider?.id) {
+        const alt = await switchJobToAlternateProviderAccount({
+          userId: session.userId,
+          walletType: pricing.walletType,
+          modelKey,
+          jobId: job.id,
+          excludeAccountId: provider.id,
+          runId: body.run_id || job.id,
+          userEmail: session.email,
+          prompt: job.prompt,
+          failedEmail: provider.accountEmail || null,
+        });
+        if (alt) {
+          provider = alt.provider;
+          liveCookies = alt.cookies || provider.cookies || undefined;
+          targetProjectId = alt.projectId;
+          freshIds.length = 0;
+          for (let i = 0; i < Math.max(resolvedIds.length, refUrls.length || 0); i++) {
+            const mid = resolvedIds[i];
+            const url = refUrls[i] || refUrls[0];
+            if (!mid && !url) continue;
+            const ensured = await ensureFlowReadyMediaId({
+              accountId: provider.id,
+              projectId: targetProjectId,
+              cookies: liveCookies,
+              mediaId: mid,
+              imageUrl: url,
+              label: `i2i-failover:${job.id.slice(0, 8)}`,
+              maxAttempts: 3,
+            });
+            if (ensured && FLOW_UUID.test(ensured)) freshIds.push(ensured);
+          }
+          if (!resolvedIds.length && refUrls.length) {
+            for (const url of refUrls) {
+              const ensured = await ensureFlowReadyMediaId({
+                accountId: provider.id,
+                projectId: targetProjectId,
+                cookies: liveCookies,
+                imageUrl: url,
+                label: `i2i-failover-url:${job.id.slice(0, 8)}`,
+                maxAttempts: 3,
+              });
+              if (ensured && FLOW_UUID.test(ensured)) freshIds.push(ensured);
+            }
+          }
+          flowRefs = [...new Set(freshIds.map((id) => String(id || '').trim()))].filter((id) =>
+            FLOW_UUID.test(id)
+          );
+        }
+      }
+
       if (!flowRefs.length && !characters.length) {
         throw new Error(
           'Could not upload reference image into Flow after retries — check BiB project and try again'
@@ -354,6 +431,7 @@ export async function POST(req: Request) {
           runId: String(body.run_id),
           userId: session.userId,
           userEmail: session.email,
+          flowEmail: provider.accountEmail || null,
         }).catch(() => 0);
       }
 
@@ -477,6 +555,20 @@ export async function POST(req: Request) {
         await settleCredits(session.userId, pricing.walletType, pricing.price, job.id);
         checkAndDispatchNextJobs(session.userId).catch(console.error);
 
+        try {
+          await logGenerationComplete({
+            runId,
+            userId: session.userId,
+            userEmail: session.email,
+            flowEmail: provider.accountEmail || null,
+            kind: 'i2i',
+            prompt: job.prompt,
+            durationSec: Math.max(0.1, (Date.now() - genStartedAt) / 1000),
+          });
+        } catch {
+          /* ignore */
+        }
+
         const returnedAsset = {
           id: job.id,
           assetId: savedAsset.id,
@@ -565,6 +657,15 @@ export async function POST(req: Request) {
         workerErr.message || 'Generation failed'
       );
       checkAndDispatchNextJobs(session.userId).catch(console.error);
+      await logGenerationFailed({
+        runId: String(body.run_id || job.id),
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider?.accountEmail || null,
+        kind: 'i2i',
+        error: workerErr.message || 'Image to image failed',
+        prompt: job.prompt,
+      }).catch(() => 0);
 
       return NextResponse.json(
         {

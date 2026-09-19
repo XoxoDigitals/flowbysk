@@ -9,6 +9,7 @@ import { JobStatus, WalletType } from '@prisma/client';
 import { withSystemErrorRetry } from '@/lib/systemErrorRetry';
 import { prepareProviderWorkerSession, ensureFlowReadyMediaId } from '@/lib/providerSession';
 import { createStudioLog, logGenerationQueued } from '@/lib/studioLogs';
+import { switchJobToAlternateProviderAccount } from '@/lib/uploadAccountFailover';
 import { bibGenerateVideo, ensureBibAccountReady, bibEnsureLabs } from '@/lib/bib';
 import { resolveVideoWireModel } from '@/lib/modelWire';
 
@@ -139,11 +140,12 @@ export async function POST(req: Request) {
 
     const planLimit = await getUserPlanLimit(session.userId);
     const activeJobs = await countUserActiveJobs(session.userId);
-    const { account: provider, reason: providerReason } = await selectProviderAccountForJobDetailed(
+    const { account: selectedProvider, reason: providerReason } = await selectProviderAccountForJobDetailed(
       pricing.walletType,
       modelKey,
       session.userId
     );
+    let provider = selectedProvider;
 
     if (!provider || activeJobs >= planLimit) {
       const queueMsg = await logGenerationQueued({
@@ -198,8 +200,8 @@ export async function POST(req: Request) {
 
     try {
       const sessionPrep = await prepareProviderWorkerSession(provider, session.userId);
-      const liveCookies = sessionPrep.cookies || provider?.cookies || undefined;
-      const targetProjectId = sessionPrep.projectId;
+      let liveCookies = sessionPrep.cookies || provider?.cookies || undefined;
+      let targetProjectId = sessionPrep.projectId;
 
       const resolveMediaId = async (id?: string) => {
         if (!id) return id;
@@ -290,9 +292,45 @@ export async function POST(req: Request) {
           .find((id) => /^[a-f0-9-]{36}$/i.test(id)) || null;
 
       if (dualFrames && (!firstId || !lastId)) {
-        throw new Error(
-          'Could not upload first/last frames into Flow after retries — re-select the frames and try again'
-        );
+        if (provider?.id) {
+          const alt = await switchJobToAlternateProviderAccount({
+            userId: session.userId,
+            walletType: pricing.walletType,
+            modelKey,
+            jobId: job.id,
+            excludeAccountId: provider.id,
+            runId: body.run_id || job.id,
+            userEmail: session.email,
+            prompt: job.prompt,
+            failedEmail: provider.accountEmail || null,
+          });
+          if (alt) {
+            provider = alt.provider;
+            liveCookies = alt.cookies || provider.cookies || undefined;
+            targetProjectId = alt.projectId;
+            const [aFirst, aLast, aImg, aStaged, aFirstStaged, aLastStaged] = await Promise.all([
+              refreshOne(first_frame_id, true, body.first_frame_url),
+              refreshOne(last_frame_id, true, body.last_frame_url),
+              refreshOne(image_id, true, body.image_url),
+              refreshOne(body.staged_id, true, body.image_url),
+              refreshOne(body.first_frame_staged_id, true, body.first_frame_url),
+              refreshOne(body.last_frame_staged_id, true, body.last_frame_url),
+            ]);
+            firstId =
+              [aFirst, aImg, aStaged, aFirstStaged]
+                .map((id) => String(id || '').trim())
+                .find((id) => /^[a-f0-9-]{36}$/i.test(id)) || null;
+            lastId =
+              [aLast, aLastStaged]
+                .map((id) => String(id || '').trim())
+                .find((id) => /^[a-f0-9-]{36}$/i.test(id)) || null;
+          }
+        }
+        if (!firstId || !lastId) {
+          throw new Error(
+            'Could not upload first/last frames into Flow after retries — re-select the frames and try again'
+          );
+        }
       }
 
       const charRefs = Array.isArray(body.characters)
@@ -326,7 +364,37 @@ export async function POST(req: Request) {
         });
         if (fallback && /^[a-f0-9-]{36}$/i.test(fallback)) {
           firstId = fallback;
-        } else {
+        } else if (provider?.id) {
+          const alt = await switchJobToAlternateProviderAccount({
+            userId: session.userId,
+            walletType: pricing.walletType,
+            modelKey,
+            jobId: job.id,
+            excludeAccountId: provider.id,
+            runId: body.run_id || job.id,
+            userEmail: session.email,
+            prompt: job.prompt,
+            failedEmail: provider.accountEmail || null,
+          });
+          if (alt) {
+            provider = alt.provider;
+            liveCookies = alt.cookies || provider.cookies || undefined;
+            targetProjectId = alt.projectId;
+            const retry = await ensureFlowReadyMediaId({
+              accountId: provider.id,
+              projectId: targetProjectId,
+              cookies: liveCookies,
+              mediaId: image_id || body.staged_id,
+              imageUrl: body.image_url,
+              label: `i2v-failover:${job.id.slice(0, 8)}`,
+              maxAttempts: 3,
+            });
+            if (retry && /^[a-f0-9-]{36}$/i.test(retry)) {
+              firstId = retry;
+            }
+          }
+        }
+        if (!firstId) {
           throw new Error(
             'Could not upload frame image into Flow after retries — check BiB project and try again'
           );
@@ -555,6 +623,16 @@ export async function POST(req: Request) {
         workerErr.message || 'Generation failed'
       );
       checkAndDispatchNextJobs(session.userId).catch(console.error);
+      const { logGenerationFailed } = await import('@/lib/studioLogs');
+      await logGenerationFailed({
+        runId: String(body.run_id || job.id),
+        userId: session.userId,
+        userEmail: session.email,
+        flowEmail: provider?.accountEmail || null,
+        kind: 'i2v',
+        error: workerErr.message || 'Image to video failed',
+        prompt: job.prompt,
+      }).catch(() => 0);
 
       return NextResponse.json(
         {

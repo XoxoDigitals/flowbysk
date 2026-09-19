@@ -220,6 +220,7 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
             userEmail: user?.email || null,
             flowEmail: provider.accountEmail || null,
             kind: isI2V ? 'i2v' : isVideo ? 't2v' : 't2i',
+            prompt: job.prompt,
           });
         } catch (logErr) {
           console.warn('[queue] submit studio log failed', logErr);
@@ -632,28 +633,40 @@ export async function handleJobSuccess(jobId: string, outputUrl: string, metadat
   }
 
   try {
-    const { createStudioLog } = await import('./studioLogs');
+    const { logGenerationComplete } = await import('./studioLogs');
     const params = (job.parameters as Record<string, any>) || {};
     const runId = String(params.run_id || job.id);
     const started = job.startedAt ? new Date(job.startedAt).getTime() : 0;
-    const dur = started > 0 ? `${((Date.now() - started) / 1000).toFixed(1)}s` : undefined;
-    const existing = await prisma.studioLog.findFirst({
-      where: {
-        runId,
-        message: { startsWith: 'Video complete' },
-        createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
-      },
-      select: { id: true },
+    const durationSec = started > 0 ? (Date.now() - started) / 1000 : undefined;
+    const isVideo = job.modelKey.includes('veo') || job.modelKey.includes('omni');
+    const isI2V =
+      isVideo &&
+      !!(
+        params.staged_id ||
+        params.image_id ||
+        params.first_frame_id ||
+        params.last_frame_id ||
+        params.frame_mode
+      );
+    const provider = job.providerAccountId
+      ? await prisma.providerAccount.findUnique({
+          where: { id: job.providerAccountId },
+          select: { accountEmail: true },
+        })
+      : null;
+    const user = await prisma.user.findUnique({
+      where: { id: job.userId },
+      select: { email: true },
     });
-    if (!existing) {
-      await createStudioLog({
-        level: 'info',
-        source: 'generate',
-        message: `Video complete${dur ? ` (${dur})` : ''}: ${(job.prompt || 'video').slice(0, 80)}`,
-        runId,
-        userId: job.userId,
-      });
-    }
+    await logGenerationComplete({
+      runId,
+      userId: job.userId,
+      userEmail: user?.email || null,
+      flowEmail: provider?.accountEmail || null,
+      kind: isI2V ? 'i2v' : isVideo ? 't2v' : 't2i',
+      prompt: job.prompt,
+      durationSec,
+    });
   } catch (logErr) {
     console.warn('[queue] terminal studio log failed', logErr);
   }
@@ -715,6 +728,56 @@ export async function handleJobFailure(jobId: string, errorMessage: string) {
     );
   } catch {
     /* ignore */
+  }
+
+  try {
+    const { logGenerationFailed } = await import('./studioLogs');
+    const params = (job.parameters as Record<string, any>) || {};
+    const runId = String(params.run_id || job.id);
+    const isVideo = job.modelKey.includes('veo') || job.modelKey.includes('omni');
+    const isI2V =
+      isVideo &&
+      !!(
+        params.staged_id ||
+        params.image_id ||
+        params.first_frame_id ||
+        params.last_frame_id ||
+        params.frame_mode ||
+        params.ingredient_ids
+      );
+    const isI2I =
+      !isVideo &&
+      !!(params.image_id || params.image_ids || params.staged_id || params.staged_ids);
+    const isIngredients = !!(params.ingredient_ids || params.ingredients);
+    const provider = job.providerAccountId
+      ? await prisma.providerAccount.findUnique({
+          where: { id: job.providerAccountId },
+          select: { accountEmail: true },
+        })
+      : null;
+    const user = await prisma.user.findUnique({
+      where: { id: job.userId },
+      select: { email: true },
+    });
+    await logGenerationFailed({
+      runId,
+      userId: job.userId,
+      userEmail: user?.email || null,
+      flowEmail: provider?.accountEmail || null,
+      kind: isIngredients
+        ? 'ingredients'
+        : isI2V
+          ? 'i2v'
+          : isI2I
+            ? 'i2i'
+            : isVideo
+              ? 't2v'
+              : 't2i',
+      error: errorMessage,
+      prompt: job.prompt,
+    });
+  } catch (logErr) {
+    console.warn('[queue] fail studio log failed', logErr);
   }
 
   // Unusual streak is counted inside withSystemErrorRetry (each attempt).
