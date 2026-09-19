@@ -272,6 +272,56 @@ export function isDataImpulseReady(cfg?: DataImpulseConfig): boolean {
 }
 
 /**
+ * Drop sticky meta + mirror entries for provider accounts that no longer exist.
+ * Assignments can linger after an account is deleted from Admin → Accounts.
+ */
+export function pruneOrphanDataImpulseAssignments(liveAccountIds: string[]): {
+  removed: string[];
+  kept: number;
+} {
+  const live = new Set(liveAccountIds.filter(Boolean));
+  const cfg = readDataImpulseConfig();
+  const removed: string[] = [];
+  const nextMeta: Record<string, DataImpulseAccountMeta> = {};
+
+  for (const [id, meta] of Object.entries(cfg.accountMeta || {})) {
+    if (live.has(id)) {
+      nextMeta[id] = meta;
+    } else {
+      removed.push(id);
+    }
+  }
+
+  if (removed.length) {
+    writeDataImpulseConfig({ accountMeta: nextMeta });
+    try {
+      const { proxies, assignments, cycleUsed } = readEgressProxyMirror();
+      const dropProxyIds = new Set(removed.map((id) => diProxyId(id)));
+      const nextAssignments = { ...assignments };
+      for (const id of removed) delete nextAssignments[id];
+      // Also drop assignment keys that aren't live accounts
+      for (const acc of Object.keys(nextAssignments)) {
+        if (!live.has(acc)) {
+          delete nextAssignments[acc];
+          if (!removed.includes(acc)) removed.push(acc);
+        }
+      }
+      const nextProxies = proxies.filter((p) => !dropProxyIds.has(p.id));
+      writeEgressProxyMirror(nextProxies, nextAssignments, cycleUsed);
+    } catch (e) {
+      console.warn('[dataimpulse] prune mirror failed:', e);
+    }
+    console.warn(
+      `[dataimpulse] pruned ${removed.length} orphan assignment(s): ${removed
+        .map((id) => id.slice(0, 8))
+        .join(', ')}`
+    );
+  }
+
+  return { removed, kept: Object.keys(nextMeta).length };
+}
+
+/**
  * Ensure account has a DataImpulse sticky residential assignment.
  * Returns null if DI disabled / incomplete.
  */

@@ -10,6 +10,7 @@ import {
   testDataImpulseConnection,
   writeDataImpulseConfig,
   aggregateProxyStats,
+  pruneOrphanDataImpulseAssignments,
   type DataImpulseConfig,
 } from '@/lib/dataimpulse';
 import { prisma } from '@/lib/prisma';
@@ -24,18 +25,27 @@ export async function GET(req: Request) {
     const includeStats = url.searchParams.get('stats') === '1';
     const days = Math.max(1, Math.min(90, Number(url.searchParams.get('days')) || 7));
 
+    // Drop sticky rows for deleted provider accounts (shows up as extra Assignments)
+    const liveAccounts = await prisma.providerAccount.findMany({ select: { id: true } });
+    const liveIds = liveAccounts.map((a) => a.id);
+    const pruned = pruneOrphanDataImpulseAssignments(liveIds);
+    const cfgAfter = pruned.removed.length ? readDataImpulseConfig() : cfg;
+
     const body: Record<string, unknown> = {
       success: true,
-      settings: publicDataImpulseConfig(cfg),
-      ready: isDataImpulseReady(cfg),
-      assignments: Object.entries(cfg.accountMeta).map(([accountId, m]) => ({
-        accountId,
-        country: m.country,
-        sessId: m.sessId.slice(0, 8) + '…',
-        port: m.port,
-        gen: m.gen,
-        updatedAt: m.updatedAt,
-      })),
+      settings: publicDataImpulseConfig(cfgAfter),
+      ready: isDataImpulseReady(cfgAfter),
+      assignments: Object.entries(cfgAfter.accountMeta)
+        .filter(([accountId]) => liveIds.includes(accountId))
+        .map(([accountId, m]) => ({
+          accountId,
+          country: m.country,
+          sessId: m.sessId.slice(0, 8) + '…',
+          port: m.port,
+          gen: m.gen,
+          updatedAt: m.updatedAt,
+        })),
+      prunedOrphans: pruned.removed.length,
     };
 
     if (includeStats) {
