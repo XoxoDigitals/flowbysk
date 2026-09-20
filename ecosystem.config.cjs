@@ -63,10 +63,16 @@ module.exports = {
       args: 'backend.app:app --host 127.0.0.1 --port 8000',
       interpreter: 'none',
       autorestart: true,
-      max_restarts: 30,
+      max_restarts: 40,
+      min_uptime: '15s',
+      kill_timeout: 10000,
+      exp_backoff_restart_delay: 2000,
+      max_memory_restart: '900M',
       env: {
         ...shared,
         PYTHONUNBUFFERED: '1',
+        // Self-exit after a hung request so PM2 relaunches (see backend/app.py watchdog)
+        API_STUCK_REQUEST_SEC: shared.API_STUCK_REQUEST_SEC || '300',
       },
     },
     {

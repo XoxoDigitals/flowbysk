@@ -30,7 +30,14 @@ import requests
 import websocket
 
 from backend.env_util import get_env, is_production
-from backend.egress_proxy import apply_proxies_kwargs, sync_egress_proxy_env
+from backend.egress_proxy import (
+    apply_proxies_kwargs,
+    clear_egress_proxy_cache,
+    is_proxy_transport_error,
+    probe_proxy_exit_ip,
+    rotate_account_proxy,
+    sync_egress_proxy_env,
+)
 
 from backend.flow_batchexecute import (
     BATCHEXECUTE_BASES,
@@ -557,6 +564,12 @@ class FlowService:
         self._sandbox_http_recaptcha_block_until: float = 0.0
         # Headless background Chrome process handle for auto-minting reCAPTCHA.
         self._headless_chrome_proc: Optional[subprocess.Popen] = None
+        # Dead sticky proxy heal (not logout): streak → rotate → clear WIZ-dead flag.
+        self._proxy_fail_streak: int = 0
+        self._proxy_rotate_lock = threading.Lock()
+        self._proxy_last_rotate_at: float = 0.0
+        # Consecutive heal failures → process exit so PM2 restarts the API worker.
+        self._proxy_thrash_exits: int = 0
         try:
             atexit.register(self._cleanup_headless_chrome)
         except Exception:
@@ -696,6 +709,120 @@ class FlowService:
     def _wiz_session_is_dead(self) -> bool:
         """True when flow.google.com recently served a signed-out WIZ shell."""
         return time.time() < self._wiz_session_dead_until
+
+    def _note_proxy_ok(self) -> None:
+        self._proxy_fail_streak = 0
+        self._proxy_thrash_exits = 0
+
+    def _heal_dead_proxy(self, reason: str = "") -> bool:
+        """Rotate sticky egress when the tunnel is dead. Never treats this as logout.
+
+        Returns True when a new proxy was assigned (caller should retry once).
+        After repeated failed heals, exits the process so PM2 restarts flowbysk-api.
+        """
+        account_id = (self.egress_account_id or "").strip()
+        if not account_id:
+            return False
+
+        with self._proxy_rotate_lock:
+            # Cooldown — avoid rotating every concurrent request.
+            if time.time() - self._proxy_last_rotate_at < 8.0:
+                return False
+
+            self._proxy_fail_streak = (self._proxy_fail_streak or 0) + 1
+            logger.warning(
+                "egress proxy suspect (%s/2) account=%s… — %s",
+                self._proxy_fail_streak,
+                account_id[:8],
+                (reason or "transport/tunnel")[:160],
+            )
+            if self._proxy_fail_streak < 2:
+                # Soft confirm: probe exit IP; missing IP escalates streak immediately.
+                ip = probe_proxy_exit_ip(account_id)
+                if ip:
+                    self._proxy_fail_streak = 0
+                    logger.info("egress proxy still alive (exit %s) — skip rotate", ip)
+                    return False
+                self._proxy_fail_streak = 2
+
+            clear_egress_proxy_cache()
+            next_url = rotate_account_proxy(account_id)
+            self._proxy_last_rotate_at = time.time()
+            # Dead proxy often produces a false "signed-out" WIZ shell — clear that.
+            self._clear_wiz_at_stale()
+            try:
+                sync_egress_proxy_env(account_id=account_id)
+            except Exception:
+                pass
+
+            if next_url:
+                self._proxy_fail_streak = 0
+                logger.warning(
+                    "rotated dead egress proxy for %s… — retry Google HTTP (login kept)",
+                    account_id[:8],
+                )
+                return True
+
+            self._proxy_thrash_exits = (self._proxy_thrash_exits or 0) + 1
+            logger.error(
+                "egress proxy rotate failed for %s… (thrash=%s)",
+                account_id[:8],
+                self._proxy_thrash_exits,
+            )
+            if self._proxy_thrash_exits >= 3:
+                logger.error(
+                    "API worker self-restart: proxy pool exhausted / thrash — PM2 will relaunch"
+                )
+                # Hard exit so PM2 autorestart picks us up cleanly.
+                os._exit(78)
+            return False
+
+    def _google_http(
+        self,
+        method: str,
+        url: str,
+        *,
+        timeout: float = 30,
+        allow_redirects: bool = True,
+        headers: Optional[Dict[str, str]] = None,
+        data: Any = None,
+        json_body: Any = None,
+        max_proxy_retries: int = 1,
+    ) -> requests.Response:
+        """HTTP to Google through sticky egress; auto-rotate once on dead proxy."""
+        method_u = (method or "GET").upper()
+        last_exc: Optional[BaseException] = None
+        for attempt in range(max_proxy_retries + 1):
+            kwargs: Dict[str, Any] = {
+                "headers": headers or {},
+                "timeout": timeout,
+                "allow_redirects": allow_redirects,
+            }
+            if data is not None:
+                kwargs["data"] = data
+            if json_body is not None:
+                kwargs["json"] = json_body
+            kwargs = apply_proxies_kwargs(
+                url, kwargs, account_id=self.egress_account_id or None
+            )
+            try:
+                if method_u == "GET":
+                    resp = requests.get(url, **kwargs)
+                elif method_u == "POST":
+                    resp = requests.post(url, **kwargs)
+                else:
+                    resp = requests.request(method_u, url, **kwargs)
+                self._note_proxy_ok()
+                return resp
+            except Exception as e:
+                last_exc = e
+                if attempt < max_proxy_retries and is_proxy_transport_error(e):
+                    if self._heal_dead_proxy(str(e)):
+                        continue
+                raise
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("google HTTP failed with no response")
 
     def _load_wiz_meta(self) -> None:
         """Load harvested Angular batchexecute tokens (`at`, `bl`, `f.sid`)."""
@@ -2104,7 +2231,12 @@ class FlowService:
         }
 
         try:
-            resp = requests.get(SESSION_URL, headers=headers, timeout=20)
+            resp = self._google_http(
+                "GET",
+                SESSION_URL,
+                headers=headers,
+                timeout=20,
+            )
             if resp.status_code == 200:
                 data = resp.json()
                 self.access_token = data.get("access_token", "")
@@ -3569,18 +3701,36 @@ class FlowService:
             endpoint,
             json.dumps((body or {}).get("clientContext", {}) if isinstance(body, dict) else {})[:300],
         )
-        if method.upper() == "GET":
-            resp = requests.get(
-                endpoint, headers=headers, timeout=timeout, **apply_proxies_kwargs(endpoint, {}, account_id=self.egress_account_id or None)
-            )
-        else:
-            resp = requests.post(
-                endpoint,
-                headers=headers,
-                data=json.dumps(body or {}),
-                timeout=timeout,
-                **apply_proxies_kwargs(endpoint, {}, account_id=self.egress_account_id or None),
-            )
+        try:
+            if method.upper() == "GET":
+                resp = self._google_http(
+                    "GET", endpoint, headers=headers, timeout=timeout
+                )
+            else:
+                resp = self._google_http(
+                    "POST",
+                    endpoint,
+                    headers=headers,
+                    timeout=timeout,
+                    data=json.dumps(body or {}),
+                )
+        except Exception as e:
+            if is_proxy_transport_error(e) and self._heal_dead_proxy(str(e)):
+                if method.upper() == "GET":
+                    resp = self._google_http(
+                        "GET", endpoint, headers=headers, timeout=timeout, max_proxy_retries=0
+                    )
+                else:
+                    resp = self._google_http(
+                        "POST",
+                        endpoint,
+                        headers=headers,
+                        timeout=timeout,
+                        data=json.dumps(body or {}),
+                        max_proxy_retries=0,
+                    )
+            else:
+                raise
 
         text = resp.text or ""
         if resp.status_code == 200:
@@ -3590,32 +3740,81 @@ class FlowService:
                 return json.loads(text)
 
         if resp.status_code == 401:
-            logger.warning("aisandbox returned 401. Invalidating token and attempting session refresh...")
+            logger.warning(
+                "aisandbox returned 401. One session refresh (not logout) then optional proxy heal..."
+            )
             self.access_token = ""
             refreshed = self.refresh_session()
             if refreshed.get("has_access_token") and self.access_token:
                 headers["Authorization"] = f"Bearer {self.access_token}"
                 headers["Cookie"] = self.cookies or ""
-                if method.upper() == "GET":
-                    retry_resp = requests.get(
-                        endpoint,
-                        headers=headers,
-                        timeout=timeout,
-                        **apply_proxies_kwargs(endpoint, {}, account_id=self.egress_account_id or None),
-                    )
-                else:
-                    retry_resp = requests.post(
-                        endpoint,
-                        headers=headers,
-                        data=json.dumps(body or {}),
-                        timeout=timeout,
-                        **apply_proxies_kwargs(endpoint, {}, account_id=self.egress_account_id or None),
-                    )
+                try:
+                    if method.upper() == "GET":
+                        retry_resp = self._google_http(
+                            "GET", endpoint, headers=headers, timeout=timeout
+                        )
+                    else:
+                        retry_resp = self._google_http(
+                            "POST",
+                            endpoint,
+                            headers=headers,
+                            timeout=timeout,
+                            data=json.dumps(body or {}),
+                        )
+                except Exception as e:
+                    if is_proxy_transport_error(e) and self._heal_dead_proxy(str(e)):
+                        if method.upper() == "GET":
+                            retry_resp = self._google_http(
+                                "GET",
+                                endpoint,
+                                headers=headers,
+                                timeout=timeout,
+                                max_proxy_retries=0,
+                            )
+                        else:
+                            retry_resp = self._google_http(
+                                "POST",
+                                endpoint,
+                                headers=headers,
+                                timeout=timeout,
+                                data=json.dumps(body or {}),
+                                max_proxy_retries=0,
+                            )
+                    else:
+                        raise
                 if retry_resp.status_code == 200:
                     try:
                         return retry_resp.json()
                     except Exception:
                         return json.loads(retry_resp.text or "{}")
+            # Bearer still rejected after one refresh — try one proxy rotate (dead exit
+            # can look like 401 through a broken tunnel), then fail fast. Do NOT loop.
+            if self._heal_dead_proxy("aisandbox 401 after refresh"):
+                try:
+                    if method.upper() == "GET":
+                        retry2 = self._google_http(
+                            "GET",
+                            endpoint,
+                            headers=headers,
+                            timeout=timeout,
+                            max_proxy_retries=0,
+                        )
+                    else:
+                        retry2 = self._google_http(
+                            "POST",
+                            endpoint,
+                            headers=headers,
+                            timeout=timeout,
+                            data=json.dumps(body or {}),
+                            max_proxy_retries=0,
+                        )
+                    if retry2.status_code == 200:
+                        try:
+                            return retry2.json()
+                        except Exception:
+                            return json.loads(retry2.text or "{}")
+                except Exception as e:
+                    logger.warning("aisandbox retry after proxy rotate failed: %s", e)
             missing = self.cookie_session_report().get("missing") or []
             miss_txt = (
                 f" Missing cookies: {', '.join(missing)}."
@@ -4170,6 +4369,9 @@ class FlowService:
         Tries the Angular host first, then labs.google — the labs page carries the
         `boq_labs-ai-sandbox-frontend` WIZ context that batchexecute actually uses,
         and it still serves tokens when flow.google.com renders an empty shell.
+
+        Dead proxies can serve an anonymous/empty shell that looks like logout —
+        we rotate sticky egress once before marking the WIZ session dead.
         """
         if not self.cookies:
             return False
@@ -4184,6 +4386,7 @@ class FlowService:
             (LABS_FLOW_BASE, "https://flow.google.com/"),
         ]
         signed_out = False
+        transport_fail = False
         for url, referer in candidates:
             headers = {
                 "Cookie": self.cookies,
@@ -4192,13 +4395,19 @@ class FlowService:
                 "Referer": referer,
             }
             try:
-                resp = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
+                resp = self._google_http(
+                    "GET", url, headers=headers, timeout=30, allow_redirects=True
+                )
             except Exception as e:
                 logger.info("WIZ page fetch failed (%s): %s", url, e)
+                if is_proxy_transport_error(e):
+                    transport_fail = True
                 continue
             html = resp.text or ""
             if resp.status_code >= 400 or not html:
                 logger.info("WIZ page HTTP %s for %s (len=%s)", resp.status_code, url, len(html))
+                if resp.status_code >= 500 or not html:
+                    transport_fail = True
                 continue
 
             m = re.search(r'"SNlM0e"\s*:\s*"([^"]+)"', html)
@@ -4207,8 +4416,8 @@ class FlowService:
             at = m.group(1) if m else ""
             if not at:
                 # A WIZ shell whose `S06Grb` (obfuscated Gaia id) is empty means
-                # Google treated the request as anonymous — the cookie jar has no
-                # web session, so no amount of retrying will produce an `at`.
+                # Google treated the request as anonymous — often a dead proxy
+                # exit, not a real logout. Prefer proxy heal before marking dead.
                 if re.search(r'"S06Grb"\s*:\s*""', html) or "WIZ_global_data" in html:
                     signed_out = True
                 logger.info("WIZ page had no SNlM0e (%s, status=%s)", url, resp.status_code)
@@ -4221,12 +4430,55 @@ class FlowService:
             self._persist_page_wiz_tokens(at, sid=sid, bl=bl or DEFAULT_BL)
             logger.info("Harvested WIZ `at` from %s", url)
             return True
-        if signed_out:
+
+        # Transport/dead-proxy lookalike: rotate once and retry the harvest.
+        if (transport_fail or signed_out) and self._heal_dead_proxy(
+            "WIZ harvest empty/signed-out shell (likely dead proxy)"
+        ):
+            for url, referer in candidates:
+                headers = {
+                    "Cookie": self.cookies,
+                    "User-Agent": BROWSER_UA,
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Referer": referer,
+                }
+                try:
+                    resp = self._google_http(
+                        "GET",
+                        url,
+                        headers=headers,
+                        timeout=30,
+                        allow_redirects=True,
+                        max_proxy_retries=0,
+                    )
+                except Exception as e:
+                    logger.info("WIZ page fetch failed after rotate (%s): %s", url, e)
+                    continue
+                html = resp.text or ""
+                m = re.search(r'"SNlM0e"\s*:\s*"([^"]+)"', html)
+                if not m:
+                    m = re.search(r'["\']SNlM0e["\']\s*,\s*["\']([^"\']+)["\']', html)
+                at = m.group(1) if m else ""
+                if not at:
+                    continue
+                ms = re.search(r'"FdrFJe"\s*:\s*"([^"]+)"', html)
+                sid = ms.group(1) if ms else ""
+                mb = re.search(r'"cfb2h"\s*:\s*"([^"]+)"', html)
+                bl = mb.group(1) if mb else ""
+                self._persist_page_wiz_tokens(at, sid=sid, bl=bl or DEFAULT_BL)
+                logger.info("Harvested WIZ `at` from %s after proxy rotate", url)
+                return True
+
+        if signed_out and not transport_fail:
             self._mark_wiz_session_dead()
             logger.warning(
                 "Cannot refresh WIZ `at` over HTTP: %s Generation continues on the "
                 "aisandbox HTTP API (Bearer + cookies).",
                 NO_WIZ_SESSION_HINT,
+            )
+        elif transport_fail:
+            logger.warning(
+                "WIZ harvest failed due to proxy/transport — not marking session dead"
             )
         return False
 

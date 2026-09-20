@@ -9,9 +9,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 import re
 import requests
@@ -49,6 +52,83 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Inflight request ages — if any Google call hangs too long, exit so PM2 restarts.
+_STARTED_AT = time.time()
+_INFLIGHT: Dict[str, float] = {}
+_INFLIGHT_LOCK = threading.Lock()
+_LAST_OK_AT = time.time()
+# Skip health/static from stuck detection
+_STUCK_SKIP_PREFIXES = ("/health", "/docs", "/openapi", "/redoc", "/favicon")
+# Seconds a non-health request may remain open before self-restart
+_STUCK_REQUEST_SEC = float(os.environ.get("API_STUCK_REQUEST_SEC") or "300")
+_STUCK_IDLE_SEC = float(os.environ.get("API_STUCK_IDLE_SEC") or "0")  # 0 = disabled
+
+
+@app.middleware("http")
+async def _track_inflight(request: Request, call_next):
+    global _LAST_OK_AT
+    path = request.url.path or ""
+    track = not any(path.startswith(p) for p in _STUCK_SKIP_PREFIXES)
+    rid = ""
+    if track:
+        rid = uuid4().hex
+        with _INFLIGHT_LOCK:
+            _INFLIGHT[rid] = time.time()
+    try:
+        response = await call_next(request)
+        if track:
+            _LAST_OK_AT = time.time()
+        return response
+    finally:
+        if rid:
+            with _INFLIGHT_LOCK:
+                _INFLIGHT.pop(rid, None)
+
+
+def _api_watchdog_loop() -> None:
+    """Exit the process when a request is stuck so PM2 autorestarts flowbysk-api."""
+    while True:
+        time.sleep(20)
+        try:
+            now = time.time()
+            with _INFLIGHT_LOCK:
+                ages = [now - t for t in _INFLIGHT.values()]
+                n = len(_INFLIGHT)
+            if ages and max(ages) >= _STUCK_REQUEST_SEC:
+                logger.error(
+                    "API worker self-restart: %s inflight request(s), oldest=%.0fs >= %.0fs — PM2 will relaunch",
+                    n,
+                    max(ages),
+                    _STUCK_REQUEST_SEC,
+                )
+                os._exit(79)
+            if _STUCK_IDLE_SEC > 0 and (now - _LAST_OK_AT) >= _STUCK_IDLE_SEC and n == 0:
+                # Optional: only if explicitly enabled — normally idle is fine.
+                pass
+        except Exception as e:
+            logger.debug("api watchdog: %s", e)
+
+
+threading.Thread(target=_api_watchdog_loop, name="api-stuck-watchdog", daemon=True).start()
+
+
+@app.get("/health")
+@app.get("/api/health")
+def health():
+    """Liveness for PM2/cron watchers. Always fast — does not call Google."""
+    now = time.time()
+    with _INFLIGHT_LOCK:
+        n = len(_INFLIGHT)
+        oldest = max((now - t) for t in _INFLIGHT.values()) if _INFLIGHT else 0.0
+    return {
+        "ok": True,
+        "service": "flowbysk-api",
+        "uptime_sec": round(now - _STARTED_AT, 1),
+        "inflight": n,
+        "oldest_inflight_sec": round(oldest, 1),
+        "last_ok_ago_sec": round(now - _LAST_OK_AT, 1),
+    }
+
 
 def _bind_studio_identity(request: Request, run_id: Optional[str] = None) -> None:
     """
@@ -71,7 +151,6 @@ def _prewarm_cdp() -> None:
     except Exception as e:
         logger.debug("CDP helper background prewarm notice: %s", e)
 
-import threading
 threading.Thread(target=_prewarm_cdp, daemon=True).start()
 
 

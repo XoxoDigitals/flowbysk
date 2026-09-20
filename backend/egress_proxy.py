@@ -3,6 +3,10 @@
 Per-provider-account assignments live in data/egress-proxy.json → assignments
 (same file BiB uses). When account_id is known, API traffic uses that proxy so
 Chrome (BiB) and Python share the same exit IP.
+
+Dead residential nodes are healed by rotate_account_proxy() — sticky reassignment
+to the next unique pool proxy (mirrors BiB rotateAccountProxy). Does NOT wipe
+cookies or mark the account logged out.
 """
 
 from __future__ import annotations
@@ -10,9 +14,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger("egress_proxy")
@@ -21,6 +26,29 @@ _ROOT = Path(__file__).resolve().parent.parent
 _MIRROR = _ROOT / "data" / "egress-proxy.json"
 # Cache key "" = global/first; otherwise provider account id
 _cache: Dict[str, Any] = {"by_account": {}, "global": None, "at": 0.0}
+_assign_lock = threading.Lock()
+
+# Transport / tunnel failures that mean the sticky proxy is dead — not logout.
+_PROXY_ERR_MARKERS = (
+    "ProxyError",
+    "ConnectTimeout",
+    "ReadTimeout",
+    "ConnectionError",
+    "ConnectionReset",
+    "RemoteDisconnected",
+    "Tunnel connection failed",
+    "Unable to connect to proxy",
+    "Max retries exceeded",
+    "SOCKSHTTPSConnectionPool",
+    "HTTPSConnectionPool",
+    "NewConnectionError",
+    "ProxyError(",
+    "407",
+    "ERR_TUNNEL",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "timed out",
+)
 
 
 def _normalize(url: Optional[str]) -> Optional[str]:
@@ -60,8 +88,18 @@ def _load_mirror_raw() -> Dict[str, Any]:
         return {}
 
 
-def _enabled_proxies(data: Dict[str, Any]) -> list:
-    out = []
+def _write_mirror_raw(data: Dict[str, Any]) -> None:
+    try:
+        _MIRROR.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _MIRROR.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(_MIRROR)
+    except Exception as e:
+        logger.warning("egress-proxy write mirror failed: %s", e)
+
+
+def _enabled_proxies(data: Dict[str, Any]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
     proxies = data.get("proxies")
     if isinstance(proxies, list):
         for item in proxies:
@@ -101,6 +139,176 @@ def _url_for_account(data: Dict[str, Any], account_id: Optional[str]) -> Optiona
             if p["id"] == pid:
                 return p["url"]
     # No sticky assignment for this account — do not steal another account's proxy.
+    return None
+
+
+def _normalize_cycle_used(raw: Any, enabled: List[Dict[str, str]]) -> List[str]:
+    enabled_ids = {p["id"] for p in enabled}
+    out: List[str] = []
+    if isinstance(raw, list):
+        for pid in raw:
+            if isinstance(pid, str) and pid in enabled_ids and pid not in out:
+                out.append(pid)
+    return out
+
+
+def _pick_next_pool_proxy(
+    enabled: List[Dict[str, str]],
+    assignments: Dict[str, str],
+    cycle_used_in: List[str],
+    account_id: str,
+    *,
+    force_new: bool = False,
+    start_after_id: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, str]], List[str]]:
+    """Next proxy not held by another account and not yet used this cycle."""
+    if not enabled:
+        return None, []
+
+    held_by_others = {
+        pid
+        for acc, pid in assignments.items()
+        if acc != account_id and isinstance(pid, str)
+    }
+    cycle = set(_normalize_cycle_used(cycle_used_in, enabled))
+
+    def reset_cycle() -> None:
+        nonlocal cycle
+        cycle = set(held_by_others)
+        if force_new and start_after_id:
+            cycle.add(start_after_id)
+
+    def try_pick() -> Optional[Dict[str, str]]:
+        start_idx = -1
+        if start_after_id:
+            for i, p in enumerate(enabled):
+                if p["id"] == start_after_id:
+                    start_idx = i
+                    break
+        for i in range(1, len(enabled) + 1):
+            cand = enabled[(start_idx + i + len(enabled)) % len(enabled)]
+            if force_new and cand["id"] == start_after_id:
+                continue
+            if cand["id"] in held_by_others:
+                continue
+            if cand["id"] in cycle:
+                continue
+            return cand
+        return None
+
+    if enabled and all(p["id"] in cycle for p in enabled):
+        reset_cycle()
+
+    pick = try_pick()
+    if not pick:
+        reset_cycle()
+        pick = try_pick()
+    if not pick:
+        counts = {p["id"]: 0 for p in enabled}
+        for pid in held_by_others:
+            if pid in counts:
+                counts[pid] = counts.get(pid, 0) + 1
+        candidates = [p for p in enabled if not force_new or p["id"] != start_after_id]
+        candidates.sort(key=lambda p: counts.get(p["id"], 0))
+        pick = candidates[0] if candidates else None
+
+    next_cycle = list(cycle)
+    if pick and pick["id"] not in next_cycle:
+        next_cycle.append(pick["id"])
+    return pick, next_cycle
+
+
+def clear_egress_proxy_cache() -> None:
+    _cache["by_account"] = {}
+    _cache["global"] = None
+    _cache["at"] = 0.0
+
+
+def rotate_account_proxy(account_id: Optional[str]) -> Optional[str]:
+    """Force sticky reassignment to the next unique pool proxy. Keeps login cookies."""
+    if not account_id:
+        return None
+    with _assign_lock:
+        raw = _load_mirror_raw() or {"proxies": [], "assignments": {}, "cycleUsed": []}
+        enabled = _enabled_proxies(raw)
+        if not enabled:
+            return None
+
+        assignments = (
+            dict(raw["assignments"])
+            if isinstance(raw.get("assignments"), dict)
+            else {}
+        )
+        cycle_used = _normalize_cycle_used(raw.get("cycleUsed"), enabled)
+        if not cycle_used:
+            for pid in assignments.values():
+                if (
+                    isinstance(pid, str)
+                    and any(p["id"] == pid for p in enabled)
+                    and pid not in cycle_used
+                ):
+                    cycle_used.append(pid)
+
+        existing_id = assignments.get(account_id) if isinstance(assignments.get(account_id), str) else None
+        pick, next_cycle = _pick_next_pool_proxy(
+            enabled,
+            assignments,
+            cycle_used,
+            account_id,
+            force_new=True,
+            start_after_id=existing_id,
+        )
+        if not pick:
+            return None
+
+        assignments[account_id] = pick["id"]
+        proxies = raw.get("proxies") if isinstance(raw.get("proxies"), list) else enabled
+        out = {
+            "url": _active_from_mirror({"proxies": enabled}),
+            "proxies": proxies,
+            "assignments": assignments,
+            "cycleUsed": next_cycle,
+        }
+        # Preserve unrelated keys (dataimpulse meta, etc.)
+        for k, v in raw.items():
+            if k not in out:
+                out[k] = v
+        _write_mirror_raw(out)
+        clear_egress_proxy_cache()
+        logger.warning(
+            "egress-proxy rotated account %s… → proxy %s (was %s)",
+            account_id[:8],
+            pick["id"],
+            existing_id or "none",
+        )
+        return pick["url"]
+
+
+def is_proxy_transport_error(exc: Any) -> bool:
+    """True when the failure looks like a dead tunnel / bad exit — not auth logout."""
+    text = f"{type(exc).__name__}: {exc}" if exc is not None else ""
+    return any(m.lower() in text.lower() for m in _PROXY_ERR_MARKERS)
+
+
+def probe_proxy_exit_ip(account_id: Optional[str] = None, timeout: float = 8.0) -> Optional[str]:
+    """Quick exit-IP probe through the assigned proxy. None = tunnel looks dead."""
+    import requests
+
+    proxies = requests_proxies(account_id=account_id)
+    if not proxies:
+        return None
+    try:
+        resp = requests.get(
+            "https://api.ipify.org?format=json",
+            proxies=proxies,
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            ip = str(data.get("ip") or "").strip()
+            return ip or None
+    except Exception as e:
+        logger.info("egress proxy exit probe failed: %s", e)
     return None
 
 
