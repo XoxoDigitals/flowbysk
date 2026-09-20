@@ -1,3 +1,9 @@
+import {
+  fetchWithRetry,
+  formatWorkerFetchError,
+  type FetchWithRetryOpts,
+} from '@/lib/worker';
+
 const BIB_WORKER_URL = process.env.BIB_WORKER_URL || 'http://127.0.0.1:8010';
 
 export function getBibWorkerUrl() {
@@ -16,22 +22,39 @@ export function getBibPublicUrl() {
   return getBibWorkerUrl();
 }
 
-export async function bibFetch(path: string, init?: RequestInit) {
+const REAL_LOGIN_URL_RE =
+  /accounts\.google\.com|\/signin|oauth|ServiceLogin|Identifier|challenge/i;
+
+export async function bibFetch(
+  path: string,
+  init?: FetchWithRetryOpts & { timeoutMs?: number }
+) {
   const url = `${getBibWorkerUrl()}${path.startsWith('/') ? path : `/${path}`}`;
   // flow-bib gates its mutating/control routes on x-internal-secret. Send it so
   // launch/disconnect/generate/etc. authenticate. In dev with no secret set,
   // flow-bib falls back to localhost-only auth, so omitting it is still fine.
   const internalSecret =
     process.env.INTERNAL_API_SECRET || process.env.JWT_SECRET || '';
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(internalSecret ? { 'x-internal-secret': internalSecret } : {}),
-      ...(init?.headers || {}),
-    },
-  });
-  return res;
+  const isLaunch = /\/launch\b/i.test(path);
+  try {
+    return await fetchWithRetry(url, {
+      ...init,
+      timeoutMs: init?.timeoutMs ?? (isLaunch ? 60_000 : 20_000),
+      retries: init?.retries ?? 3,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(internalSecret ? { 'x-internal-secret': internalSecret } : {}),
+        ...(init?.headers || {}),
+      },
+    });
+  } catch (err) {
+    throw new Error(
+      formatWorkerFetchError(err, {
+        workerLabel: 'BiB worker',
+        workerUrl: getBibWorkerUrl(),
+      })
+    );
+  }
 }
 
 export async function bibLaunchAccount(
@@ -82,9 +105,11 @@ export async function ensureBibAccountReady(account: {
 }) {
   if (!account?.id) throw new Error('account id required');
   let live: any = null;
+  let statusFetchErr: string | null = null;
   try {
     live = await bibAccountStatus(account.id);
-  } catch {
+  } catch (e) {
+    statusFetchErr = e instanceof Error ? e.message : String(e);
     live = null;
   }
 
@@ -92,26 +117,63 @@ export async function ensureBibAccountReady(account: {
   const needsLaunch = !live || !live.running || live.status === 'STOPPED';
 
   if (needsLaunch && live?.status !== 'STARTING') {
-    live = await bibLaunchAccount(account.id, {
-      maxSlots: account.maxParallelLimit || 5,
-      projectIds: Array.isArray(account.flowProjectIds)
-        ? (account.flowProjectIds as string[])
-        : [],
-      profileDir: account.profileDir,
-    });
+    try {
+      live = await bibLaunchAccount(account.id, {
+        maxSlots: account.maxParallelLimit || 5,
+        projectIds: Array.isArray(account.flowProjectIds)
+          ? (account.flowProjectIds as string[])
+          : [],
+        profileDir: account.profileDir,
+      });
+      statusFetchErr = null;
+    } catch (e) {
+      statusFetchErr = e instanceof Error ? e.message : String(e);
+      // Do not invent NEEDS_LOGIN when BiB is unreachable
+      try {
+        const { prisma } = await import('@/lib/prisma');
+        await prisma.providerAccount.update({
+          where: { id: account.id },
+          data: {
+            bibLastSeenAt: new Date(),
+            bibLastError: statusFetchErr.slice(0, 240),
+          },
+        });
+      } catch {
+        /* ignore */
+      }
+      throw e instanceof Error ? e : new Error(statusFetchErr);
+    }
   }
 
   // Sync DB from live BiB — cookie-based "expired" is often wrong for BiB accounts
   try {
     const { prisma } = await import('@/lib/prisma');
     const { BrowserStatus, ProviderStatus } = await import('@prisma/client');
+
+    if (!live) {
+      if (statusFetchErr) {
+        await prisma.providerAccount.update({
+          where: { id: account.id },
+          data: {
+            bibLastSeenAt: new Date(),
+            bibLastError: statusFetchErr.slice(0, 240),
+          },
+        });
+      }
+      return live;
+    }
+
     const egressBad = !!(
       live?.egress?.error ||
-      /Egress proxy|tunnel|no exit/i.test(String(live?.lastError || ''))
+      /Egress proxy|tunnel|no exit|Session unread|proxy\/browser/i.test(
+        String(live?.lastError || '')
+      )
     );
-    const realLoginUrl = /accounts\.google\.com|\/signin|oauth|ServiceLogin|challenge/i.test(
-      String(live?.url || '')
-    );
+    const realLoginUrl = REAL_LOGIN_URL_RE.test(String(live?.url || ''));
+    const projectCount = Array.isArray(live.projectIds)
+      ? live.projectIds.length
+      : Number(live.projectCount || 0);
+
     if (live?.status === 'READY' || live?.running) {
       await prisma.providerAccount.update({
         where: { id: account.id },
@@ -146,11 +208,12 @@ export async function ensureBibAccountReady(account: {
         },
       });
     } else if (live?.status === 'NEEDS_LOGIN' && !realLoginUrl) {
-      // Marketing landing misclassified as logout — keep READY if browser running
+      // Marketing landing misclassified as logout — keep READY if browser/projects known
       await prisma.providerAccount.update({
         where: { id: account.id },
         data: {
-          browserStatus: live?.running ? BrowserStatus.READY : BrowserStatus.NEEDS_LOGIN,
+          browserStatus:
+            live?.running || projectCount > 0 ? BrowserStatus.READY : BrowserStatus.NEEDS_LOGIN,
           bibLastSeenAt: new Date(),
           bibLastError: live.lastError || (egressBad ? 'Proxy/session issue' : null),
         },

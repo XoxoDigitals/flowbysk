@@ -8,8 +8,24 @@ import { toUserFacingError } from '@/lib/userMessages';
 import { noteUnusualActivityFailure } from '@/lib/unusualActivityProxyRotate';
 import { recordJobProxyOutcome } from '@/lib/dataimpulse';
 import { extractJobBibRefs, pollJobBibStatus } from '@/lib/jobBibPoll';
+import { fetchWithRetry, formatWorkerFetchError, PYTHON_WORKER_URL } from '@/lib/worker';
 
-const PYTHON_WORKER_URL = process.env.PYTHON_WORKER_URL || 'http://127.0.0.1:8000';
+function isBibRoutedJob(job: {
+  providerAccountId?: string | null;
+  parameters?: unknown;
+  outputMetadata?: unknown;
+}): boolean {
+  const refs = extractJobBibRefs(job);
+  if (refs.accountId) return true;
+  const params = (job.parameters as Record<string, any>) || {};
+  const meta = (job.outputMetadata as Record<string, any>) || {};
+  if (params.bibAccountId || params.bibMediaId || meta.bibAccountId || meta.bibMediaId) {
+    return true;
+  }
+  // BiB queue path stamps wireModel / source without Python workerTaskId
+  if (params.wireModel && !meta.workerTaskId && job.providerAccountId) return true;
+  return false;
+}
 
 async function logJobTerminal(
   job: {
@@ -119,12 +135,21 @@ export async function GET(
     if (!job) {
       // Fallback: check if id is Python worker task id or query worker directly
       try {
-        const workerRes = await fetch(`${PYTHON_WORKER_URL}/api/video/status/${id}`);
+        const workerRes = await fetchWithRetry(
+          `${PYTHON_WORKER_URL}/api/video/status/${id}`,
+          { timeoutMs: 10_000, retries: 2 }
+        );
         if (workerRes.ok) {
           const wData = await workerRes.json();
           return NextResponse.json(wData);
         }
-      } catch {}
+        // 404 from Python = unknown id — return Next 404, not worker-down
+      } catch (e) {
+        console.warn(
+          '[video/status] python fallback:',
+          formatWorkerFetchError(e)
+        );
+      }
       return NextResponse.json({ error: 'Job not found' }, { status: 404 });
     }
 
@@ -190,15 +215,14 @@ export async function GET(
     const metadata = (job.outputMetadata as Record<string, any>) || {};
     const workerTaskId = metadata.workerTaskId || job.id;
     const refs = extractJobBibRefs(job);
+    const bibRouted = isBibRoutedJob(job);
+    const activeJob =
+      job.status === JobStatus.GENERATING ||
+      job.status === JobStatus.PREPARING ||
+      job.status === JobStatus.CHECKING_STATUS ||
+      job.status === JobStatus.RETRYING;
 
-    if (
-      refs.accountId &&
-      refs.mediaId &&
-      (job.status === JobStatus.GENERATING ||
-        job.status === JobStatus.PREPARING ||
-        job.status === JobStatus.CHECKING_STATUS ||
-        job.status === JobStatus.RETRYING)
-    ) {
+    if (refs.accountId && refs.mediaId && activeJob) {
       const outcome = await pollJobBibStatus(job);
       if (outcome.kind === 'failed') {
         return NextResponse.json({
@@ -251,11 +275,30 @@ export async function GET(
           },
         });
       }
-      // skip → fall through to Python
+      // skip with BiB refs — still do not fall through to Python
+    }
+
+    // BiB-routed job waiting for mediaId / browser — never poll Python (404 / unreachable noise)
+    if (bibRouted && activeJob) {
+      return NextResponse.json({
+        success: true,
+        asset: {
+          id: job.id,
+          status: 'PROCESSING',
+          progress: Math.min(90, Math.max(5, job.progress || 15)),
+          url: '',
+          prompt: job.prompt,
+          error: refs.mediaId ? 'Waiting for browser…' : 'Submitting…',
+          inQueue: true,
+        },
+      });
     }
 
     try {
-      const workerRes = await fetch(`${PYTHON_WORKER_URL}/api/video/status/${workerTaskId}`);
+      const workerRes = await fetchWithRetry(
+        `${PYTHON_WORKER_URL}/api/video/status/${workerTaskId}`,
+        { timeoutMs: 15_000, retries: 2 }
+      );
       if (workerRes.ok) {
         const workerData = await workerRes.json();
         const workerAsset = workerData.asset || {};

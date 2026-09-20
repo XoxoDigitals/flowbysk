@@ -70,9 +70,25 @@ async function pollStatus() {
   if (!accountId) return;
   try {
     const s = await (await fetch(`${BASE}/accounts/${encodeURIComponent(accountId)}/status`)).json();
-    const signedIn = !!(s.at && (s.authenticated || s.hasWebSession));
-    const needsLogin = s.status === 'NEEDS_LOGIN' || (!s.at && !s.hasWebSession);
-    const loadingWiz = !s.at && !!(s.hasWebSession || s.authenticated || s.status === 'READY');
+    const url = String(s.url || '');
+    const realLoginUrl =
+      /accounts\.google\.com|\/signin|oauth|ServiceLogin|Identifier|challenge/i.test(url) &&
+      !/\/project\/[0-9a-f-]{36}/i.test(url);
+    const egressBad = !!(s.egress && s.egress.error);
+    const proxyBrowserIssue =
+      s.status === 'ERROR' ||
+      egressBad ||
+      /proxy\/browser|Egress proxy|Session unread/i.test(String(s.lastError || ''));
+    const signedIn = !!(
+      s.status === 'READY' ||
+      (s.at && (s.authenticated || s.hasWebSession)) ||
+      (s.hasWebSession && !realLoginUrl && s.status !== 'NEEDS_LOGIN')
+    );
+    const needsLogin =
+      s.status === 'NEEDS_LOGIN' &&
+      (realLoginUrl || (!s.projectCount && !s.hasWebSession && !s.wasReady));
+    const loadingWiz =
+      !s.at && !!(s.hasWebSession || s.authenticated || s.status === 'READY') && !needsLogin;
     setPill(
       'authPill',
       'auth: ' +
@@ -80,10 +96,12 @@ async function pollStatus() {
           ? 'signed in'
           : needsLogin
             ? 'needs login'
-            : loadingWiz
-              ? 'session (open a project)'
-              : 'signed out'),
-      signedIn ? true : needsLogin ? false : null
+            : proxyBrowserIssue
+              ? 'session OK · proxy/browser issue'
+              : loadingWiz
+                ? 'session (open a project)'
+                : 'checking…'),
+      signedIn ? true : needsLogin ? false : proxyBrowserIssue ? null : null
     );
     const n = Array.isArray(s.projectIds) ? s.projectIds.length : (s.projectCount || 0);
     setPill('projPill', 'projects: ' + (n || '—'), n > 0 ? true : null);

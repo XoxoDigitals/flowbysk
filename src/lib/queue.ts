@@ -3,7 +3,7 @@ import { BrowserStatus, JobStatus, WalletType } from '@prisma/client';
 import { settleCredits, releaseCredits } from './credits';
 import { selectProviderAccountForJobDetailed } from './routing';
 import { releaseProviderAccountIfIdle } from './allocation';
-import { workerIdentityHeaders } from './worker';
+import { workerIdentityHeaders, fetchWithRetry } from './worker';
 import { bibGenerateImage, bibGenerateVideo, ensureBibAccountReady } from './bib';
 import { isSystemGenerationError, withSystemErrorRetry } from './systemErrorRetry';
 import { createStudioLog, markRunCancelled } from './studioLogs';
@@ -442,7 +442,7 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
           select: { id: true, email: true },
         });
 
-        const response = await fetch(`${PYTHON_WORKER_URL}${endpoint}`, {
+        const response = await fetchWithRetry(`${PYTHON_WORKER_URL}${endpoint}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -457,6 +457,8 @@ async function executeGenerationAsync(jobId: string, providerAccountId: string) 
             ),
           },
           body: JSON.stringify(payload),
+          timeoutMs: 120_000,
+          retries: 3,
         });
 
         if (await isJobCancelled(job.id)) {

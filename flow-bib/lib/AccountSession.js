@@ -1759,10 +1759,15 @@ class AccountSession {
       const ctx = await this.readContext();
       const { cookie, names } = await this.cookieHeaderFor(ctx.origin || 'https://flow.google.com');
       const hasWeb = WEB_SESSION.every((n) => names.has(n));
-      const signedOut =
+      const realLoginUrl = this.isLoginOrAuthUrl(ctx.href);
+      // Marketing /about or missing WIZ `at` is NOT proof of logout when we were READY
+      // or still have project pins — often proxy/browser unread.
+      const looksSignedOut =
         /\/about\b/i.test(ctx.href || '') ||
         (!ctx.at && !hasWeb) ||
         (cookie.length < 20 && !ctx.at);
+      const knownSession =
+        this.wasReady || (Array.isArray(this.projectIds) && this.projectIds.length > 0);
 
       if (ctx.at && hasWeb) {
         this.status = 'READY';
@@ -1795,32 +1800,39 @@ class AccountSession {
         } catch {
           /* ignore */
         }
-      } else if (hasWeb && !signedOut) {
+      } else if (hasWeb && !looksSignedOut) {
         // Google cookies still present — WIZ `at` can be missing mid-navigation /
         // after proxy relaunch / on non-project pages. Do NOT flap to NEEDS_LOGIN.
         if (this.status !== 'STARTING') this.status = 'READY';
-      } else if (this.browser && (!hasWeb || signedOut)) {
-        // Dead proxy on marketing landing looks "signed out" — keep ERROR, not NEEDS_LOGIN
-        if (this.isEgressUnhealthy() && hasWeb) {
+      } else if (this.browser && (!hasWeb || looksSignedOut)) {
+        if (this.isEgressUnhealthy()) {
           this.status = 'ERROR';
           this.lastError = this.egressError || 'Egress proxy unhealthy';
-        } else if (this.isEgressUnhealthy() && !hasWeb) {
-          // Cookies missing because tunnel failed — still prefer ERROR over login flap
+          this._recoverDeadProxy().catch(() => {});
+        } else if (realLoginUrl) {
+          // Only real Google sign-in / OAuth page → needs login
+          this.status = 'NEEDS_LOGIN';
+        } else if (knownSession) {
+          // Cookies unread or marketing landing after we were logged in — not logout
           this.status = 'ERROR';
-          this.lastError = this.egressError || 'Egress proxy unhealthy';
+          this.lastError =
+            this.lastError || 'Session unread (proxy/browser) — not logged out';
+          this._recoverDeadProxy().catch(() => {});
         } else {
           this.status = 'NEEDS_LOGIN';
         }
       }
 
       const projectId = projectFromHref(ctx.href);
-      // "Logged in" for API gates = Google web session cookies, not only WIZ at.
-      const sessionAlive = hasWeb && !signedOut;
+      // Prefer cookie presence; don't treat marketing as logout when knownSession
+      const sessionAlive =
+        (hasWeb && !looksSignedOut) ||
+        (knownSession && !realLoginUrl && this.status !== 'NEEDS_LOGIN');
       return {
         ...this.publicStatus(),
         url: ctx.href,
         origin: ctx.origin,
-        authenticated: sessionAlive,
+        authenticated: !!sessionAlive,
         hasProject: !!projectId,
         projectId,
         at: !!ctx.at,
@@ -2225,18 +2237,33 @@ class AccountSession {
     this._healthTimer = setInterval(() => {
       this.refreshAuthStatus()
         .then((st) => {
-          // Only true cookie logout — missing WIZ `at` mid-nav is not auth-lost.
+          // True logout only on a real Google login/OAuth URL after we were READY.
+          const onLogin = this.isLoginOrAuthUrl(st.url || '');
           if (
             st.hasWebSession === false &&
             this.wasReady &&
             !this.authLostNotified &&
-            this.status !== 'STARTING'
+            this.status !== 'STARTING' &&
+            onLogin
           ) {
             this.authLostNotified = true;
             this.status = 'NEEDS_LOGIN';
             if (typeof AccountSession.onAuthLost === 'function') {
               AccountSession.onAuthLost(this.accountId, st);
             }
+            return;
+          }
+          // Cookies missing but not on login page — proxy/browser blip, heal
+          if (
+            st.hasWebSession === false &&
+            this.wasReady &&
+            this.status !== 'STARTING' &&
+            !onLogin
+          ) {
+            this.status = 'ERROR';
+            this.lastError =
+              this.lastError || 'Session unread (proxy/browser) — not logged out';
+            this._recoverDeadProxy().catch(() => {});
           }
         })
         .catch(() => {});
@@ -2321,7 +2348,7 @@ class AccountSession {
 
 AccountSession.onAuthLost = null;
 AccountSession.onMintOk = null;
-/** Fired when reCAPTCHA mint returns empty — server hard-restarts all browsers. */
+/** Fired when reCAPTCHA mint returns empty — server heals that account only. */
 AccountSession.onEmptyMintStorm = null;
 
 module.exports = { AccountSession, PROFILES_ROOT };

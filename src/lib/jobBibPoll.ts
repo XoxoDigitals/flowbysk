@@ -262,9 +262,11 @@ export async function pollJobBibStatus(job: GenerationJob): Promise<BibPollOutco
           },
         });
         if (acc) {
-          ensureBibAccountReady(acc).catch((e) =>
-            console.warn('[jobBibPoll] ensure launch:', e?.message || e)
-          );
+          try {
+            await ensureBibAccountReady(acc);
+          } catch (e: any) {
+            console.warn('[jobBibPoll] ensure launch:', e?.message || e);
+          }
         }
       } catch {
         /* ignore */
