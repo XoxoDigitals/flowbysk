@@ -495,9 +495,9 @@ AccountSession.onAuthLost = (accountId, detail) => {
   notifyAuthLost(accountId, detail);
 };
 
-/** Cooldown so empty-mint storms don't restart Chrome in a loop. */
-let emptyMintHardRestartInFlight = null;
-let emptyMintHardRestartAt = 0;
+/** Per-account cooldown so empty-mint heals don't restart Chrome in a loop. */
+const emptyMintHealInFlight = new Map();
+const emptyMintHealAt = new Map();
 const EMPTY_MINT_HARD_RESTART_COOLDOWN_MS = 3 * 60 * 1000;
 
 AccountSession.onMintOk = () => {
@@ -505,72 +505,85 @@ AccountSession.onMintOk = () => {
 };
 
 /**
- * Hard restart every BiB Chrome (same profile — stay logged in).
- * Triggered when reCAPTCHA mint starts returning empty tokens.
+ * Single-account heal when reCAPTCHA mint returns empty tokens:
+ * rotate sticky → disconnect → orphan-kill → relaunch → warm project page.
+ * Does NOT restart other accounts in the pool.
  */
 AccountSession.onEmptyMintStorm = async (accountId, detail = {}) => {
+  const id = String(accountId || '');
+  if (!id) return;
   const now = Date.now();
-  if (emptyMintHardRestartInFlight) {
+  const inFlight = emptyMintHealInFlight.get(id);
+  if (inFlight) {
     console.warn(
-      `[empty-mint] hard restart already in flight — waiting (from ${String(accountId).slice(0, 8)})`
+      `[empty-mint] single-account heal already in flight — waiting (from ${id.slice(0, 8)})`
     );
     try {
-      await emptyMintHardRestartInFlight;
+      await inFlight;
     } catch {
       /* ignore */
     }
     return;
   }
-  if (now - emptyMintHardRestartAt < EMPTY_MINT_HARD_RESTART_COOLDOWN_MS) {
+  const lastAt = emptyMintHealAt.get(id) || 0;
+  if (now - lastAt < EMPTY_MINT_HARD_RESTART_COOLDOWN_MS) {
     console.warn(
-      `[empty-mint] skip hard restart (cooldown ${Math.round(
-        (EMPTY_MINT_HARD_RESTART_COOLDOWN_MS - (now - emptyMintHardRestartAt)) / 1000
-      )}s left)`
+      `[empty-mint] skip single-account heal (cooldown ${Math.round(
+        (EMPTY_MINT_HARD_RESTART_COOLDOWN_MS - (now - lastAt)) / 1000
+      )}s left) account=${id.slice(0, 8)}`
     );
     return;
   }
 
-  emptyMintHardRestartAt = now;
-  emptyMintHardRestartInFlight = (async () => {
-    const ids = [...pool.keys()];
+  emptyMintHealAt.set(id, now);
+  const healPromise = (async () => {
+    const s = pool.get(id);
+    if (!s) {
+      console.warn(`[empty-mint] single-account heal: no session ${id.slice(0, 8)}`);
+      return;
+    }
     console.warn(
-      `[empty-mint] HARD restarting ${ids.length} BiB browser(s) — trigger=${String(accountId).slice(0, 8)} action=${detail.action || '?'} attempt=${detail.attempt || '?'}`
+      `[empty-mint] single-account heal — account=${id.slice(0, 8)} action=${detail.action || '?'} attempt=${detail.attempt || '?'}`
     );
-    for (const id of ids) {
-      const s = pool.get(id);
-      if (!s) continue;
-      try {
-        await s.disconnect({ clearProfile: false });
-      } catch (e) {
-        console.warn(`[empty-mint] disconnect ${id.slice(0, 8)}:`, e.message || e);
-      }
+
+    try {
+      const { rotateAccountProxy, clearEgressProxyCache } = require('./lib/egressProxy');
+      const rotated = rotateAccountProxy(id);
+      clearEgressProxyCache();
+      console.warn(
+        `[empty-mint] sticky rotate ${rotated ? 'ok' : 'skip'} account=${id.slice(0, 8)}`
+      );
+    } catch (e) {
+      console.warn(`[empty-mint] sticky rotate failed:`, e?.message || e);
     }
-    await sleep(1200);
-    for (const id of ids) {
-      const s = pool.get(id);
-      if (!s) continue;
-      try {
-        await s.launch();
-        // Force project page (home is not enough for grecaptcha / upload)
-        const warm = Array.isArray(s.projectIds) && s.projectIds[0] ? s.projectIds[0] : null;
-        if (warm) {
-          await s.ensureOnAnyProjectPage(warm).catch(() => {});
-          await s.ensureWizAt(warm, { attempts: 2 }).catch(() => {});
-        }
-        console.log(
-          `[empty-mint] relaunched ${id.slice(0, 8)} status=${s.status} url=${String(s.page?.url?.() || '').slice(0, 64)}`
-        );
-      } catch (e) {
-        console.warn(`[empty-mint] relaunch ${id.slice(0, 8)}:`, e.message || e);
-      }
+
+    try {
+      await s.disconnect({ clearProfile: false });
+    } catch (e) {
+      console.warn(`[empty-mint] disconnect ${id.slice(0, 8)}:`, e.message || e);
     }
-    console.warn(`[empty-mint] hard restart complete`);
+    await sleep(1500);
+
+    try {
+      await s.launch();
+      const warm = Array.isArray(s.projectIds) && s.projectIds[0] ? s.projectIds[0] : null;
+      if (warm) {
+        await s.ensureOnAnyProjectPage(warm).catch(() => {});
+        await s.ensureWizAt(warm, { attempts: 2 }).catch(() => {});
+      }
+      console.log(
+        `[empty-mint] single-account relaunched ${id.slice(0, 8)} status=${s.status} url=${String(s.page?.url?.() || '').slice(0, 64)}`
+      );
+    } catch (e) {
+      console.warn(`[empty-mint] single-account relaunch ${id.slice(0, 8)}:`, e.message || e);
+    }
   })();
 
+  emptyMintHealInFlight.set(id, healPromise);
   try {
-    await emptyMintHardRestartInFlight;
+    await healPromise;
   } finally {
-    emptyMintHardRestartInFlight = null;
+    emptyMintHealInFlight.delete(id);
   }
 };
 

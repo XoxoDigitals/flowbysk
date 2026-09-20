@@ -44,6 +44,32 @@ function isProfileLockError(err) {
   );
 }
 
+/** Profile lock OR flaky CDP/WebSocket death during launch — safe to kill orphan + retry. */
+function isLaunchRetryableError(err) {
+  const msg = String(err?.message || err || '');
+  return (
+    isProfileLockError(err) ||
+    /Connection closed|Target closed|ECONNRESET|WebSocket|socket hang up/i.test(msg)
+  );
+}
+
+/** True if any process still holds this profile path (Linux pgrep; Win always false → rely on kill). */
+async function profileChromeStillRunning(profileDir) {
+  if (process.platform === 'win32') return false;
+  const dir = path.resolve(profileDir);
+  try {
+    const { stdout } = await execFileAsync('pgrep', ['-f', dir], {
+      timeout: 8000,
+      encoding: 'utf8',
+    });
+    return String(stdout || '')
+      .split(/\s+/)
+      .some((s) => /^\d+$/.test(s.trim()));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Kill orphan Chrome processes still holding this user-data-dir (profile stays intact → no logout).
  * Stronger on Linux: pgrep → SIGTERM → SIGKILL, then clear Singleton* locks.
@@ -201,11 +227,16 @@ class AccountSession {
       console.warn(
         `[${this.accountId}] auto-relaunch after disconnect (${this._autoRelaunchAttempts.length}/3)…`
       );
-      this.launch().catch((e) => {
+      this.launch().catch(async (e) => {
         console.warn(
           `[${this.accountId}] auto-relaunch failed:`,
           e?.message || e
         );
+        try {
+          await killOrphanChromeForProfile(this.profileDir);
+        } catch {
+          /* ignore */
+        }
       });
     }, 2500);
   }
@@ -320,6 +351,16 @@ class AccountSession {
     return this._launchPromise;
   }
 
+  /** Relaunch if Chrome/page is gone; used before mint/submit. */
+  async ensureBrowserReady() {
+    const connected = !!(this.browser && this.browser.connected !== false && this.page);
+    if (connected) return;
+    await this.launch();
+    if (!this.page || !this.browser) {
+      throw new Error('Browser not launched');
+    }
+  }
+
   async _launchInternal() {
     if (this.browser) return this.publicStatus();
     // Cancel pending soft auto-relaunch — we are launching now
@@ -354,9 +395,9 @@ class AccountSession {
         this.browser = null;
         this.page = null;
         this.cdp = null;
-        if (isProfileLockError(e) && attempt < maxAttempts) {
+        if (isLaunchRetryableError(e) && attempt < maxAttempts) {
           console.warn(
-            `[${this.accountId}] launch attempt ${attempt}/${maxAttempts} profile lock — kill+retry:`,
+            `[${this.accountId}] launch attempt ${attempt}/${maxAttempts} retryable — kill+retry:`,
             e.message || e
           );
           await killOrphanChromeForProfile(this.profileDir);
@@ -516,6 +557,15 @@ class AccountSession {
     this._bearerSniffInstalled = false;
     // Always clear orphan locks so the next launch reuses the same profile (stay logged in).
     await killOrphanChromeForProfile(this.profileDir);
+    // Brief poll: orphans sometimes linger after close under load.
+    const settleDeadline = Date.now() + 3000;
+    while (Date.now() < settleDeadline) {
+      const still = await profileChromeStillRunning(this.profileDir);
+      if (!still) break;
+      await killOrphanChromeForProfile(this.profileDir);
+      await sleep(400);
+    }
+    clearProfileLockFiles(this.profileDir);
     if (clearProfile) {
       try {
         fs.rmSync(this.profileDir, { recursive: true, force: true });
@@ -657,7 +707,7 @@ class AccountSession {
   }
 
   async mintRecaptcha(action = 'IMAGE_GENERATION') {
-    if (!this.page) throw new Error('Browser not launched');
+    await this.ensureBrowserReady();
 
     // Serialize mints so status polls / generates don't race the same tab.
     while (this._mintLock) {
@@ -669,7 +719,7 @@ class AccountSession {
     });
 
     const ensureProjectPage = async () => {
-      if (!this.page) throw new Error('Browser not launched');
+      await this.ensureBrowserReady();
       // Any project page is enough for grecaptcha; do not hop to a different sticky id.
       return this.ensureOnAnyProjectPage(this.projectIds[0] || null);
     };
@@ -689,9 +739,9 @@ class AccountSession {
     try {
       for (let attempt = 1; attempt <= 4; attempt++) {
         try {
-          if (!this.page) throw new Error('Browser not launched');
+          await this.ensureBrowserReady();
           await ensureProjectPage();
-          if (!this.page) throw new Error('Browser not launched');
+          await this.ensureBrowserReady();
           try {
             await this.page.waitForFunction(
               () =>
@@ -703,22 +753,22 @@ class AccountSession {
               { timeout: 10000 }
             );
           } catch {
-            if (!this.page) throw new Error('Browser not launched');
+            await this.ensureBrowserReady();
             await ensureProjectPage();
             const stillMissing = !(await this.readContext()
               .then((c) => projectFromHref(c.href))
               .catch(() => null));
             if (stillMissing) {
-              if (!this.page) throw new Error('Browser not launched');
+              await this.ensureBrowserReady();
               await this.page.reload({ waitUntil: 'domcontentloaded' });
             }
             await sleep(1500);
           }
 
-          if (!this.page) throw new Error('Browser not launched');
+          await this.ensureBrowserReady();
           await this.humanizeBeforeMint();
 
-          if (!this.page) throw new Error('Browser not launched');
+          await this.ensureBrowserReady();
           const token = await this.page.evaluate(
             async (key, act) => {
               await new Promise((resolve) => {
@@ -768,16 +818,16 @@ class AccountSession {
             `[${this.accountId}] reCAPTCHA mint empty (attempt ${attempt}/4, action=${action})`
           );
 
-          // After 2 empty tokens in a row, hard-restart ALL BiB browsers then continue minting.
+          // After 2 empty tokens: single-account sticky rotate + relaunch, then continue minting.
           if (attempt === 2 && typeof AccountSession.onEmptyMintStorm === 'function') {
             console.warn(
-              `[${this.accountId}] empty reCAPTCHA tokens — hard restarting all BiB browsers`
+              `[${this.accountId}] empty reCAPTCHA tokens — single-account heal`
             );
             try {
               await AccountSession.onEmptyMintStorm(this.accountId, { action, attempt });
             } catch (stormErr) {
               console.warn(
-                `[${this.accountId}] empty-mint hard restart failed:`,
+                `[${this.accountId}] empty-mint heal failed:`,
                 stormErr?.message || stormErr
               );
             }
@@ -786,7 +836,12 @@ class AccountSession {
           const msg = e && e.message ? e.message : String(e);
           console.warn(`[${this.accountId}] reCAPTCHA mint error attempt ${attempt}:`, msg);
           if (/Browser not launched/i.test(msg)) {
-            throw e;
+            try {
+              await this.ensureBrowserReady();
+              continue;
+            } catch {
+              throw e;
+            }
           }
           if (/Execution context was destroyed|navigation|Target closed/i.test(msg)) {
             await waitForSettle();
@@ -1389,7 +1444,7 @@ class AccountSession {
    * Retries once on Execution context destroyed / navigation races.
    */
   async aisandboxPost(endpoint, payload, action = 'VIDEO_GENERATION') {
-    if (!this.page) throw new Error('no page');
+    await this.ensureBrowserReady();
 
     const attemptOnce = async () => {
       const warmPid =
@@ -1526,7 +1581,7 @@ class AccountSession {
    * GET aisandbox (flowMedia detail) with Bearer — no reCAPTCHA.
    */
   async aisandboxGet(endpoint) {
-    if (!this.page) throw new Error('no page');
+    await this.ensureBrowserReady();
     let accessToken = await this.fetchLabsAccessToken({ force: false });
     if (!accessToken) {
       accessToken = await this.fetchLabsAccessToken({ force: true });
