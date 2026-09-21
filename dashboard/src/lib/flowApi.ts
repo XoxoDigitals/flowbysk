@@ -1,4 +1,5 @@
-export const FLOW_API = process.env.NEXT_PUBLIC_FLOW_API_URL || 'https://flowcreatorai.site';
+// Same-origin by default so Next rewrites /api + /download → Express :8000
+export const FLOW_API = process.env.NEXT_PUBLIC_FLOW_API_URL || '';
 
 const STORAGE_KEY = 'flowbro_session';
 
