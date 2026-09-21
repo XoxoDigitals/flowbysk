@@ -1,7 +1,7 @@
 // Flow Browser Auto Login Extension Background Service Worker
-// Connects to the Flow Browser backend (http://localhost:8000)
+// Connects to the Flow Browser backend (https://flowcreatorai.site)
 
-const API_ORIGIN = "http://localhost:8000";
+const API_ORIGIN = "https://flowcreatorai.site";
 const API_BASE = `${API_ORIGIN}/api/client`;
 const FLOW_URL = "https://flow.google.com/";
 const GOOGLE_LOGOUT = "https://accounts.google.com/Logout";

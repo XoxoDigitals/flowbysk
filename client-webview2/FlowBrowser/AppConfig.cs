@@ -6,8 +6,10 @@ namespace FlowBrowser;
 
 public sealed class AppConfig
 {
+    public const string DefaultServerUrl = "https://flowcreatorai.site";
+
     [JsonPropertyName("serverUrl")]
-    public string ServerUrl { get; set; } = "https://flowcreatorai.site";
+    public string ServerUrl { get; set; } = DefaultServerUrl;
 
     [JsonPropertyName("authToken")]
     public string? AuthToken { get; set; }
@@ -42,7 +44,13 @@ public sealed class AppConfig
             if (File.Exists(path))
             {
                 var json = File.ReadAllText(path);
-                return JsonSerializer.Deserialize<AppConfig>(json, JsonOpts) ?? new AppConfig();
+                var cfg = JsonSerializer.Deserialize<AppConfig>(json, JsonOpts) ?? new AppConfig();
+                if (NeedsProductionUrl(cfg.ServerUrl))
+                {
+                    cfg.ServerUrl = DefaultServerUrl;
+                    cfg.Save();
+                }
+                return cfg;
             }
         }
         catch (Exception ex)
@@ -50,6 +58,15 @@ public sealed class AppConfig
             Console.Error.WriteLine("Error reading config: " + ex.Message);
         }
         return new AppConfig();
+    }
+
+    static bool NeedsProductionUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return true;
+        var u = url.Trim().TrimEnd('/');
+        return u.Contains("localhost", StringComparison.OrdinalIgnoreCase)
+            || u.Contains("127.0.0.1")
+            || u.Equals("http://flowcreatorai.site", StringComparison.OrdinalIgnoreCase);
     }
 
     public void Save()
