@@ -319,21 +319,25 @@ class Database {
         jwtSecret: process.env.JWT_SECRET || legacy?.admin?.jwtSecret || 'flow_super_secret_jwt_key_2026',
       });
 
-      // Import Google shared accounts if table empty
-      const count = await prisma.sharedGoogleAccount.count();
-      if (count === 0 && Array.isArray(legacy?.servers)) {
-        for (const s of legacy.servers) {
-          await prisma.sharedGoogleAccount.create({
-            data: {
-              name: s.name || 'Google Account',
-              targetUrl: s.targetUrl || 'https://flow.google.com',
-              email: s.email || null,
-              password: s.password || null,
-              totpSecret: normalizeTotpSecret(s.totpSecret || ''),
-              isActive: s.isActive !== false,
-            },
-          });
+      // Import Google shared accounts if table empty (table may not exist yet on older DBs)
+      try {
+        const count = await prisma.sharedGoogleAccount.count();
+        if (count === 0 && Array.isArray(legacy?.servers)) {
+          for (const s of legacy.servers) {
+            await prisma.sharedGoogleAccount.create({
+              data: {
+                name: s.name || 'Google Account',
+                targetUrl: s.targetUrl || 'https://flow.google.com',
+                email: s.email || null,
+                password: s.password || null,
+                totpSecret: normalizeTotpSecret(s.totpSecret || ''),
+                isActive: s.isActive !== false,
+              },
+            });
+          }
         }
+      } catch (err) {
+        console.warn('[db] SharedGoogleAccount not ready yet:', err?.code || err?.message || err);
       }
     }
 
@@ -805,17 +809,25 @@ class Database {
   // ── Shared Google accounts (servers) ───────────────────────────
   async getServers() {
     await this.ready();
-    const rows = await prisma.sharedGoogleAccount.findMany({ orderBy: { createdAt: 'asc' } });
-    return rows.map((s) => ({
-      id: s.id,
-      name: s.name,
-      targetUrl: s.targetUrl,
-      email: s.email || '',
-      password: s.password || '',
-      totpSecret: s.totpSecret || '',
-      isActive: s.isActive !== false,
-      createdAt: s.createdAt.toISOString(),
-    }));
+    try {
+      const rows = await prisma.sharedGoogleAccount.findMany({ orderBy: { createdAt: 'asc' } });
+      return rows.map((s) => ({
+        id: s.id,
+        name: s.name,
+        targetUrl: s.targetUrl,
+        email: s.email || '',
+        password: s.password || '',
+        totpSecret: s.totpSecret || '',
+        isActive: s.isActive !== false,
+        createdAt: s.createdAt.toISOString(),
+      }));
+    } catch (err) {
+      if (err?.code === 'P2021') {
+        console.warn('[db] SharedGoogleAccount table missing — run: cd dashboard && npx prisma db push');
+        return [];
+      }
+      throw err;
+    }
   }
 
   async getServerById(id) {
