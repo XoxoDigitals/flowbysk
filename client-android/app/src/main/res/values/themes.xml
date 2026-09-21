@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FlowBrowser" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@color/flow_bg</item>
+        <item name="android:navigationBarColor">@color/flow_bg</item>
+        <item name="android:windowBackground">@color/flow_bg</item>
+        <item name="colorPrimary">#38BDF8</item>
+        <item name="colorPrimaryVariant">#0EA5E9</item>
+        <item name="colorOnPrimary">#020617</item>
+    </style>
+</resources>

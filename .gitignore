@@ -1,0 +1,14 @@
+node_modules/
+.next/
+.env
+.env.*
+!.env.example
+server/data.json
+server/data.json.bak
+server/uploads/
+**/*.exe
+dist-portable/
+dist-webview2/
+_recover/
+*.log
+.DS_Store

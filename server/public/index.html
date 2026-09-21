@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flow Bro - Admin Management Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Admin Login Overlay -->
+  <div id="login-modal" class="auth-wrapper">
+    <div class="auth-card">
+      <div class="auth-header">
+        <div class="brand-logo">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        </div>
+        <h2>Flow Bro Admin</h2>
+        <p>Sign in to manage users, credits, servers, and browser settings</p>
+      </div>
+      <form id="admin-login-form">
+        <div class="form-group">
+          <label>Admin Username</label>
+          <input type="text" id="admin-username" required placeholder="admin" value="admin">
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="admin-password" required placeholder="••••••••" value="admin123">
+        </div>
+        <div id="login-error" class="alert-box error hidden"></div>
+        <button type="submit" class="btn btn-primary btn-block">Sign In to Dashboard</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main Dashboard App -->
+  <div id="app-container" class="dashboard-layout hidden">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-badge">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        </div>
+        <div>
+          <span class="brand-title">Flow Bro</span>
+          <span class="brand-subtitle">Admin Suite</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <button class="nav-item active" data-tab="overview">
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          Overview
+        </button>
+        <button class="nav-item" data-tab="users">
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          User Management
+        </button>
+        <button class="nav-item" data-tab="servers">
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+          Shared Accounts Pool
+        </button>
+        <button class="nav-item" data-tab="masking">
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          Model & UI Masking
+        </button>
+        <button class="nav-item" data-tab="logs">
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          Activity Logs
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="user-meta">
+          <div class="avatar-circle">A</div>
+          <div class="meta-details">
+            <span class="meta-name" id="sidebar-admin-name">admin</span>
+            <span class="meta-role">Super Administrator</span>
+          </div>
+        </div>
+        <button id="btn-logout" class="btn-icon" title="Sign Out">
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Header Bar -->
+      <header class="top-header">
+        <div class="header-left">
+          <h1 id="page-title">Overview Dashboard</h1>
+          <p id="page-subtitle">Real-time telemetry, active subscriptions, and server pool status</p>
+        </div>
+        <div class="header-actions">
+          <a href="https://flow.google.com" target="_blank" class="btn btn-secondary">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            Open Flow Google
+          </a>
+          <button id="btn-refresh-data" class="btn btn-icon-only" title="Refresh Data">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- TAB: Overview -->
+      <section id="tab-overview" class="tab-pane active">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon purple">
+              <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+            </div>
+            <div class="stat-info">
+              <span class="stat-label">Total Users</span>
+              <span class="stat-val" id="stat-total-users">-</span>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon green">
+              <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            </div>
+            <div class="stat-info">
+              <span class="stat-label">Active Subscriptions</span>
+              <span class="stat-val" id="stat-active-users">-</span>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon red">
+              <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            </div>
+            <div class="stat-info">
+              <span class="stat-label">Expired Plans</span>
+              <span class="stat-val" id="stat-expired-users">-</span>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon blue">
+              <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            </div>
+            <div class="stat-info">
+              <span class="stat-label">Total Credits Pool</span>
+              <span class="stat-val" id="stat-total-credits">-</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="content-card">
+          <div class="card-header">
+            <h3>Recent User Activity</h3>
+            <button class="btn btn-sm btn-secondary" onclick="app.switchTab('logs')">View All Logs</button>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>User</th>
+                  <th>Action</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody id="overview-recent-logs">
+                <tr><td colspan="4" class="text-center py-4">Loading telemetry...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: Users -->
+      <section id="tab-users" class="tab-pane">
+        <div class="toolbar-bar">
+          <div class="search-box">
+            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="user-search-input" placeholder="Search by username or notes...">
+          </div>
+          <button class="btn btn-primary" id="btn-open-add-user-modal">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add New User
+          </button>
+        </div>
+
+        <div class="content-card">
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Status</th>
+                  <th>Credits</th>
+                  <th>Plan Expiry</th>
+                  <th>Server Access</th>
+                  <th>Created</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="users-table-body">
+                <tr><td colspan="7" class="text-center py-4">Loading users...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: Shared Servers -->
+      <section id="tab-servers" class="tab-pane">
+        <div class="toolbar-bar">
+          <p class="tab-description">Shared account pools with auto-injected session cookies & storage tokens for load balancing.</p>
+          <button class="btn btn-primary" id="btn-open-add-server-modal">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add Shared Server Node
+          </button>
+        </div>
+
+        <div class="server-cards-grid" id="servers-grid">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+
+      <!-- TAB: Masking & Customization -->
+      <section id="tab-masking" class="tab-pane">
+        <form id="settings-form">
+          <div class="content-card mb-6">
+            <div class="card-header">
+              <h3>General Browser Branding</h3>
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label>Client Application Name</label>
+                <input type="text" id="setting-app-name" placeholder="Flow Browser">
+              </div>
+              <div class="form-group">
+                <label>Default Target Flow URL</label>
+                <input type="text" id="setting-default-url" placeholder="https://flow.google.com">
+              </div>
+            </div>
+          </div>
+
+          <div class="content-card mb-6">
+            <div class="card-header">
+              <div>
+                <h3>Model Renaming Rules</h3>
+                <p class="card-subtext">Automatically replaces original model names with your custom branding in the client DOM.</p>
+              </div>
+              <button type="button" class="btn btn-sm btn-secondary" id="btn-add-model-rule">+ Add Rule</button>
+            </div>
+            <div id="model-rules-container" class="rules-list">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <div class="content-card mb-6">
+            <div class="card-header">
+              <div>
+                <h3>Google Account & Profile Masking (CSS Selectors)</h3>
+                <p class="card-subtext">Elements matching these selectors will be stripped, hidden, and blurred so end users cannot see raw account emails or profile avatars.</p>
+              </div>
+              <button type="button" class="btn btn-sm btn-secondary" id="btn-add-selector-rule">+ Add Selector</button>
+            </div>
+            <div id="selectors-container" class="rules-list">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <div class="content-card mb-6">
+            <div class="card-header">
+              <div>
+                <h3>Custom Injected CSS</h3>
+                <p class="card-subtext">Custom styling injected directly into the Chromium webview session.</p>
+              </div>
+            </div>
+            <textarea id="setting-custom-css" rows="6" class="code-textarea" placeholder="/* Custom CSS */"></textarea>
+          </div>
+
+          <div class="form-actions-bar">
+            <button type="submit" class="btn btn-primary">Save All Settings</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- TAB: Logs -->
+      <section id="tab-logs" class="tab-pane">
+        <div class="content-card">
+          <div class="card-header">
+            <h3>System Activity & Auth Logs</h3>
+            <span class="badge badge-info">Live Stream</span>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>User ID / Name</th>
+                  <th>Action</th>
+                  <th>IP / Payload Details</th>
+                </tr>
+              </thead>
+              <tbody id="logs-table-body">
+                <tr><td colspan="4" class="text-center py-4">Loading logs...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- User Modal (Add / Edit) -->
+  <div id="user-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="user-modal-title">Add New User</h3>
+        <button class="btn-close" onclick="app.closeModals()">&times;</button>
+      </div>
+      <form id="user-form">
+        <input type="hidden" id="user-form-id">
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" id="user-form-username" required placeholder="e.g. client_pro_1">
+        </div>
+        <div class="form-group">
+          <label id="user-password-label">Password</label>
+          <input type="password" id="user-form-password" placeholder="••••••••">
+          <small class="helper-text" id="user-password-help">Set initial password</small>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Credit Balance</label>
+            <input type="number" id="user-form-credits" value="100" min="0">
+          </div>
+          <div class="form-group">
+            <label>Plan Expiry Date & Time</label>
+            <input type="datetime-local" id="user-form-expiry" required>
+          </div>
+        </div>
+        <div class="expiry-presets">
+          <span>Quick Presets:</span>
+          <button type="button" class="preset-btn" onclick="app.setExpiryPreset(7)">+7 Days</button>
+          <button type="button" class="preset-btn" onclick="app.setExpiryPreset(30)">+30 Days</button>
+          <button type="button" class="preset-btn" onclick="app.setExpiryPreset(90)">+3 Months</button>
+          <button type="button" class="preset-btn" onclick="app.setExpiryPreset(365)">+1 Year</button>
+        </div>
+        <div class="form-group">
+          <label>Admin Notes / Reference</label>
+          <input type="text" id="user-form-notes" placeholder="e.g. VIP Enterprise Customer">
+        </div>
+        <div class="form-group checkbox-group">
+          <label>
+            <input type="checkbox" id="user-form-active" checked>
+            <span>Account Active (Allowed to login)</span>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="app.closeModals()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save User</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Server Modal (Add / Edit) -->
+  <div id="server-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="server-modal-title">Add Shared Google Account Node</h3>
+        <button class="btn-close" onclick="app.closeModals()">&times;</button>
+      </div>
+      <form id="server-form">
+        <input type="hidden" id="server-form-id">
+        <div class="form-group">
+          <label>Account Label / Server Name</label>
+          <input type="text" id="server-form-name" required placeholder="e.g. Account 1 - US Fast">
+        </div>
+        <div class="form-group">
+          <label>Target Workspace URL</label>
+          <input type="text" id="server-form-target-url" required value="https://flow.google.com" placeholder="https://flow.google.com">
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Google Account Email</label>
+            <input type="email" id="server-form-email" required placeholder="e.g. example@gmail.com">
+          </div>
+          <div class="form-group">
+            <label>Google Account Password</label>
+            <input type="password" id="server-form-password" required placeholder="••••••••">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Authenticator App Secret (TOTP)</label>
+          <input type="text" id="server-form-totp-secret" autocomplete="off" spellcheck="false" placeholder="Paste base32 secret from Google 2FA setup">
+          <small class="helper-text">
+            Enable 2-Step Verification → Authenticator app → copy the secret key → paste here.
+            Then confirm the preview code matches your authenticator.
+          </small>
+          <div style="display:flex; gap:0.75rem; align-items:center; margin-top:0.75rem; flex-wrap:wrap;">
+            <button type="button" class="btn btn-secondary" id="btn-totp-preview">Preview current code</button>
+            <span id="server-totp-preview" style="font-family:ui-monospace,monospace; letter-spacing:0.15em; color:#38bdf8; font-weight:600;"></span>
+          </div>
+        </div>
+        <small class="helper-text" style="display:block; margin-top:-0.5rem; margin-bottom:1rem; color:#94a3b8;">
+          Email, password, and TOTP are used by Flow Browser auto-login (no cookie injection).
+        </small>
+        <div class="form-group checkbox-group">
+          <label>
+            <input type="checkbox" id="server-form-active" checked>
+            <span>Server Active (Visible in user's Server Switcher)</span>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="app.closeModals()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Account Node</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Notification Toast -->
+  <div id="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

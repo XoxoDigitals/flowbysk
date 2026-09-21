@@ -1,0 +1,22 @@
+﻿<Window x:Class="FlowBrowser.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="Flow Browser"
+        Width="1360"
+        Height="880"
+        MinWidth="1024"
+        MinHeight="700"
+        WindowStyle="None"
+        Background="#07090e"
+        WindowStartupLocation="CenterScreen">
+  <Grid x:Name="RootGrid">
+    <wv2:WebView2 x:Name="FlowView"
+                  DefaultBackgroundColor="#07090E"
+                  Margin="0,80,0,0" />
+    <wv2:WebView2 x:Name="ShellView"
+                  DefaultBackgroundColor="#FF07090E"
+                  Height="80"
+                  VerticalAlignment="Top" />
+  </Grid>
+</Window>

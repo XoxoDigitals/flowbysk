@@ -1,0 +1,5 @@
+# Live Flow database. Loaded on startup and never reseeded when it already exists.
+data.json
+
+# Admin-uploaded Windows/Android installers (survive code pushes; not in source).
+uploads/

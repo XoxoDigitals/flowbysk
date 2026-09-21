@@ -1,0 +1,104 @@
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const adminRoutes = require('./routes/admin');
+const clientRoutes = require('./routes/client');
+const sessionRoutes = require('./routes/session');
+const resellerRoutes = require('./routes/reseller');
+const downloads = require('./downloads');
+const db = require('./db');
+
+const app = express();
+const PORT = process.env.PORT || 8000;
+
+downloads.ensureDirs();
+
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.get('/', (req, res) => {
+  res.redirect(302, 'https://flowcreatorai.site/admin');
+});
+
+app.use('/api/admin', adminRoutes);
+app.use('/api/client', clientRoutes);
+app.use('/api/session', sessionRoutes);
+app.use('/api/reseller', resellerRoutes);
+
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+
+app.get('/download/status', async (req, res) => {
+  try {
+    res.json({ success: true, downloads: await downloads.getPublicAvailability() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/public/branding', async (req, res) => {
+  try {
+    const settings = (await db.getSettings()) || {};
+    res.json({
+      success: true,
+      settings: {
+        siteName: settings.siteName || settings.appName || 'Flow Creator Ai',
+        appName: settings.appName || settings.siteName || 'Flow Creator Ai',
+        logoUrl: settings.logoUrl || null,
+        contactEmail: settings.contactEmail || '',
+        allowSignups: settings.allowSignups !== false,
+        ticketSystemEnabled: settings.ticketSystemEnabled !== false,
+        contactPageEnabled: settings.contactPageEnabled !== false,
+        maintenanceMode: !!settings.maintenanceMode,
+        socialLinks: settings.socialLinks || {},
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/download/flow-browser', async (req, res) => {
+  await downloads.streamPackage('windows', res);
+});
+
+app.get('/download/flow-android', async (req, res) => {
+  await downloads.streamPackage('android', res);
+});
+
+app.get('/demo-flow', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'demo-flow.html'));
+});
+
+app.get('/legacy-admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('*', (req, res) => {
+  if (String(req.path || '').startsWith('/api/')) {
+    return res.status(404).json({ success: false, error: 'Not found' });
+  }
+  res.status(200).type('html').send(
+    '<!doctype html><meta charset="utf-8"><title>Flow Creator Ai API</title>' +
+      '<body style="font-family:system-ui;padding:2rem;background:#0b0f14;color:#e2e8f0">' +
+      '<p>Admin UI: <a href="https://flowcreatorai.site/admin" style="color:#38bdf8">https://flowcreatorai.site/admin</a></p>' +
+      '<p>This port (:8000) is the Express API for Flow Browser.</p></body>'
+  );
+});
+
+db.ready()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`====================================================`);
+      console.log(`Flow Creator Ai API server on port ${PORT}`);
+      console.log(`Admin UI:   http://localhost:3100/admin`);
+      console.log(`Demo Flow:  http://localhost:${PORT}/demo-flow`);
+      console.log(`Client API: http://localhost:${PORT}/api/client`);
+      console.log(`Data store: PostgreSQL (Prisma) — data.json is not live`);
+      console.log(`====================================================`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to initialize database:', err);
+    process.exit(1);
+  });

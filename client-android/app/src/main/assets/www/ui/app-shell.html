@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flow Browser</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app-shell.css">
+</head>
+<body>
+  <!-- Window Drag Header & Restricted Toolbar -->
+  <header id="top-toolbar" class="toolbar-container">
+    <div class="toolbar-left app-drag">
+      <div class="app-logo no-drag">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      </div>
+      <span class="app-name">Flow Browser</span>
+
+      <!-- Account name + load-balanced change (no dropdown) -->
+      <div class="server-switcher-wrapper no-drag">
+        <svg class="server-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg>
+        <span id="account-name-label" class="account-name" title="Current shared account">Account</span>
+        <select id="server-select" class="hidden" tabindex="-1" aria-hidden="true">
+          <option value="">Sign in to access...</option>
+        </select>
+        <button id="btn-request-server-change" type="button" class="btn-request-change" title="Switch to the account with the fewest users">Change account</button>
+      </div>
+    </div>
+
+    <!-- Center User Badges -->
+    <div class="toolbar-center app-drag">
+      <div class="pill-badge credits-badge no-drag" id="pill-credits" title="Remaining Generation Credits">
+        <svg width="14" height="14" fill="none" stroke="#38bdf8" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        <span id="user-credits-val">--</span>
+        <span class="unit">Credits</span>
+      </div>
+
+      <div class="pill-badge expiry-badge no-drag" id="pill-expiry" title="Subscription Plan Expiration">
+        <svg width="14" height="14" fill="none" stroke="#10b981" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span id="user-expiry-val">Sign In</span>
+      </div>
+    </div>
+
+    <!-- Right Controls: Zoom, Downloads, Refresh, Logout, Window Controls -->
+    <div class="toolbar-right">
+      <!-- Zoom controls -->
+      <div class="zoom-controls no-drag">
+        <button id="btn-zoom-out" class="tb-btn" title="Zoom Out (Ctrl -)">-</button>
+        <span id="zoom-level-text" title="Reset Zoom">100%</span>
+        <button id="btn-zoom-in" class="tb-btn" title="Zoom In (Ctrl +)">+</button>
+      </div>
+
+      <!-- Veo Auto Automation Button -->
+      <button id="btn-toggle-veo-auto" class="tb-btn tb-icon-btn no-drag" title="Flow Automation (Veo Auto)">
+        <svg width="16" height="16" fill="none" stroke="#a855f7" stroke-width="2" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      </button>
+
+
+      <!-- Downloads button -->
+      <button id="btn-toggle-downloads" class="tb-btn tb-icon-btn no-drag" title="Downloads Manager">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <span id="download-badge" class="badge-count hidden">0</span>
+      </button>
+
+      <!-- Reload Page -->
+      <button id="btn-reload-webview" class="tb-btn tb-icon-btn no-drag" title="Reload Flow Session">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      </button>
+
+      <!-- Logout -->
+      <button id="btn-client-logout" class="tb-btn tb-icon-btn no-drag" title="Sign Out">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </button>
+
+      <div class="divider"></div>
+
+      <!-- Window Action Buttons -->
+      <div class="window-controls no-drag">
+        <button id="btn-win-min" class="win-btn" title="Minimize">
+          <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="2" fill="currentColor"/></svg>
+        </button>
+        <button id="btn-win-max" class="win-btn" title="Maximize">
+          <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+        </button>
+        <button id="btn-win-close" class="win-btn win-close" title="Close">
+          <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.5"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Debug URL bar (temporary — shows real page URL) -->
+  <div id="debug-url-bar" class="debug-url-bar no-drag">
+    <span class="debug-url-label">URL</span>
+    <input id="debug-url-input" type="text" readonly value="about:blank" title="Current page URL">
+    <button id="btn-debug-copy-url" class="tb-btn" type="button" title="Copy URL">Copy</button>
+  </div>
+
+  <!-- Google auto-login / reCAPTCHA status (chrome strip — does not cover WebView) -->
+  <div id="google-auth-banner" class="google-auth-banner hidden" role="status">
+    <span id="google-auth-banner-text">Signing you in automatically…</span>
+  </div>
+
+  <!-- Flow content is a native Edge WebView2 hosted under this chrome -->
+  <main id="webview-container" class="webview-wrapper" aria-hidden="true"></main>
+
+  <!-- Full Screen Loading / Session Injection Overlay -->
+  <div id="full-loading-overlay" class="overlay-screen hidden">
+    <div class="overlay-card">
+      <div class="spinner-ring"></div>
+      <h3 id="overlay-status-title">Securing Connection...</h3>
+      <p id="overlay-status-sub">Injecting obfuscation filters and initializing workspace session</p>
+    </div>
+  </div>
+
+  <!-- Client Login Screen Overlay -->
+  <div id="login-screen" class="auth-screen">
+    <div class="auth-box">
+      <!-- Backend URL config button -->
+      <button id="btn-toggle-server-config" class="config-toggle-btn" title="Configure API Server URL">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+
+      <div class="auth-header">
+        <div class="app-icon-badge">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        </div>
+        <h2>Flow Browser</h2>
+        <p>Enter your credentials to verify subscription and access workspace</p>
+      </div>
+
+      <!-- Server Config Box (collapsible) -->
+      <div id="server-config-box" class="server-config-container hidden">
+        <label>Backend Admin Server URL</label>
+        <div class="input-with-action">
+          <input type="text" id="input-server-url" value="http://localhost:3000" placeholder="http://localhost:3000">
+          <button type="button" id="btn-save-server-url" class="btn btn-sm btn-primary">Save</button>
+        </div>
+      </div>
+
+      <form id="client-login-form">
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" id="client-username" required placeholder="user1" autocomplete="username">
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="client-password" required placeholder="••••••••" autocomplete="current-password">
+        </div>
+
+        <div id="login-alert" class="alert-box error hidden"></div>
+
+        <button type="submit" id="btn-login-submit" class="btn btn-primary btn-block">
+          Launch Flow Workspace
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Downloads Drawer -->
+  <div id="download-drawer" class="drawer hidden">
+    <div class="drawer-header">
+      <h3>File Downloads</h3>
+      <button id="btn-close-downloads" class="btn-close">&times;</button>
+    </div>
+    <div id="downloads-list" class="downloads-content">
+      <p class="empty-text">No active or recent downloads</p>
+    </div>
+  </div>
+
+  <!-- Extension Drawer -->
+  <div id="extension-drawer" class="drawer hidden" style="width: 360px;">
+    <div class="drawer-header">
+      <h3>Auto Login Extension</h3>
+      <button id="btn-close-extension" class="btn-close">&times;</button>
+    </div>
+    <iframe id="extension-webview" src="about:blank" title="Auto Login" style="width:100%; height:calc(100% - 50px); border:0; background:#0b0f16;"></iframe>
+  </div>
+
+  <!-- Veo Auto Automation Drawer -->
+  <div id="veo-auto-drawer" class="drawer hidden" style="width: 440px;">
+    <div class="drawer-header">
+      <h3 style="color: #c084fc;">Flow Automation (Veo Auto)</h3>
+      <button id="btn-close-veo-auto" class="btn-close">&times;</button>
+    </div>
+    <iframe id="veo-auto-webview" src="about:blank" title="Veo Auto" style="width:100%; height:calc(100% - 50px); border:0; background:#0b0f16;"></iframe>
+  </div>
+
+
+  <script src="../scripts/shell-bridge.js"></script>
+  <script src="app-shell.js"></script>
+</body>
+</html>
