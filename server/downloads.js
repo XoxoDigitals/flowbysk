@@ -32,6 +32,15 @@ function sanitizeOriginalName(name, platform) {
   return base || `package${ext}`;
 }
 
+function normalizeExternalUrl(url) {
+  const cleaned = String(url || '').trim();
+  if (!cleaned) return '';
+  if (!/^https?:\/\//i.test(cleaned)) {
+    throw new Error('URL must start with http:// or https://');
+  }
+  return cleaned;
+}
+
 async function getDownloadsMeta() {
   const settings = (await db.getSettings()) || {};
   const downloads = settings.downloads && typeof settings.downloads === 'object' ? settings.downloads : {};
@@ -42,12 +51,17 @@ async function getDownloadsMeta() {
 }
 
 function publicMeta(entry) {
-  if (!entry || !entry.originalName) return null;
+  if (!entry) return null;
+  const externalUrl = String(entry.externalUrl || '').trim() || null;
+  const originalName = entry.originalName || (externalUrl ? 'External download' : null);
+  if (!originalName && !externalUrl) return null;
   return {
-    originalName: entry.originalName,
+    originalName: originalName || 'External download',
     size: Number(entry.size) || 0,
     updatedAt: entry.updatedAt || null,
     contentType: entry.contentType || null,
+    externalUrl,
+    source: externalUrl ? 'url' : 'file',
   };
 }
 
@@ -58,11 +72,31 @@ function resolveExisting(entry, platform) {
   return full;
 }
 
+function clearLocalFiles(platform) {
+  ensureDirs();
+  for (const existing of fs.readdirSync(PLATFORM_DIRS[platform])) {
+    const full = path.join(PLATFORM_DIRS[platform], existing);
+    if (fs.statSync(full).isFile()) fs.unlinkSync(full);
+  }
+}
+
+function packagePublic(entry, platform) {
+  if (!entry) return null;
+  const externalUrl = String(entry.externalUrl || '').trim();
+  const hasFile = !!resolveExisting(entry, platform);
+  if (!externalUrl && !hasFile) return null;
+  return publicMeta({
+    ...entry,
+    externalUrl: externalUrl || null,
+    size: hasFile ? Number(entry.size) || 0 : 0,
+  });
+}
+
 async function getPublicAvailability() {
   const meta = await getDownloadsMeta();
   return {
-    windows: resolveExisting(meta.windows, 'windows') ? publicMeta(meta.windows) : null,
-    android: resolveExisting(meta.android, 'android') ? publicMeta(meta.android) : null,
+    windows: packagePublic(meta.windows, 'windows'),
+    android: packagePublic(meta.android, 'android'),
   };
 }
 
@@ -90,15 +124,10 @@ async function saveUploadedFile(platform, file) {
     );
   }
 
-  ensureDirs();
+  clearLocalFiles(platform);
   const ext = path.extname(originalName).toLowerCase();
   const storedName = `${STORED_BASENAME[platform]}${ext}`;
   const dest = path.join(PLATFORM_DIRS[platform], storedName);
-
-  for (const existing of fs.readdirSync(PLATFORM_DIRS[platform])) {
-    const full = path.join(PLATFORM_DIRS[platform], existing);
-    if (fs.statSync(full).isFile()) fs.unlinkSync(full);
-  }
 
   if (file.path && fs.existsSync(file.path)) {
     fs.renameSync(file.path, dest);
@@ -115,7 +144,35 @@ async function saveUploadedFile(platform, file) {
     size,
     updatedAt: new Date().toISOString(),
     contentType: contentTypeFor(ext, platform),
+    externalUrl: null,
   };
+
+  const current = await getDownloadsMeta();
+  await db.updateSettings({
+    downloads: {
+      ...current,
+      [platform]: entry,
+    },
+  });
+
+  return publicMeta(entry);
+}
+
+async function setExternalUrl(platform, url) {
+  if (!PLATFORM_DIRS[platform]) throw new Error('Invalid platform');
+  const externalUrl = normalizeExternalUrl(url);
+  clearLocalFiles(platform);
+
+  const entry = externalUrl
+    ? {
+        originalName: 'External download',
+        storedName: null,
+        size: 0,
+        updatedAt: new Date().toISOString(),
+        contentType: null,
+        externalUrl,
+      }
+    : null;
 
   const current = await getDownloadsMeta();
   await db.updateSettings({
@@ -130,11 +187,7 @@ async function saveUploadedFile(platform, file) {
 
 async function removePackage(platform) {
   if (!PLATFORM_DIRS[platform]) throw new Error('Invalid platform');
-  ensureDirs();
-  for (const existing of fs.readdirSync(PLATFORM_DIRS[platform])) {
-    const full = path.join(PLATFORM_DIRS[platform], existing);
-    if (fs.statSync(full).isFile()) fs.unlinkSync(full);
-  }
+  clearLocalFiles(platform);
   const current = await getDownloadsMeta();
   await db.updateSettings({
     downloads: {
@@ -147,8 +200,23 @@ async function removePackage(platform) {
 
 async function streamPackage(platform, res) {
   const meta = (await getDownloadsMeta())[platform];
+  if (!meta) {
+    return res.status(404).json({
+      success: false,
+      error:
+        platform === 'windows'
+          ? 'Windows package is not available yet'
+          : 'Android package is not available yet',
+    });
+  }
+
+  const externalUrl = String(meta.externalUrl || '').trim();
+  if (externalUrl) {
+    return res.redirect(302, externalUrl);
+  }
+
   const full = resolveExisting(meta, platform);
-  if (!full || !meta) {
+  if (!full) {
     return res.status(404).json({
       success: false,
       error:
@@ -170,6 +238,7 @@ module.exports = {
   getPublicAvailability,
   publicMeta,
   saveUploadedFile,
+  setExternalUrl,
   removePackage,
   streamPackage,
 };

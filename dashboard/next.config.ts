@@ -22,7 +22,6 @@ const nextConfig: NextConfig = {
     ],
   },
   async rewrites() {
-    // Proxy Express (desktop + dashboard API) so /api and /download work on the same domain.
     return [
       {
         source: "/api/:path*",

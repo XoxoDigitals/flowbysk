@@ -1311,6 +1311,22 @@ class Database {
     }));
   }
 
+  async getActiveNotices() {
+    await this.ready();
+    const rows = await prisma.notice.findMany({
+      where: { isActive: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    return rows.map((n) => ({
+      id: n.id,
+      title: n.title,
+      body: n.body,
+      severity: n.severity,
+      isActive: n.isActive,
+      createdAt: n.createdAt.toISOString(),
+    }));
+  }
+
   async createNotice(notice) {
     await this.ready();
     const title = String(notice.title || '').trim();

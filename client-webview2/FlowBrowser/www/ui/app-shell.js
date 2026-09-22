@@ -50,7 +50,7 @@ class FlowBrowserApp {
     this.inputPassword = document.getElementById('client-password');
     this.btnLoginSubmit = document.getElementById('btn-login-submit');
 
-    // Server Config
+    // Server Config (hidden from users — URL comes from AppConfig)
     this.btnToggleConfig = document.getElementById('btn-toggle-server-config');
     this.serverConfigBox = document.getElementById('server-config-box');
     this.inputServerUrl = document.getElementById('input-server-url');
@@ -63,13 +63,11 @@ class FlowBrowserApp {
     this.btnCloseDownloads = document.getElementById('btn-close-downloads');
     this.downloadsList = document.getElementById('downloads-list');
 
-    // Extension Drawer
+    // Extension / Veo drawers removed from user UI
     this.btnToggleExtension = document.getElementById('btn-toggle-extension');
     this.extensionDrawer = document.getElementById('extension-drawer');
     this.btnCloseExtension = document.getElementById('btn-close-extension');
     this.extensionWebview = document.getElementById('extension-webview');
-
-    // Veo Auto Drawer
     this.btnToggleVeoAuto = document.getElementById('btn-toggle-veo-auto');
     this.veoAutoDrawer = document.getElementById('veo-auto-drawer');
     this.btnCloseVeoAuto = document.getElementById('btn-close-veo-auto');
@@ -92,18 +90,22 @@ class FlowBrowserApp {
 
     // Login Events
     this.loginForm.addEventListener('submit', (e) => this.handleLogin(e));
-    this.btnToggleConfig.addEventListener('click', () => {
-      this.serverConfigBox.classList.toggle('hidden');
-    });
-    this.btnSaveServerUrl.addEventListener('click', async () => {
-      const newUrl = this.inputServerUrl.value.trim();
-      if (newUrl) {
-        await window.electronAPI.saveServerUrl(newUrl);
-        this.config.serverUrl = newUrl;
-        this.serverConfigBox.classList.add('hidden');
-        this.notify('Server URL saved: ' + newUrl);
-      }
-    });
+    if (this.btnToggleConfig && this.serverConfigBox) {
+      this.btnToggleConfig.addEventListener('click', () => {
+        this.serverConfigBox.classList.toggle('hidden');
+      });
+    }
+    if (this.btnSaveServerUrl && this.inputServerUrl) {
+      this.btnSaveServerUrl.addEventListener('click', async () => {
+        const newUrl = this.inputServerUrl.value.trim();
+        if (newUrl) {
+          await window.electronAPI.saveServerUrl(newUrl);
+          this.config.serverUrl = newUrl;
+          this.serverConfigBox?.classList.add('hidden');
+          this.notify('Server URL saved: ' + newUrl);
+        }
+      });
+    }
 
     // Toolbar events
     this.serverSelect.addEventListener('change', () => this.handleServerSwitch());
@@ -301,8 +303,10 @@ class FlowBrowserApp {
       }
 
       this.config = await window.electronAPI.getConfig();
-      this.startDebugUrlPolling();
-      if (this.config && this.config.serverUrl) {
+      if (typeof this.startDebugUrlPolling === 'function' && this.debugUrlInput) {
+        this.startDebugUrlPolling();
+      }
+      if (this.inputServerUrl && this.config?.serverUrl) {
         this.inputServerUrl.value = this.config.serverUrl;
       }
 
@@ -682,21 +686,13 @@ class FlowBrowserApp {
     if (!url || url.includes('demo-flow') || url.startsWith('file:')) {
       url = 'https://flow.google.com/';
     }
-    this.showLoadingOverlay('Starting fresh sign-in...', url);
+    // Make Flow visible before navigate — collapsing WebView2 aborts loads (black page)
+    window.electronAPI.setShellMode?.('chrome');
+    this.showLoadingOverlay('Opening Flow...', url);
     this.updateDebugUrl(url);
     this.startDebugUrlPolling();
-    window.electronAPI.getWebviewPreloadPath?.().then((preloadPath) => {
-      if (preloadPath && this.webview) this.webview.setAttribute('preload', preloadPath);
-    }).catch(() => {});
 
-    // Hard reset guest so previous account UI cannot stick
-    try {
-      this.webview.stop?.();
-    } catch (e) {}
-    try {
-      this.webview.src = 'about:blank';
-    } catch (e) {}
-
+    // Do NOT navigate to about:blank first — that aborts the real load on many PCs
     setTimeout(() => {
       try {
         if (typeof this.webview.loadURL === 'function') this.webview.loadURL(url);
@@ -708,12 +704,12 @@ class FlowBrowserApp {
       setTimeout(() => this.sendCredentialsToWebview(true), 900);
       setTimeout(() => this.sendCredentialsToWebview(false), 2200);
       setTimeout(() => this.sendCredentialsToWebview(false), 4500);
-    }, 250);
+    }, 80);
 
     if (this._overlayTimeout) clearTimeout(this._overlayTimeout);
     this._overlayTimeout = setTimeout(() => {
       this.hideLoadingOverlay();
-    }, 5000);
+    }, 8000);
   }
 
   onWebviewDomReady() {

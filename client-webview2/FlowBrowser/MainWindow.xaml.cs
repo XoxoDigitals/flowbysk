@@ -11,7 +11,8 @@ namespace FlowBrowser;
 
 public partial class MainWindow : Window
 {
-    const double ChromeHeight = 80;
+    const double ChromeHeight = 88;
+    double _chromeHeight = 88;
     AppConfig _config = AppConfig.Load();
     string _flowUserData = "";
     string _shellUserData = "";
@@ -39,26 +40,9 @@ public partial class MainWindow : Window
         Loaded += async (_, _) => await InitAsync();
     }
 
-    string ResolveWwwRoot()
-    {
-        var baseDir = AppContext.BaseDirectory;
-        var candidates = new[]
-        {
-            Path.Combine(baseDir, "www"),
-            Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "www")),
-            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "www")
-        };
-        foreach (var c in candidates)
-        {
-            var shell = Path.Combine(c, "ui", "app-shell.html");
-            if (File.Exists(shell)) return c;
-        }
-        throw new DirectoryNotFoundException("www UI folder not found next to the executable.");
-    }
-
     async Task InitAsync()
     {
-        _wwwRoot = ResolveWwwRoot();
+        _wwwRoot = WwwExtractor.ResolveWwwRoot();
         // Strip UTF-8 BOM — WebView2 document-created scripts can fail oddly with BOM
         _flowInject = File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
 
@@ -265,14 +249,66 @@ public partial class MainWindow : Window
             else
             {
                 FlowView.Visibility = Visibility.Visible;
-                ShellView.Height = ChromeHeight;
+                ShellView.Height = _chromeHeight;
                 ShellView.VerticalAlignment = VerticalAlignment.Top;
                 ShellView.Margin = new Thickness(0);
-                FlowView.Margin = new Thickness(0, ChromeHeight, 0, 0);
+                FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
                 Panel.SetZIndex(ShellView, 2);
                 Panel.SetZIndex(FlowView, 1);
             }
         });
+    }
+
+    /// <summary>
+    /// Collapsed WebView2 aborts navigations (black about:blank page). Always show Flow first.
+    /// </summary>
+    async Task EnsureFlowReadyToNavigateAsync()
+    {
+        await Dispatcher.InvokeAsync(() =>
+        {
+            if (_shellMode == "full")
+            {
+                _shellMode = "chrome";
+                FlowView.Visibility = Visibility.Visible;
+                ShellView.Height = _chromeHeight;
+                ShellView.VerticalAlignment = VerticalAlignment.Top;
+                ShellView.Margin = new Thickness(0);
+                FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
+                Panel.SetZIndex(ShellView, 2);
+                Panel.SetZIndex(FlowView, 1);
+            }
+            else
+            {
+                FlowView.Visibility = Visibility.Visible;
+            }
+        });
+        await Task.Delay(60);
+    }
+
+    async Task NavigateFlowSafeAsync(string url)
+    {
+        try
+        {
+            await EnsureFlowReadyToNavigateAsync();
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (FlowView.CoreWebView2 == null) return;
+                FlowView.Visibility = Visibility.Visible;
+                FlowView.CoreWebView2.Navigate(url);
+            });
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("NavigateFlowSafe: " + ex.Message);
+            PostToShell(new
+            {
+                type = "flow-event",
+                @event = "did-fail-load",
+                url,
+                errorCode = -1,
+                errorDescription = ex.Message
+            });
+        }
     }
 
     void PostToShell(object payload)
@@ -631,7 +667,25 @@ public partial class MainWindow : Window
                 var url = root.TryGetProperty("url", out var u) ? u.GetString() : "about:blank";
                 if (string.IsNullOrWhiteSpace(url) || url.Contains("demo-flow") || url.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
                     url = "https://flow.google.com/";
-                FlowView.CoreWebView2?.Navigate(url);
+                // Skip useless blank navigations — they abort the next real load on some devices
+                if (string.Equals(url, "about:blank", StringComparison.OrdinalIgnoreCase))
+                    break;
+                _ = NavigateFlowSafeAsync(url);
+                break;
+            }
+            case "chromeHeight":
+            {
+                var h = root.TryGetProperty("height", out var hv) ? hv.GetDouble() : ChromeHeight;
+                if (h < 48) h = ChromeHeight;
+                _chromeHeight = h;
+                Dispatcher.Invoke(() =>
+                {
+                    if (_shellMode != "full")
+                    {
+                        ShellView.Height = _chromeHeight;
+                        FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
+                    }
+                });
                 break;
             }
             case "reload":

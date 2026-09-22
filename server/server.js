@@ -58,6 +58,14 @@ app.get('/api/public/branding', async (req, res) => {
   }
 });
 
+app.get('/api/public/notices', async (req, res) => {
+  try {
+    res.json({ success: true, notices: await db.getActiveNotices() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/download/flow-browser', async (req, res) => {
   await downloads.streamPackage('windows', res);
 });

@@ -28,6 +28,8 @@ type DownloadPackage = {
   size: number;
   updatedAt: string | null;
   contentType?: string | null;
+  externalUrl?: string | null;
+  source?: 'url' | 'file';
 } | null;
 
 type DownloadsState = {
@@ -100,7 +102,9 @@ export default function AdminSettingsPage() {
   const [social, setSocial] = useState<SocialLinks>({});
   const [notices, setNotices] = useState<Notice[]>([]);
   const [downloads, setDownloads] = useState<DownloadsState>({ windows: null, android: null });
+  const [downloadUrls, setDownloadUrls] = useState<{ windows: string; android: string }>({ windows: '', android: '' });
   const [uploading, setUploading] = useState<'windows' | 'android' | null>(null);
+  const [savingUrl, setSavingUrl] = useState<'windows' | 'android' | null>(null);
   const windowsInputRef = useRef<HTMLInputElement>(null);
   const androidInputRef = useRef<HTMLInputElement>(null);
   const [noticeTitle, setNoticeTitle] = useState('');
@@ -138,6 +142,10 @@ export default function AdminSettingsPage() {
       setDownloads({
         windows: downloadsData.downloads?.windows || null,
         android: downloadsData.downloads?.android || null,
+      });
+      setDownloadUrls({
+        windows: downloadsData.downloads?.windows?.externalUrl || '',
+        android: downloadsData.downloads?.android?.externalUrl || '',
       });
     }
   };
@@ -215,6 +223,10 @@ export default function AdminSettingsPage() {
         windows: data.downloads?.windows || null,
         android: data.downloads?.android || null,
       });
+      setDownloadUrls({
+        windows: data.downloads?.windows?.externalUrl || '',
+        android: data.downloads?.android?.externalUrl || '',
+      });
       setMessage(`${platform === 'windows' ? 'Windows' : 'Android'} package uploaded`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Upload failed');
@@ -237,7 +249,39 @@ export default function AdminSettingsPage() {
       windows: data.downloads?.windows || null,
       android: data.downloads?.android || null,
     });
+    setDownloadUrls((prev) => ({ ...prev, [platform]: '' }));
     setMessage(`${platform === 'windows' ? 'Windows' : 'Android'} package removed`);
+  };
+
+  const savePackageUrl = async (platform: 'windows' | 'android') => {
+    setSavingUrl(platform);
+    setError('');
+    setMessage('');
+    try {
+      const res = await flowFetch(`/api/admin/downloads/${platform}/url`, {
+        method: 'PUT',
+        body: JSON.stringify({ url: downloadUrls[platform].trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not save URL');
+      setDownloads({
+        windows: data.downloads?.windows || null,
+        android: data.downloads?.android || null,
+      });
+      setDownloadUrls({
+        windows: data.downloads?.windows?.externalUrl || '',
+        android: data.downloads?.android?.externalUrl || '',
+      });
+      setMessage(
+        downloadUrls[platform].trim()
+          ? `${platform === 'windows' ? 'Windows' : 'Android'} download URL saved`
+          : `${platform === 'windows' ? 'Windows' : 'Android'} download URL cleared`
+      );
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Could not save URL');
+    } finally {
+      setSavingUrl(null);
+    }
   };
 
   const publishNotice = async () => {
@@ -290,26 +334,38 @@ export default function AdminSettingsPage() {
     return (
       <div className="rounded-2xl border border-[var(--line)] px-4 py-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
+          <div className="min-w-0 flex-1">
             <div className="text-sm font-medium">{label}</div>
             <p className="mt-1 text-xs text-[var(--ink3)]">{hint}</p>
             {pkg ? (
               <dl className="mt-3 grid gap-1 text-sm text-[var(--ink2)]">
                 <div>
-                  <span className="text-[var(--ink3)]">File: </span>
-                  {pkg.originalName}
+                  <span className="text-[var(--ink3)]">Source: </span>
+                  {pkg.source === 'url' ? 'CDN / Drive URL' : 'Uploaded file'}
                 </div>
                 <div>
-                  <span className="text-[var(--ink3)]">Size: </span>
-                  {formatBytes(pkg.size)}
+                  <span className="text-[var(--ink3)]">Label: </span>
+                  {pkg.originalName}
                 </div>
+                {pkg.source !== 'url' && (
+                  <div>
+                    <span className="text-[var(--ink3)]">Size: </span>
+                    {formatBytes(pkg.size)}
+                  </div>
+                )}
+                {pkg.externalUrl && (
+                  <div className="break-all">
+                    <span className="text-[var(--ink3)]">URL: </span>
+                    {pkg.externalUrl}
+                  </div>
+                )}
                 <div>
                   <span className="text-[var(--ink3)]">Updated: </span>
                   {formatUpdated(pkg.updatedAt)}
                 </div>
               </dl>
             ) : (
-              <p className="mt-3 text-sm text-[var(--ink3)]">No file uploaded yet.</p>
+              <p className="mt-3 text-sm text-[var(--ink3)]">No file or URL set yet.</p>
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -327,23 +383,42 @@ export default function AdminSettingsPage() {
             <button
               type="button"
               className="btn-primary !px-3 !py-1.5 !text-xs"
-              disabled={uploading === platform}
+              disabled={uploading === platform || savingUrl === platform}
               onClick={() => inputRef.current?.click()}
             >
               <Upload className="h-3.5 w-3.5" />
-              {uploading === platform ? 'Uploading…' : pkg ? 'Replace' : 'Upload'}
+              {uploading === platform ? 'Uploading…' : pkg?.source === 'file' ? 'Replace file' : 'Upload file'}
             </button>
             {pkg && (
               <button
                 type="button"
                 className="btn-secondary !px-3 !py-1.5 !text-xs"
-                disabled={uploading === platform}
+                disabled={uploading === platform || savingUrl === platform}
                 onClick={() => void removePackage(platform)}
               >
                 Remove
               </button>
             )}
           </div>
+        </div>
+        <div className="mt-4 grid gap-2 border-t border-[var(--line)] pt-4">
+          <label className="text-xs text-[var(--ink3)]">
+            CDN / Google Drive URL (optional — used instead of upload)
+            <input
+              className={`${inputClass} mt-1`}
+              placeholder="https://cdn.example.com/Flow-Browser.exe"
+              value={downloadUrls[platform]}
+              onChange={(e) => setDownloadUrls((prev) => ({ ...prev, [platform]: e.target.value }))}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn-secondary self-start !px-3 !py-1.5 !text-xs"
+            disabled={uploading === platform || savingUrl === platform}
+            onClick={() => void savePackageUrl(platform)}
+          >
+            {savingUrl === platform ? 'Saving…' : 'Save URL'}
+          </button>
         </div>
       </div>
     );
@@ -434,8 +509,8 @@ export default function AdminSettingsPage() {
         <div>
           <h3 className="text-base font-semibold">Download file management</h3>
           <p className="mt-1 text-[13px] text-[var(--ink3)]">
-            Upload the Windows and Android installers yourself. These are what users get when they click Download on their overview.
-            Files are stored outside source code so a code push will not wipe them.
+            Upload a Windows/Android installer, or paste a CDN / Google Drive URL. Users get that package when they click Download on their overview.
+            Uploaded files are stored outside source code so a code push will not wipe them. Saving a URL replaces any uploaded file for that platform.
           </p>
         </div>
         <PackageCard

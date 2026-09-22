@@ -15,7 +15,7 @@ import SiteBrand from '@/components/SiteBrand';
 import AnnouncementSocialIcons from '@/components/AnnouncementSocialIcons';
 import { useTheme } from '@/components/ThemeProvider';
 import { useSiteSettings } from '@/components/SiteSettingsProvider';
-import { clearSession, flowFetch, readSession } from '@/lib/flowApi';
+import { clearSession, FLOW_API, flowFetch, readSession } from '@/lib/flowApi';
 
 interface UserData {
   id: string;
@@ -102,6 +102,22 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     fetchUser();
     const interval = setInterval(fetchUser, 15000);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${FLOW_API}/api/public/notices`)
+      .then(async (res) => {
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setNotices(Array.isArray(data.notices) ? data.notices : []);
+      })
+      .catch(() => {
+        if (!cancelled) setNotices([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleLogout = async () => {

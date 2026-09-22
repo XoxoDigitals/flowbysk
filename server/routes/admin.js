@@ -796,6 +796,28 @@ router.delete('/downloads/:platform', requireAdminAuth, async (req, res) => {
   }
 });
 
+router.put('/downloads/:platform/url', requireAdminAuth, async (req, res) => {
+  try {
+    const platform = String(req.params.platform || '').toLowerCase();
+    if (platform !== 'windows' && platform !== 'android') {
+      return res.status(400).json({ success: false, error: 'Platform must be windows or android' });
+    }
+    const entry = await downloads.setExternalUrl(platform, req.body?.url || '');
+    await db.addLog('admin', 'admin', 'set_download_url', {
+      platform,
+      externalUrl: entry?.externalUrl || null,
+    });
+    res.json({
+      success: true,
+      platform,
+      package: entry,
+      downloads: await downloads.getPublicAvailability(),
+    });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message || 'Could not save URL' });
+  }
+});
+
 router.get('/logs', requireAdminAuth, async (req, res) => {
   res.json({ success: true, logs: await db.getLogs(200) });
 });

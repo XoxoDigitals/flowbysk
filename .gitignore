@@ -12,3 +12,7 @@ dist-webview2/
 _recover/
 *.log
 .DS_Store
+
+# Build artifact from single-file embed
+**/www.zip
+

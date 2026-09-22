@@ -9,7 +9,8 @@
     <AssemblyName>Flow Browser</AssemblyName>
     <RootNamespace>FlowBrowser</RootNamespace>
     <ApplicationTitle>Flow Browser</ApplicationTitle>
-    <Version>2.0.0</Version>
+    <ApplicationIcon>FlowBrowser.ico</ApplicationIcon>
+    <Version>2.0.1</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,7 +18,26 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Resource Include="FlowBrowser.ico" />
+    <!-- Dev / folder-portable: copy www next to the binary -->
     <None Include="www\**\*" CopyToOutputDirectory="PreserveNewest" LinkBase="www" />
   </ItemGroup>
+
+  <!-- Zip www and embed so a single-file publish needs no sibling www folder -->
+  <Target Name="ZipWwwForEmbed" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <_WwwZip>$(MSBuildProjectDirectory)\www.zip</_WwwZip>
+    </PropertyGroup>
+    <Exec Command="powershell -NoProfile -Command &quot;if (Test-Path '$(_WwwZip)') { Remove-Item '$(_WwwZip)' -Force }; Compress-Archive -Path '$(MSBuildProjectDirectory)\www\*' -DestinationPath '$(_WwwZip)' -Force&quot;" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(_WwwZip)">
+        <LogicalName>FlowBrowser.www.zip</LogicalName>
+      </EmbeddedResource>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="CleanWwwZip" AfterTargets="Clean">
+    <Delete Files="$(MSBuildProjectDirectory)\www.zip" TreatErrorsAsWarnings="true" />
+  </Target>
 
 </Project>
