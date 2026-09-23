@@ -1774,8 +1774,43 @@ function dismissGoogleInterstitials() {
 
 
 // Workspace privacy — keep LIGHT (heavy style forcing freezes Flow → black screen)
+function isProtectedMediaNode(el) {
+  if (!el || !el.closest) return false;
+  try {
+    // Never hide generated media / gallery canvas — that made All media blank until reload
+    if (
+      el.closest(
+        'flow-media-card, flow-video-card, flow-image-card, flow-project-canvas, ' +
+        '[data-testid*="media"], [data-testid*="gallery"], [class*="media-card"], ' +
+        '[class*="MediaCard"], [class*="gallery"], video, canvas, img[src*="blob:"], ' +
+        'img[src*="googleusercontent"], [role="grid"], [role="list"]'
+      )
+    ) {
+      return true;
+    }
+    // Inside a project, protect the main content surface (where new gens paint)
+    if (/\/project\//i.test(location.pathname || '')) {
+      if (el.closest('main, [role="main"], flow-app, flow-project')) {
+        // Still allow hiding tiny chrome chips (ULTRA) / alerts inside main
+        const tag = (el.tagName || '').toLowerCase();
+        const t = ((el.innerText || el.getAttribute?.('aria-label') || '') + '').replace(/\s+/g, ' ').trim();
+        if (/^ultra$/i.test(t) && t.length <= 12) return false;
+        if (el.getAttribute?.('role') === 'alert' || el.getAttribute?.('role') === 'status') return false;
+        if (tag === 'button' || tag === 'a' || (tag === 'span' && el.childElementCount === 0)) {
+          if (/^ultra$/i.test(t) || /Add AI credits/i.test(t)) return false;
+        }
+        // Protect sizable nodes in the media pane
+        const r = el.getBoundingClientRect?.();
+        if (r && r.width > 80 && r.height > 80) return true;
+      }
+    }
+  } catch (e) {}
+  return false;
+}
+
 function hideEl(el) {
   if (!el || el === document.body || el === document.documentElement || el === document.head) return;
+  if (isProtectedMediaNode(el)) return;
   try {
     el.style.setProperty('display', 'none', 'important');
     el.style.setProperty('visibility', 'hidden', 'important');
@@ -1802,19 +1837,26 @@ function forceRenameLiteEverywhere() {
 
 function hideUltraControls() {
   try {
-    // Hide "ULTRA" model tier chips / toggles in Flow settings
-    document.querySelectorAll('button, [role="button"], [role="radio"], [role="tab"], span, div, label').forEach((el) => {
-      if (!el || el.getAttribute('data-flow-hidden') === '1') return;
-      if (el.childElementCount > 6) return;
-      const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (!t || t.length > 24) return;
-      if (!/^ultra$/i.test(t)) return;
-      const target =
-        el.closest('button, [role="button"], [role="radio"], [role="tab"], [role="option"], label') || el;
-      hideEl(target);
-    });
+    // Only prompt/settings chips — never walk every div (that blanked All media)
+    const roots = document.querySelectorAll(
+      'flow-prompt, [class*="prompt"], [class*="model"], [class*="settings"], [role="listbox"], [role="menu"], header'
+    );
+    const scan = (root) => {
+      root.querySelectorAll('button, [role="button"], [role="radio"], [role="tab"], [role="option"], label, span').forEach((el) => {
+        if (!el || el.getAttribute('data-flow-hidden') === '1') return;
+        if (el.childElementCount > 4) return;
+        const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!t || t.length > 16) return;
+        if (!/^ultra$/i.test(t)) return;
+        const target =
+          el.closest('button, [role="button"], [role="radio"], [role="tab"], [role="option"], label') || el;
+        hideEl(target);
+      });
+    };
+    if (!roots.length) return;
+    roots.forEach(scan);
   } catch (e) {}
 }
 
@@ -2003,7 +2045,10 @@ function maskFlowWorkspace() {
   hideTransientAccountUi();
   hideUltraControls();
   hideGalleryEditControls();
-  hideExistingProjects();
+  // Project canvas: never run project-card scrubbers / media date hide
+  if (!/\/project\//i.test(window.location.pathname || '')) {
+    hideExistingProjects();
+  }
   forceRenameLiteEverywhere();
   hideGoogleCreditsWarningBanner();
 }
@@ -2076,36 +2121,33 @@ function hideGoogleCreditsWarningBanner() {
         /running low on Google Flow credits/i.test(t) ||
         /You're running low on/i.test(t) ||
         /top up to get more/i.test(t) ||
-        /Add AI credits/i.test(t) ||
+        (/Add AI credits/i.test(t) && /Google Flow credits|top up|refresh/i.test(t)) ||
         (/Google Flow credits/i.test(t) && /wait until they refresh|top up|get more/i.test(t))
       );
     };
 
+    // Do NOT query every div — that walked the media gallery and blanked All media
     const candidates = document.querySelectorAll(
-      '[role="alert"], [role="status"], [role="dialog"], aside, section, div, banner'
+      '[role="alert"], [role="status"], [role="alertdialog"]'
     );
     candidates.forEach((el) => {
-      if (!el || el.tagName === 'BODY' || el.tagName === 'HTML' || el.tagName === 'MAIN' || el.tagName === 'NAV' || el.tagName === 'HEADER') return;
+      if (!el || el.tagName === 'BODY' || el.tagName === 'HTML') return;
       if (el.id === 'flow-generation-toast' || el.closest('#flow-generation-toast')) return;
-      if (el.querySelector('nav, aside, textarea, [contenteditable="true"], flow-prompt')) return;
+      if (isProtectedMediaNode(el)) return;
 
       const txt = (el.innerText || el.textContent || '').trim();
       if (!txt || txt.length > 420) return;
       if (!isCreditsNag(txt)) return;
-
-      const r = el.getBoundingClientRect();
-      // Prefer banner-sized nodes; still hide small "Add AI credits" chips
-      if (r.height > 220 && r.width > 900 && !/Add AI credits/i.test(txt)) return;
-
       hideEl(el);
     });
 
-    // Explicit CTA button
     document.querySelectorAll('button, a, [role="button"]').forEach((el) => {
+      if (isProtectedMediaNode(el)) return;
       const t = (el.innerText || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
-      if (/^Add AI credits$/i.test(t) || /Add AI credits/i.test(t)) {
-        hideEl(el.closest('[role="alert"], [role="status"], section, div') || el);
-      }
+      if (!/^Add AI credits$/i.test(t)) return;
+      const banner = el.closest('[role="alert"], [role="status"], [role="alertdialog"]');
+      if (banner) hideEl(banner);
+      else hideEl(el);
     });
   } catch (e) {}
 }
@@ -2153,6 +2195,12 @@ window.addEventListener('click', (e) => {
   const run = () => {
     if (onGoogleAuth()) return;
     try {
+      // Inside a project, keep the killer light — heavy scans blanked All media
+      if (/\/project\//i.test(location.pathname || '')) {
+        hideUltraControls();
+        hideGoogleCreditsWarningBanner();
+        return;
+      }
       killAccountPopupNow();
       hideExistingProjects();
       hideUltraControls();
@@ -2161,10 +2209,11 @@ window.addEventListener('click', (e) => {
   };
   const obs = new MutationObserver(() => {
     if (installAccountKillerObserver._t) return;
+    const delay = /\/project\//i.test(location.pathname || '') ? 600 : 120;
     installAccountKillerObserver._t = setTimeout(() => {
       installAccountKillerObserver._t = null;
       run();
-    }, 40);
+    }, delay);
   });
   const start = () => {
     if (!document.documentElement) return;
@@ -2287,7 +2336,7 @@ function initDomObserver() {
       scheduled = null;
       maskFlowWorkspace();
       enforceModelRestrictions();
-    }, 800);
+    }, /\/project\//i.test(location.pathname || '') ? 1600 : 800);
   });
 
   observer.observe(document.documentElement, {
