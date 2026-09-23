@@ -264,6 +264,16 @@ class FlowBrowserApp {
       this.updateDebugUrl(e.url);
       this.tryGoogleAutoFill(e.url);
       this.maybeStartFreshLoginAfterFlow(e.url);
+      // After Google OAuth, Flow sometimes lands on marketing /about (guest).
+      // Push into app root once — do not restart Google login.
+      try {
+        const href = String(e.url || '');
+        if (/flow\.google\.com\/about(?:\/|$|\?)/i.test(href) && !this._aboutRootBounced) {
+          this._aboutRootBounced = true;
+          console.warn('[AppShell] flow /about → root');
+          this.loadTargetInWebview('https://flow.google.com/');
+        }
+      } catch (err) {}
     });
 
     this.webview.addEventListener('did-navigate-in-page', (e) => {
@@ -775,6 +785,11 @@ class FlowBrowserApp {
 
   async checkAssignedAccountStillExists() {
     if (!this.config?.authToken || !this.config?.serverUrl) return;
+    // Never wipe / force-logout while Google OAuth is mid-flight
+    try {
+      const live = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || '');
+      if (/accounts\.google\.com/i.test(String(live || ''))) return;
+    } catch (e) {}
     try {
       const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/verify-session`, {
         method: 'POST',
@@ -786,14 +801,12 @@ class FlowBrowserApp {
       const data = await res.json().catch(() => ({}));
       if (!data || !data.success) {
         const code = data && data.code;
+        // Only explicit session codes — bare 401/403 during blips must not clear Google cookies
         if (
           code === 'SESSION_REPLACED' ||
           code === 'NO_CREDITS' ||
           code === 'FORCE_UPDATE' ||
-          code === 'PLAN_EXPIRED' ||
-          res.status === 401 ||
-          res.status === 403 ||
-          res.status === 410
+          code === 'PLAN_EXPIRED'
         ) {
           await this.forceLogout((data && data.error) || 'Please sign in again.');
         }

@@ -1299,6 +1299,17 @@ function runGoogleAutoLogin() {
   if (hostname.includes('flow.google.com') || hostname.includes('labs.google')) {
     removeAutoLoginOverlay();
     removeCaptchaBanner();
+    const path = (location.pathname || '').toLowerCase();
+    // Marketing /about after OAuth = session not fully attached. Enter app root once.
+    // Do NOT click Sign in (that restarts Google and loops).
+    if (path === '/about' || path.startsWith('/about/') || path === '/landing') {
+      if (!autoLoginState.submittedKeys.has('flow-about-root')) {
+        autoLoginState.submittedKeys.add('flow-about-root');
+        console.log('[Flow Preload] /about after auth → navigate to Flow root');
+        try { location.replace('https://flow.google.com/'); } catch (e) {}
+      }
+      return;
+    }
     const isWorkspace = !!(
       document.querySelector('flow-app, flow-app-root, flow-projects-page, [data-testid*="project"]') ||
       (document.querySelector('header, flow-app-header, [role="banner"]') &&
@@ -1309,11 +1320,7 @@ function runGoogleAutoLogin() {
       notifyAuthHost('auth:auto-login', { overlay: false, captcha: false, done: true });
       return;
     }
-    // Guest marketing CTAs only (not Sign in) — and only once, after a long settle.
-    const ctaBtn = buttonByLabel(/^(create with google flow|try in google flow)$/i);
-    if (ctaBtn && now - autoLoginState.lastActionTime > 8000 && !autoLoginState.submittedKeys.has('flow-cta')) {
-      clickOnce('flow-cta', ctaBtn);
-    }
+    // No guest CTAs — AppShell owns fresh Google login when needed
     return;
   }
 

@@ -234,6 +234,14 @@ public partial class MainWindow : Window
             {
                 e.Cancel = true;
                 Debug.WriteLine("[NavLock] blocked top-level: " + uri);
+                // During an active Google sign-in, NEVER force-redirect to Flow.
+                // Post-TOTP handoff often hits myaccount/oauth hosts; canceling + navigating
+                // to flow.google.com aborts cookies and loops ServiceLogin → /about → login.
+                if (_authLoginActive || _captchaActive || IsGoogleAuthRelatedUrl(cur))
+                {
+                    Debug.WriteLine("[NavLock] skip fallback during auth handoff");
+                    return;
+                }
                 var fallback = string.IsNullOrWhiteSpace(_flowCredTarget)
                     ? "https://flow.google.com/"
                     : _flowCredTarget!;
@@ -461,7 +469,8 @@ public partial class MainWindow : Window
         if (IsGoogleAuthRelatedUrl(url)) return true;
         if (IsCaptchaHelperHost(url)) return true;
 
-        // During Google sign-in, allow connectivity helpers as top-level (rare but needed)
+        // During Google sign-in, allow connectivity + account handoff hosts as top-level.
+        // Blocking myaccount/oauth here was aborting post-TOTP cookie set and looping login.
         if (_authLoginActive || _captchaActive)
         {
             try
@@ -469,10 +478,11 @@ public partial class MainWindow : Window
                 var host = new Uri(url).Host.ToLowerInvariant();
                 if (host == "youtube.com" || host.EndsWith(".youtube.com")) return true;
                 if (host == "google.com" || host == "www.google.com") return true;
+                if (host.Contains("myaccount.google.com")) return true;
+                if (host.Contains("oauth2.googleapis.com") || host.Contains("oauth.google.com")) return true;
                 if (host.Contains("mail.google.com")) return false;
                 if (host.Contains("drive.google.com")) return false;
                 if (host.Contains("docs.google.com")) return false;
-                if (host.Contains("myaccount.google.com")) return false;
             }
             catch { /* fall through */ }
         }
@@ -480,6 +490,7 @@ public partial class MainWindow : Window
         try
         {
             var host = new Uri(url).Host.ToLowerInvariant();
+            // Outside sticky auth, keep product surfaces blocked
             if (host.Contains("myaccount.google.com")) return false;
             if (host.Contains("mail.google.com")) return false;
             if (host.Contains("drive.google.com")) return false;
