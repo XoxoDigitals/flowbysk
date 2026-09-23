@@ -1777,6 +1777,17 @@ function dismissGoogleInterstitials() {
 function isProtectedMediaNode(el) {
   if (!el || !el.closest) return false;
   try {
+    // Always allow hiding known chrome targets (credits / ULTRA / account / projects grid)
+    if (
+      el.closest(
+        'flow-credit-banner, .credit-banner, .credit-banner-container, ' +
+        'flow-user-tier-chip, .tier-chip, .header-user-button, ' +
+        '.projects-grid, flow-menu-item.delete-button, ' +
+        '#gb, .boqOnegoogleliteOgbOneGoogleBar, [aria-label="Account details"]'
+      )
+    ) {
+      return false;
+    }
     // Never hide generated media / gallery canvas — that made All media blank until reload
     if (
       el.closest(
@@ -1795,9 +1806,10 @@ function isProtectedMediaNode(el) {
         const tag = (el.tagName || '').toLowerCase();
         const t = ((el.innerText || el.getAttribute?.('aria-label') || '') + '').replace(/\s+/g, ' ').trim();
         if (/^ultra$/i.test(t) && t.length <= 12) return false;
+        if (/ULTRA tier/i.test(t)) return false;
         if (el.getAttribute?.('role') === 'alert' || el.getAttribute?.('role') === 'status') return false;
         if (tag === 'button' || tag === 'a' || (tag === 'span' && el.childElementCount === 0)) {
-          if (/^ultra$/i.test(t) || /Add AI credits/i.test(t)) return false;
+          if (/^ultra$/i.test(t) || /Add AI credits/i.test(t) || /Delete all projects/i.test(t)) return false;
         }
         // Protect sizable nodes in the media pane
         const r = el.getBoundingClientRect?.();
@@ -1835,11 +1847,40 @@ function forceRenameLiteEverywhere() {
   // Model renaming disabled
 }
 
+function hideFlowChromeTargets() {
+  try {
+    const sels = [
+      '.projects-grid',
+      'flow-menu-item.delete-button',
+      'flow-credit-banner',
+      '.credit-banner',
+      '.credit-banner-container',
+      'flow-user-tier-chip',
+      '.tier-chip',
+      '.header-user-button',
+      '[aria-label="Account details"]',
+      '[aria-label="ULTRA tier"]',
+      '#gb',
+      '.boqOnegoogleliteOgbOneGoogleBar',
+      '.account-switcher-placeholder'
+    ];
+    sels.forEach((sel) => {
+      document.querySelectorAll(sel).forEach((el) => hideEl(el));
+    });
+    // Menu row by label
+    document.querySelectorAll('flow-menu-item, button[mat-menu-item], [role="menuitem"]').forEach((el) => {
+      const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (/delete all projects/i.test(t)) hideEl(el.closest('flow-menu-item') || el);
+    });
+  } catch (e) {}
+}
+
 function hideUltraControls() {
   try {
+    hideFlowChromeTargets();
     // Only prompt/settings chips — never walk every div (that blanked All media)
     const roots = document.querySelectorAll(
-      'flow-prompt, [class*="prompt"], [class*="model"], [class*="settings"], [role="listbox"], [role="menu"], header'
+      'flow-prompt, [class*="prompt"], [class*="model"], [class*="settings"], [role="listbox"], [role="menu"], header, flow-user-tier-chip'
     );
     const scan = (root) => {
       root.querySelectorAll('button, [role="button"], [role="radio"], [role="tab"], [role="option"], label, span').forEach((el) => {
@@ -1848,10 +1889,10 @@ function hideUltraControls() {
         const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '')
           .replace(/\s+/g, ' ')
           .trim();
-        if (!t || t.length > 16) return;
-        if (!/^ultra$/i.test(t)) return;
+        if (!t || t.length > 24) return;
+        if (!/^ultra$/i.test(t) && !/ULTRA tier/i.test(t)) return;
         const target =
-          el.closest('button, [role="button"], [role="radio"], [role="tab"], [role="option"], label') || el;
+          el.closest('flow-user-tier-chip, button, [role="button"], [role="radio"], [role="tab"], [role="option"], label') || el;
         hideEl(target);
       });
     };
@@ -2043,6 +2084,7 @@ function maskFlowWorkspace() {
 
   hideAccountPrivacyPanels();
   hideTransientAccountUi();
+  hideFlowChromeTargets();
   hideUltraControls();
   hideGalleryEditControls();
   // Project canvas: never run project-card scrubbers / media date hide
@@ -2113,6 +2155,7 @@ function hideGalleryEditControls() {
 // Hide Google Flow internal low credits warning banner (safely without touching parents/sidebar)
 function hideGoogleCreditsWarningBanner() {
   try {
+    document.querySelectorAll('flow-credit-banner, .credit-banner, .credit-banner-container').forEach((el) => hideEl(el));
     const isCreditsNag = (txt) => {
       const t = String(txt || '');
       if (!t) return false;
@@ -2128,26 +2171,20 @@ function hideGoogleCreditsWarningBanner() {
 
     // Do NOT query every div — that walked the media gallery and blanked All media
     const candidates = document.querySelectorAll(
-      '[role="alert"], [role="status"], [role="alertdialog"]'
+      '[role="alert"], [role="status"], [role="alertdialog"], flow-credit-banner'
     );
     candidates.forEach((el) => {
       if (!el || el.tagName === 'BODY' || el.tagName === 'HTML') return;
       if (el.id === 'flow-generation-toast' || el.closest('#flow-generation-toast')) return;
-      if (isProtectedMediaNode(el)) return;
 
       const txt = (el.innerText || el.textContent || '').trim();
       if (!txt || txt.length > 420) return;
-      if (!isCreditsNag(txt)) return;
+      if (!isCreditsNag(txt) && el.tagName !== 'FLOW-CREDIT-BANNER') return;
       hideEl(el);
     });
 
-    document.querySelectorAll('button, a, [role="button"]').forEach((el) => {
-      if (isProtectedMediaNode(el)) return;
-      const t = (el.innerText || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
-      if (!/^Add AI credits$/i.test(t)) return;
-      const banner = el.closest('[role="alert"], [role="status"], [role="alertdialog"]');
-      if (banner) hideEl(banner);
-      else hideEl(el);
+    document.querySelectorAll('a.credit-banner-cta, button.credit-banner-dismiss').forEach((el) => {
+      hideEl(el.closest('flow-credit-banner, .credit-banner-container') || el);
     });
   } catch (e) {}
 }
@@ -2197,12 +2234,14 @@ window.addEventListener('click', (e) => {
     try {
       // Inside a project, keep the killer light — heavy scans blanked All media
       if (/\/project\//i.test(location.pathname || '')) {
+        hideFlowChromeTargets();
         hideUltraControls();
         hideGoogleCreditsWarningBanner();
         return;
       }
       killAccountPopupNow();
       hideExistingProjects();
+      hideFlowChromeTargets();
       hideUltraControls();
       hideGoogleCreditsWarningBanner();
     } catch (e) {}
@@ -2242,25 +2281,88 @@ function applyCssRules() {
   }
 
   let css = `
-    /* Profile / account chrome */
+    /* Home: hide existing projects grid */
+    .projects-grid,
+    .projects-grid * {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      height: 0 !important;
+      max-height: 0 !important;
+      overflow: hidden !important;
+      opacity: 0 !important;
+    }
+
+    /* Delete all projects menu row */
+    flow-menu-item.delete-button,
+    flow-menu-item.delete-button button,
+    button.flow-internal-menu-item:has(.label),
+    [role="menuitem"]:has(.label) {
+      /* JS also matches label text; CSS targets known class */
+    }
+    flow-menu-item.delete-button {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      height: 0 !important;
+      max-height: 0 !important;
+      opacity: 0 !important;
+    }
+
+    /* Google Flow credits banner */
+    flow-credit-banner,
+    .credit-banner,
+    .credit-banner-container,
+    .credit-banner-error,
+    .credit-banner-cta,
+    a.credit-banner-cta {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      height: 0 !important;
+      max-height: 0 !important;
+      overflow: hidden !important;
+      opacity: 0 !important;
+    }
+
+    /* ULTRA tier chip */
+    flow-user-tier-chip,
+    .tier-chip,
+    [aria-label="ULTRA tier"],
+    [aria-label*="ULTRA tier" i] {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      width: 0 !important;
+      height: 0 !important;
+      overflow: hidden !important;
+      opacity: 0 !important;
+    }
+
+    /* Account details / Google avatar switcher */
+    .header-user-button,
+    [aria-label="Account details"],
+    .account-switcher-placeholder,
+    #gb,
+    .boqOnegoogleliteOgbOneGoogleBar,
     header [aria-label*="Google Account" i],
     header [aria-label*="Account menu" i],
     header a[href*="myaccount.google.com"],
     header button[aria-label*="Manage your Google Account" i],
     header button[aria-label*="Account" i],
-    header img[src*="googleusercontent.com"] {
+    header img[src*="googleusercontent.com"],
+    a.gb_C[aria-label*="Google Account" i],
+    img.gb_X.gbii {
       display: none !important;
       visibility: hidden !important;
       pointer-events: none !important;
+      width: 0 !important;
+      height: 0 !important;
+      overflow: hidden !important;
+      opacity: 0 !important;
     }
 
-    /* Google Flow credits nag + Add AI credits CTA */
-    [role="alert"],
-    [role="status"] {
-      /* filtered in JS; keep selectors for common credit copy via attribute tricks below */
-    }
-
-    /* Hide ULTRA tier chips (exact-label match via JS; CSS backup for common patterns) */
+    /* Hide ULTRA model picker chips */
     button[aria-label="Ultra" i],
     button[aria-label*="Ultra model" i],
     [role="radio"][aria-label="Ultra" i],
