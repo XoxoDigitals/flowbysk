@@ -44,6 +44,11 @@ public partial class MainWindow : Window
     const int AuthUiCover = 1;
     const int AuthUiCaptcha = 2;
 
+    /// <summary>DEBUG: leave Google login visible — no sticky cover / captcha banner.</summary>
+    const bool DebugDisableAuthOverlay = false;
+    /// <summary>DEBUG: fill fields only — never auto-click Next / CDP clicks.</summary>
+    const bool DebugFillOnlyNoClicks = false;
+
     static readonly IntPtr HwndaTop = new(0);
     const uint SwpNomove = 0x0002;
     const uint SwpNosize = 0x0001;
@@ -307,6 +312,12 @@ public partial class MainWindow : Window
                 return;
             }
             Debug.WriteLine("[NavLock] blocked popup: " + e.Uri);
+            // During Google sign-in / TOTP, never yank the tab to Flow (aborts Next handoff).
+            if (_authLoginActive || _captchaActive || IsGoogleAuthRelatedUrl(cur))
+            {
+                Debug.WriteLine("[NavLock] skip popup fallback during auth handoff");
+                return;
+            }
             var fallback = string.IsNullOrWhiteSpace(_flowCredTarget)
                 ? "https://flow.google.com/"
                 : _flowCredTarget!;
@@ -552,6 +563,12 @@ public partial class MainWindow : Window
 
         if (IsGoogleAuthRelatedUrl(url) && !IsGoogleLogoutUrl(url))
         {
+            // CheckCookie / LoginDone = auth finished; do not keep sticky cover forever.
+            if (IsGoogleLoginDoneUrl(url))
+            {
+                _ = FinishCheckCookieHandoffAsync(url);
+                return;
+            }
             _authLoginActive = true;
             _onGoogleAuth = true;
             // Resume cover on normal sign-in steps after leaving /challenge/recaptcha
@@ -601,6 +618,58 @@ public partial class MainWindow : Window
     static bool IsAboutBlank(string? url) =>
         !string.IsNullOrWhiteSpace(url) &&
         url.StartsWith("about:", StringComparison.OrdinalIgnoreCase);
+
+    static bool IsGoogleLoginDoneUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        var u = url;
+        return u.Contains("CheckCookie", StringComparison.OrdinalIgnoreCase)
+               || u.Contains("LoginDoneHtml", StringComparison.OrdinalIgnoreCase)
+               || u.Contains("chtml=LoginDone", StringComparison.OrdinalIgnoreCase);
+    }
+
+    long _checkCookieHandoffMs;
+
+    async Task FinishCheckCookieHandoffAsync(string? url)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (now - _checkCookieHandoffMs < 4000) return;
+        _checkCookieHandoffMs = now;
+
+        var dest = string.IsNullOrWhiteSpace(_flowCredTarget)
+            ? "https://flow.google.com/"
+            : _flowCredTarget!;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(url))
+            {
+                var uri = new Uri(url);
+                // Manual query parse — avoid System.Web dependency
+                foreach (var part in (uri.Query ?? "").TrimStart('?').Split('&'))
+                {
+                    var eq = part.IndexOf('=');
+                    if (eq <= 0) continue;
+                    var key = Uri.UnescapeDataString(part[..eq]);
+                    if (!string.Equals(key, "continue", StringComparison.OrdinalIgnoreCase)) continue;
+                    var val = Uri.UnescapeDataString(part[(eq + 1)..]);
+                    if (val.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                    {
+                        dest = val;
+                        break;
+                    }
+                }
+            }
+        }
+        catch { /* keep dest */ }
+
+        Debug.WriteLine("[AuthOverlay] CheckCookie/LoginDone → " + dest);
+        _captchaActive = false;
+        _onGoogleAuth = false;
+        _authLoginActive = false;
+        ApplyAuthOverlayState();
+        await Task.Delay(400);
+        await NavigateFlowSafeAsync(dest);
+    }
 
     /// <summary>
     /// Captcha / recaptcha URL — disable top-level nav lock so helper redirects can complete.
@@ -748,7 +817,9 @@ public partial class MainWindow : Window
             SyncOverlayMargins();
 
             int want;
-            if (_shellMode == "full" || WindowState == WindowState.Minimized)
+            if (DebugDisableAuthOverlay)
+                want = AuthUiOff;
+            else if (_shellMode == "full" || WindowState == WindowState.Minimized)
                 want = AuthUiOff;
             else if ((_authLoginActive || _onGoogleAuth) && _captchaActive)
                 want = AuthUiCaptcha;
@@ -1097,7 +1168,8 @@ public partial class MainWindow : Window
         if (FlowView.CoreWebView2 == null) return;
         if (string.IsNullOrWhiteSpace(_flowCredEmail)) return;
         var src = FlowView.CoreWebView2.Source ?? "";
-        if (!src.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase)) return;
+        if (!src.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase) &&
+            !src.Contains("accounts.youtube.com", StringComparison.OrdinalIgnoreCase)) return;
         if (_captchaActive || IsGoogleRecaptchaChallengeUrl(src)) return;
         var email = JsString(_flowCredEmail);
         var password = JsString(_flowCredPassword ?? "");
@@ -1140,7 +1212,7 @@ public partial class MainWindow : Window
     return (el.value || '') === val || (el.value || '').toLowerCase() === String(val).toLowerCase();
   }};
   const clickNext = () => {{
-    const next = document.querySelector('#identifierNext button, #identifierNext, #passwordNext button, #passwordNext') ||
+    const next = document.querySelector('#identifierNext button, #identifierNext, #passwordNext button, #passwordNext, #totpNext button, #totpNext') ||
       Array.from(document.querySelectorAll('button')).find(b => /^\\s*next\\s*$/i.test((b.innerText || b.textContent || '')));
     if (!next || !visible(next)) return false;
     try {{ next.removeAttribute('disabled'); next.setAttribute('aria-disabled','false'); }} catch (e) {{}}
@@ -1153,6 +1225,12 @@ public partial class MainWindow : Window
     try {{ document.getElementById('__flow_host_ol__')?.remove(); }} catch (e) {{}}
     try {{ document.getElementById('__flow_host_ol_style__')?.remove(); }} catch (e) {{}}
   }} catch (e) {{}}
+
+  // TOTP / SetSID — do not re-fill email/password; Next is handled by FillTotp / inject
+  const totpEl = document.querySelector('input[name=""totpPin""], input#totpPin, input[autocomplete=""one-time-code""]');
+  if (totpEl && visible(totpEl)) {{
+    return {{ ok:true, step:'totp-wait', path }};
+  }}
 
   const pwd = Array.from(document.querySelectorAll('input[name=""Passwd""], input[type=""password""], input[autocomplete*=""current-password""]')).find(el => visible(el));
   if (pwd && password) {{
@@ -1308,7 +1386,11 @@ public partial class MainWindow : Window
             if (FlowView.CoreWebView2 == null) return;
             if (string.IsNullOrWhiteSpace(otp)) return;
             var src = FlowView.CoreWebView2.Source ?? "";
-            if (!src.Contains("challenge/totp", StringComparison.OrdinalIgnoreCase)) return;
+            // TOTP UI also appears on accounts.youtube.com/SetSID (no /challenge/totp in URL)
+            var looksAuthHost =
+                src.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase) ||
+                src.Contains("accounts.youtube.com", StringComparison.OrdinalIgnoreCase);
+            if (!looksAuthHost) return;
             var code = JsString(otp);
             var script = $@"(() => {{
   const otp = {code};
@@ -1319,24 +1401,29 @@ public partial class MainWindow : Window
   }};
   const el = document.querySelector('input[name=""totpPin""], input#totpPin') ||
     Array.from(document.querySelectorAll('input')).find(i => {{
-      if (!visible(i) || i.type === 'hidden' || i.type === 'checkbox') return false;
+      if (!visible(i) || i.type === 'hidden' || i.type === 'checkbox' || i.type === 'password') return false;
       const b = ((i.getAttribute('aria-label')||'') + ' ' + (i.placeholder||'') + ' ' + (i.name||'')).toLowerCase();
-      return /code|totp|otp/.test(b);
+      return /code|totp|otp/.test(b) || i.autocomplete === 'one-time-code';
     }});
   if (!el) return 'no-input';
-  if ((el.value || '') === otp) return 'already';
-  const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-  const setter = desc && desc.set;
-  try {{ el.focus(); }} catch (e) {{}}
-  if (setter) setter.call(el, otp); else el.value = otp;
-  el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-  el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  const already = (el.value || '').replace(/\s+/g,'') === String(otp).replace(/\s+/g,'');
+  if (!already) {{
+    const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+    const setter = desc && desc.set;
+    try {{ el.focus(); }} catch (e) {{}}
+    if (setter) setter.call(el, otp); else el.value = otp;
+    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  }}
   setTimeout(() => {{
     const btn = document.querySelector('#totpNext button, #totpNext') ||
       Array.from(document.querySelectorAll('button')).find(b => /^\\s*next\\s*$/i.test((b.innerText || '').trim()));
-    if (btn) {{ try {{ btn.click(); }} catch (e) {{}} }}
+    if (btn) {{
+      try {{ btn.removeAttribute('disabled'); btn.setAttribute('aria-disabled','false'); }} catch (e) {{}}
+      try {{ btn.click(); }} catch (e) {{}}
+    }}
   }}, 1500);
-  return 'filled:' + (el.value || '').length;
+  return (already ? 'already-click:' : 'filled:') + (el.value || '').length;
 }})()";
             var result = await FlowView.CoreWebView2.ExecuteScriptAsync(script);
             Debug.WriteLine("[FillTotp] " + result);
@@ -1348,6 +1435,11 @@ public partial class MainWindow : Window
     }
     async Task CdpMouseClickAsync(double x, double y)
     {
+        if (DebugFillOnlyNoClicks)
+        {
+            Debug.WriteLine($"[CdpClick] skipped (fill-only debug) {x},{y}");
+            return;
+        }
         try
         {
             if (FlowView.CoreWebView2 == null) return;

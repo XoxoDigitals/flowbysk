@@ -23,7 +23,13 @@ async function requireUserAuth(req, res, next) {
       return res.status(401).json({ success: false, error: 'User not found' });
     }
     if (!user.isActive || user.banned) {
-      return res.status(403).json({ success: false, error: 'Your account has been deactivated by administrator.' });
+      return res.status(403).json({
+        success: false,
+        code: user.banned ? 'BANNED' : 'FORCE_UPDATE',
+        error: user.banned
+          ? 'Your account has been banned by administrator.'
+          : 'Your account has been deactivated by administrator.',
+      });
     }
     const tokenSv = decoded.sv;
     const currentSv = Number(user.sessionVersion) || 0;

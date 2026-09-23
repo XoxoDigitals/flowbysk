@@ -299,6 +299,9 @@ router.put('/users/:id/ban', requireResellerAuth, async (req, res) => {
     banned,
     banReason: req.body?.reason || '',
   });
+  if (banned) {
+    await db.forceLogoutAndWipe(existing.id);
+  }
   await db.addLog(req.reseller.id, req.reseller.username, banned ? 'ban_user' : 'unban_user', {
     targetUserId: updated.id,
     targetUsername: updated.username,

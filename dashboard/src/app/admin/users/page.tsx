@@ -207,6 +207,18 @@ export default function AdminUsersPage() {
     await load();
   };
 
+  const forceLogout = async (u: FlowUser) => {
+    if (!confirm(`Force logout "${u.username}" and clear Google cookies on their device?`)) return;
+    const res = await flowFetch(`/api/admin/users/${u.id}/force-logout`, { method: 'POST', body: '{}' });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      setError(data.error || 'Force logout failed');
+      return;
+    }
+    setError('');
+    alert(data.message || `Revoked ${u.username}`);
+  };
+
   const remove = async (u: FlowUser) => {
     if (!confirm(`Delete user ${u.username}?`)) return;
     const res = await flowFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
@@ -579,6 +591,14 @@ export default function AdminUsersPage() {
                         onClick={() => toggleBan(u)}
                       >
                         {u.banned ? 'Unban' : 'Ban'}
+                      </button>
+                      <button
+                        type="button"
+                        className="mr-2 text-xs text-sky-400 hover:underline"
+                        onClick={() => forceLogout(u)}
+                        title="Revoke session and clear Google cookies"
+                      >
+                        Force logout
                       </button>
                       <button
                         type="button"

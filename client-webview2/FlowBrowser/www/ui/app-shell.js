@@ -251,7 +251,7 @@ class FlowBrowserApp {
       console.log('[Webview] did-finish-load, URL:', u);
       this.updateDebugUrl(u);
       // Keep shell overlay while Google auto-login / captcha chrome is active
-      const onGoogle = /accounts\.google\.com/i.test(String(u || ''));
+      const onGoogle = /accounts\.google\.com|accounts\.youtube\.com/i.test(String(u || ''));
       if (u && u !== 'about:blank' && !onGoogle && !this._captchaActive) {
         this.hideLoadingOverlay();
       }
@@ -264,21 +264,13 @@ class FlowBrowserApp {
       this.updateDebugUrl(e.url);
       this.tryGoogleAutoFill(e.url);
       this.maybeStartFreshLoginAfterFlow(e.url);
-      // After Google OAuth, Flow sometimes lands on marketing /about (guest).
-      // Push into app root once — do not restart Google login.
-      try {
-        const href = String(e.url || '');
-        if (/flow\.google\.com\/about(?:\/|$|\?)/i.test(href) && !this._aboutRootBounced) {
-          this._aboutRootBounced = true;
-          console.warn('[AppShell] flow /about → root');
-          this.loadTargetInWebview('https://flow.google.com/');
-        }
-      } catch (err) {}
+      this.maybeFinishGoogleCheckCookie(e.url);
     });
 
     this.webview.addEventListener('did-navigate-in-page', (e) => {
       this.updateDebugUrl(e.url);
       this.tryGoogleAutoFill(e.url);
+      this.maybeFinishGoogleCheckCookie(e.url);
     });
 
     this.webview.addEventListener('page-title-updated', (e) => {
@@ -319,7 +311,6 @@ class FlowBrowserApp {
   async bootstrap() {
     try {
       window.electronAPI.setShellMode?.('full');
-      this.showLoginScreen();
 
       // Ensure webview preload uses an absolute path (relative paths break in packaged exe)
       try {
@@ -352,8 +343,12 @@ class FlowBrowserApp {
         this.inputUsername.value = 'user1';
       }
 
-      // Always ask for account details on open. Google cookies stay in the Flow profile.
+      // Prefer saved session (v2 verify) — only show login if token missing / rejected
       this.hideLoadingOverlay();
+      if (this.config.authToken) {
+        const ok = await this.verifyExistingSession();
+        if (ok) return;
+      }
       this.showLoginScreen();
     } catch (err) {
       console.error('[Bootstrap Error]', err);
@@ -416,7 +411,7 @@ class FlowBrowserApp {
         return true;
       } else {
         const code = data && data.code;
-        if (code === 'SESSION_REPLACED' || code === 'NO_CREDITS' || code === 'FORCE_UPDATE' || code === 'PLAN_EXPIRED') {
+        if (code === 'SESSION_REPLACED' || code === 'NO_CREDITS' || code === 'FORCE_UPDATE' || code === 'BANNED' || code === 'PLAN_EXPIRED') {
           await this.forceLogout(data.error || 'Please sign in again.');
           return false;
         }
@@ -472,7 +467,7 @@ class FlowBrowserApp {
         this.hideLoginScreen();
         this.startAssignmentWatch();
 
-        if ((data.user.credits || 0) <= 0) {
+        if ((Number(data.user.credits) || 0) <= 0) {
           this.showLoginScreen();
           this.showLoginError('You have no credits left. Please renew your credits to continue.');
           return;
@@ -715,7 +710,7 @@ class FlowBrowserApp {
     if (!mustWipe) return false;
 
     console.warn('[AppShell] Wiping Google session on login', {
-      prevIdMissing, reassigned, emailChanged, firstAssignWithUnknownPast, prevId, nextId
+      prevIdMissing, reassigned, emailChanged, prevId, nextId
     });
     this.notify(
       prevIdMissing
@@ -729,6 +724,8 @@ class FlowBrowserApp {
     this._pendingFreshLogin = true;
     this._pendingFreshLoginAt = Date.now();
     this._freshLoginStarted = false;
+    this._checkCookieBounced = false;
+    this._allowFlowAfterCheckCookie = false;
     this._lastAutoFillKey = null;
     this.activeServer = activeServer || null;
     if (this.config) this.config.activeServer = this.activeServer;
@@ -788,7 +785,7 @@ class FlowBrowserApp {
     // Never wipe / force-logout while Google OAuth is mid-flight
     try {
       const live = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || '');
-      if (/accounts\.google\.com/i.test(String(live || ''))) return;
+      if (/accounts\.google\.com|accounts\.youtube\.com/i.test(String(live || ''))) return;
     } catch (e) {}
     try {
       const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/verify-session`, {
@@ -806,6 +803,7 @@ class FlowBrowserApp {
           code === 'SESSION_REPLACED' ||
           code === 'NO_CREDITS' ||
           code === 'FORCE_UPDATE' ||
+          code === 'BANNED' ||
           code === 'PLAN_EXPIRED'
         ) {
           await this.forceLogout((data && data.error) || 'Please sign in again.');
@@ -870,7 +868,10 @@ class FlowBrowserApp {
 
   updateToolbarUserInfo() {
     if (!this.currentUser) return;
-    this.creditsVal.textContent = (this.currentUser.credits || 0).toLocaleString();
+    // Negative credits allowed server-side — UI shows/gates as 0
+    const raw = Number(this.currentUser.credits);
+    const shown = Number.isFinite(raw) ? Math.max(0, raw) : 0;
+    this.creditsVal.textContent = shown.toLocaleString();
 
     const expiry = new Date(this.currentUser.planExpiry);
     const diffDays = Math.ceil((expiry.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
@@ -1084,6 +1085,33 @@ class FlowBrowserApp {
    * After switching servers we land on flow.google.com first, then start
    * exactly one fresh Google Sign-in in the main webview (no popup).
    */
+  /**
+   * Google CheckCookie / LoginDoneHtml often stalls under the auth cover.
+   * Finish handoff by navigating to continue= (Flow) and clearing the overlay.
+   */
+  maybeFinishGoogleCheckCookie(url) {
+    const href = String(url || '');
+    if (!/CheckCookie|LoginDoneHtml|chtml=LoginDone/i.test(href)) return;
+    if (this._checkCookieBounced) return;
+    this._checkCookieBounced = true;
+    let dest = (this.activeServer?.targetUrl || 'https://flow.google.com').replace(/\/?$/, '/');
+    try {
+      const cont = new URL(href).searchParams.get('continue');
+      if (cont && /^https:\/\//i.test(cont)) dest = cont;
+    } catch (e) {}
+    console.warn('[AppShell] CheckCookie/LoginDone →', dest);
+    this._totpFilling = false;
+    this._pendingFreshLogin = false;
+    this._freshLoginStarted = true;
+    this._allowFlowAfterCheckCookie = true;
+    this.hideGoogleAuthBanner();
+    this.hideLoadingOverlay();
+    this.postAuthOverlay({ show: false, done: true });
+    setTimeout(() => {
+      this.loadTargetInWebview(dest);
+    }, 400);
+  }
+
   maybeStartFreshLoginAfterFlow(url) {
     if (!this._pendingFreshLogin) return;
     const href = String(url || '');
@@ -1175,7 +1203,7 @@ class FlowBrowserApp {
         const live = this.webview.getURL ? this.webview.getURL() : this.webview.src;
         if (!live) return;
         this.updateDebugUrl(live);
-        if (!/accounts\.google\.com/i.test(live)) return;
+        if (!/accounts\.google\.com|accounts\.youtube\.com/i.test(live)) return;
 
         // Recaptcha challenge — no fills, no overlays, keep cover lifted
         if (/challenge\/recaptcha|\/recaptcha/i.test(live)) {
@@ -1209,7 +1237,7 @@ class FlowBrowserApp {
         }
 
         if (!this.activeServer?.email) return;
-        if (/challenge\/totp/i.test(live)) {
+        if (/challenge\/totp|accounts\.youtube\.com\/accounts\/SetSID/i.test(live)) {
           this._totpFilling = true;
           this.postAuthOverlay({ show: true, captcha: false });
           this.pushTotpFromBackend();
@@ -1231,9 +1259,26 @@ class FlowBrowserApp {
     if (!url || url.includes('demo-flow') || url.startsWith('file:')) {
       url = 'https://flow.google.com/';
     }
+    // Never yank the tab to Flow while Google TOTP / sign-in is still open —
+    // EXCEPT CheckCookie/LoginDone (login finished; continue= must reach Flow).
+    try {
+      const live = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || '');
+      const onGoogleAuth = /accounts\.google\.com|accounts\.youtube\.com/i.test(String(live || ''));
+      const goingToFlow = /flow\.google\.com|labs\.google/i.test(String(url || ''));
+      const onLoginDone = /CheckCookie|LoginDoneHtml|chtml=LoginDone/i.test(String(live || ''));
+      if (onGoogleAuth && (goingToFlow || this._totpFilling) && !onLoginDone && !this._allowFlowAfterCheckCookie) {
+        console.warn('[AppShell] skip navigate while Google auth/TOTP active:', url);
+        return;
+      }
+    } catch (e) {}
     // Only Flow workspace + Google login — block mail/drive/myaccount/etc.
     if (!this.isAllowedFlowUrl(url)) {
       console.warn('[AppShell] Blocked navigation to', url);
+      // Mid-auth: do not rewrite blocked handoff hosts to Flow
+      if (this._totpFilling || this._captchaActive) {
+        console.warn('[AppShell] keep current page during auth (blocked url)', url);
+        return;
+      }
       url = this.activeServer?.targetUrl || 'https://flow.google.com/';
     }
     // Never force chrome while the Flow Creator login screen is open (clips UI + traps overlay)
@@ -1337,7 +1382,7 @@ class FlowBrowserApp {
       const password = ${JSON.stringify(password)};
       const st = window.__flowFill = window.__flowFill || {};
       const path = location.pathname || '';
-      if (!/accounts\\.google\\.com/i.test(location.hostname || '')) return { ok:false, reason:'not-google' };
+      if (!/accounts\\.google\\.com|accounts\\.youtube\\.com/i.test(location.hostname || '')) return { ok:false, reason:'not-google' };
       if (/recaptcha/i.test(path)) return { ok:false, reason:'recaptcha' };
       try { if (typeof window.__flowApplyCreds === 'function') window.__flowApplyCreds({ email, password, forceReset: false }); } catch (e) {}
 
@@ -1362,6 +1407,7 @@ class FlowBrowserApp {
         let next = null;
         if (kind === 'password') next = document.querySelector('#passwordNext button, #passwordNext');
         else if (kind === 'identifier') next = document.querySelector('#identifierNext button, #identifierNext');
+        else if (kind === 'totp') next = document.querySelector('#totpNext button, #totpNext');
         if (!next) {
           next = Array.from(document.querySelectorAll('button')).find(b => /^\\s*next\\s*$/i.test((b.innerText || '').trim()));
         }
@@ -1569,8 +1615,13 @@ class FlowBrowserApp {
     }
 
     // Fill authenticator code on the TOTP page (host writes the field — page scripts were not applying it)
-    // Google SPA often keeps /identifier in the URL while Authenticator UI is showing
-    if (/challenge\/totp/i.test(href) || /challenge\/totp/i.test(String(live || ''))) {
+    // Google SPA often keeps /identifier or youtube SetSID in the URL while Authenticator UI is showing
+    const onTotpUrl =
+      /challenge\/totp/i.test(href) ||
+      /challenge\/totp/i.test(String(live || '')) ||
+      /accounts\.youtube\.com\/accounts\/SetSID/i.test(href) ||
+      /accounts\.youtube\.com\/accounts\/SetSID/i.test(String(live || ''));
+    if (onTotpUrl) {
       this._totpFilling = true;
       this.postAuthOverlay({ show: true, captcha: false });
       this.pushTotpFromBackend();
@@ -1671,19 +1722,18 @@ class FlowBrowserApp {
       });
       const data = await res.json().catch(() => ({}));
       console.log('[AppShell] Credit deduction response:', data);
-      if (data && data.code === 'SESSION_REPLACED') {
-        await this.forceLogout(data.error || 'Logged in on another device.');
-        return;
-      }
       if (data && data.success) {
         if (!this.currentUser) this.currentUser = {};
         this.currentUser.credits = data.credits;
         this.updateToolbarUserInfo();
-        if (data.code === 'NO_CREDITS' || (data.credits || 0) <= 0) {
+        if (data.code === 'NO_CREDITS' || (Number(data.credits) || 0) <= 0) {
           await this.forceLogout(data.error || 'You have no credits left. Please renew and sign in again.');
         }
-      } else if (data && data.code === 'NO_CREDITS') {
-        await this.forceLogout(data.error || 'You have no credits left. Please renew and sign in again.');
+      } else if (data && (data.code === 'NO_CREDITS' || data.code === 'BANNED' || data.code === 'FORCE_UPDATE' || data.code === 'SESSION_REPLACED' || data.code === 'PLAN_EXPIRED')) {
+        await this.forceLogout(data.error || 'Please sign in again.');
+      } else if (!data?.success && (res.status === 401 || res.status === 403)) {
+        // Ban/disable during generation — logout immediately even if code missing
+        await this.forceLogout((data && data.error) || 'Your account is no longer active. Please sign in again.');
       }
     } catch (err) {
       console.error('Credit sync error:', err);
@@ -1811,7 +1861,7 @@ class FlowBrowserApp {
     this._totpFilling = false;
   }
 
-  /** Drive native WPF auth cover (WebView2 page overlays cannot mask Google login). */
+  /** Drive native WPF/Android auth cover (WebView2 page overlays cannot mask Google login). */
   postAuthOverlay(opts = {}) {
     try {
       window.chrome?.webview?.postMessage(JSON.stringify({
@@ -1822,6 +1872,12 @@ class FlowBrowserApp {
         done: !!opts.done
       }));
     } catch (e) {}
+    // Persist Google cookies to disk when sign-in finishes (critical on Android phones)
+    if (opts && opts.done) {
+      try {
+        window.chrome?.webview?.postMessage(JSON.stringify({ type: 'cmd', cmd: 'flushCookies' }));
+      } catch (e) {}
+    }
   }
 
   onCaptchaState(data) {

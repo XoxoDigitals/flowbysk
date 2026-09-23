@@ -78,6 +78,9 @@ let autoLoginState = {
   lastHostNotify: '',
 };
 
+/** DEBUG: fill email/password/OTP only — never auto-click Next / 2FA rows. */
+const DEBUG_FILL_ONLY = false;
+
 // =========================================================================
 // IMMEDIATE SAFETY & PROTECTION STYLES
 // =========================================================================
@@ -346,7 +349,7 @@ function deductCredits(modelDetails, count = 1, uniqueId = '') {
 
   console.log(`[Flow Credit Engine] Deducting ${totalAmount} credits for ${effectiveCount} ${type}(s) using ${modelName}. Reason: ${reason}`);
 
-  // Send IPC message to Flow Browser app-shell (which calls server /api/client/use-credit)
+  // Send IPC message to Flow Browser app-shell (which calls server /api/v2/client/use-credit)
   ipcRenderer.sendToHost('credit:deduct', {
     amount: totalAmount,
     count: effectiveCount,
@@ -938,6 +941,7 @@ function hardClick(el) {
 }
 
 function clickOnce(key, el) {
+  if (DEBUG_FILL_ONLY) return false;
   if (!el || !isElementVisible(el) || autoLoginState.submittedKeys.has(key)) return false;
   autoLoginState.submittedKeys.add(key);
   autoLoginState.lastActionTime = Date.now();
@@ -1024,6 +1028,10 @@ function findAuthenticatorOption() {
 }
 
 function submitGoogleNext(kind, input) {
+  if (DEBUG_FILL_ONLY) {
+    console.log('[Flow Preload] DEBUG_FILL_ONLY — skip Next click:', kind);
+    return false;
+  }
   const pathKey = `${kind}:${location.pathname}`;
   if (autoLoginState.submittedKeys.has(pathKey + ':submit')) return false;
 
@@ -1299,17 +1307,7 @@ function runGoogleAutoLogin() {
   if (hostname.includes('flow.google.com') || hostname.includes('labs.google')) {
     removeAutoLoginOverlay();
     removeCaptchaBanner();
-    const path = (location.pathname || '').toLowerCase();
-    // Marketing /about after OAuth = session not fully attached. Enter app root once.
-    // Do NOT click Sign in (that restarts Google and loops).
-    if (path === '/about' || path.startsWith('/about/') || path === '/landing') {
-      if (!autoLoginState.submittedKeys.has('flow-about-root')) {
-        autoLoginState.submittedKeys.add('flow-about-root');
-        console.log('[Flow Preload] /about after auth → navigate to Flow root');
-        try { location.replace('https://flow.google.com/'); } catch (e) {}
-      }
-      return;
-    }
+    // Stay on /about or /landing — bouncing to root blinks and races AppShell login start.
     const isWorkspace = !!(
       document.querySelector('flow-app, flow-app-root, flow-projects-page, [data-testid*="project"]') ||
       (document.querySelector('header, flow-app-header, [role="banner"]') &&
@@ -1324,7 +1322,28 @@ function runGoogleAutoLogin() {
     return;
   }
 
-  if (!hostname.includes('accounts.google.com')) return;
+  if (!hostname.includes('accounts.google.com') && !hostname.includes('accounts.youtube.com')) return;
+
+  // Final Google handoff — CheckCookie / LoginDone often stalls under our overlay.
+  // Jump to continue= (Flow) once cookies are set.
+  if (/CheckCookie|LoginDoneHtml|chtml=LoginDone/i.test(location.href + pathname)) {
+    if (!autoLoginState.submittedKeys.has('checkcookie-continue')) {
+      autoLoginState.submittedKeys.add('checkcookie-continue');
+      let dest = 'https://flow.google.com/';
+      try {
+        const cont = new URL(location.href).searchParams.get('continue');
+        if (cont && /^https:\/\//i.test(cont)) dest = cont;
+      } catch (e) {}
+      console.log('[Flow Preload] CheckCookie/LoginDone →', dest);
+      notifyAuthHost('auth:auto-login', { overlay: false, captcha: false, done: true });
+      setTimeout(() => {
+        try { location.replace(dest); } catch (e) {
+          try { location.href = dest; } catch (e2) {}
+        }
+      }, 500);
+    }
+    return;
+  }
 
   const onPwdChallenge = /\/challenge\/pwd(?:\/|$)/i.test(pathname);
   const passwordInputEarly = document.querySelector('input[type="password"], input[name="Passwd"], input[name="password"], input[autocomplete="current-password"]');
@@ -1424,7 +1443,7 @@ function runGoogleAutoLogin() {
     );
 
   // "Get a code to sign in" / g.co/sc / skotp → Try another way FIRST (before authenticator pick)
-  if (onSecurityCodeScreen && !totpReady) {
+  if (!DEBUG_FILL_ONLY && onSecurityCodeScreen && !totpReady) {
     const tryAnother =
       buttonByLabel(/^try another way$/i) ||
       Array.from(document.querySelectorAll('button, a, div[role="button"], span[role="button"], div[role="link"]')).find(
@@ -1441,7 +1460,7 @@ function runGoogleAutoLogin() {
   }
 
   // Selection screen: click "Get a verification code from the Google Authenticator app"
-  if (!totpReady && (onChallengeChooser || /authenticator/i.test(pageText))) {
+  if (!DEBUG_FILL_ONLY && !totpReady && (onChallengeChooser || /authenticator/i.test(pageText))) {
     const authTarget = findAuthenticatorOption();
     if (authTarget) {
       const retryBucket = Math.floor(now / 2000);
@@ -1453,6 +1472,8 @@ function runGoogleAutoLogin() {
   }
 
   // TOTP code field: request OTP from host, then fill + Next
+  // Also runs on accounts.youtube.com/SetSID where the Authenticator UI is painted
+  // without /challenge/totp in the URL.
   if (totpReady) {
     if (!credentials._otp) {
       if (!autoLoginState.otpRequested || now - autoLoginState.lastActionTime > 5000) {
@@ -1464,19 +1485,30 @@ function runGoogleAutoLogin() {
       return;
     }
     const fillKey = `otp:${pathname}:fill`;
-    if (!autoLoginState.submittedKeys.has(fillKey)) {
+    const nextKey = `otp:${pathname}:next`;
+    const alreadyFilled =
+      (totpInput.value || '').replace(/\s+/g, '') === String(credentials._otp).replace(/\s+/g, '');
+    if (!autoLoginState.submittedKeys.has(fillKey) || !alreadyFilled) {
       fillInputValue(totpInput, String(credentials._otp));
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.otpFilled = true;
       autoLoginState.lastActionTime = now;
+    }
+    if (!DEBUG_FILL_ONLY && !autoLoginState.submittedKeys.has(nextKey)) {
+      autoLoginState.submittedKeys.add(nextKey);
       setTimeout(() => {
         if (!totpInput.isConnected) return;
+        const val = (totpInput.value || '').replace(/\s+/g, '');
+        if (!val) return;
         submitGoogleNext('totp', totpInput);
         const next =
           document.querySelector('#totpNext button, #totpNext, #idvPreregisteredPhoneNext button') ||
           buttonByLabel(/^next$/i);
-        if (next && isElementVisible(next)) next.click();
-      }, 1800);
+        if (next && isElementVisible(next)) {
+          console.log('[Flow Preload] Clicking TOTP Next on', location.hostname + pathname);
+          hardClick(next);
+        }
+      }, 1500);
     }
     return;
   }
@@ -1535,16 +1567,20 @@ function runGoogleAutoLogin() {
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.passwordFilled = true;
       autoLoginState.lastActionTime = now;
-      setTimeout(() => {
-        if (!passwordInput.isConnected) return;
-        if (autoLoginState.passwordSubmitted) return;
-        autoLoginState.passwordSubmitted = true;
-        try {
-          window.__flowHostAuto = window.__flowHostAuto || {};
-          window.__flowHostAuto['pwd:' + location.pathname.split('/').slice(0, 5).join('/')] = 'submitted';
-        } catch (e) {}
-        submitGoogleNext('password', passwordInput);
-      }, 1600);
+      if (DEBUG_FILL_ONLY) {
+        console.log('[Flow Preload] DEBUG_FILL_ONLY — password filled, wait for manual Next');
+      } else {
+        setTimeout(() => {
+          if (!passwordInput.isConnected) return;
+          if (autoLoginState.passwordSubmitted) return;
+          autoLoginState.passwordSubmitted = true;
+          try {
+            window.__flowHostAuto = window.__flowHostAuto || {};
+            window.__flowHostAuto['pwd:' + location.pathname.split('/').slice(0, 5).join('/')] = 'submitted';
+          } catch (e) {}
+          submitGoogleNext('password', passwordInput);
+        }, 1600);
+      }
     }
     return;
   }
@@ -1575,19 +1611,24 @@ function runGoogleAutoLogin() {
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.emailFilled = true;
       autoLoginState.lastActionTime = now;
-      setTimeout(() => {
-        if (!emailInput.isConnected) return;
-        if (/\/challenge\/pwd/i.test(location.pathname)) return;
-        autoLoginState.emailSubmitted = true;
-        submitGoogleNext('identifier', emailInput);
-        const next = document.querySelector('#identifierNext button, #identifierNext') || buttonByLabel(/^next$/i);
-        if (next && isElementVisible(next)) hardClick(next);
-      }, 1600);
+      if (DEBUG_FILL_ONLY) {
+        console.log('[Flow Preload] DEBUG_FILL_ONLY — email filled, wait for manual Next');
+      } else {
+        setTimeout(() => {
+          if (!emailInput.isConnected) return;
+          if (/\/challenge\/pwd/i.test(location.pathname)) return;
+          autoLoginState.emailSubmitted = true;
+          submitGoogleNext('identifier', emailInput);
+          const next = document.querySelector('#identifierNext button, #identifierNext') || buttonByLabel(/^next$/i);
+          if (next && isElementVisible(next)) hardClick(next);
+        }, 1600);
+      }
       return;
     }
 
     // If still on identifier after fill+Next, retry Next once (first click often ignored)
     if (
+      !DEBUG_FILL_ONLY &&
       autoLoginState.emailFilled &&
       now - autoLoginState.lastActionTime > 3500 &&
       autoLoginState.attempts < 3 &&
@@ -1609,8 +1650,10 @@ function runGoogleAutoLogin() {
     return;
   }
 
-  // Recovery / home-address / interstitial skip
-  if (dismissGoogleInterstitials()) return;
+  // Recovery / home-address / interstitial skip — never on TOTP / password challenge
+  if (!/\/challenge\/(totp|pwd|selection|sk|iap|dp|ootp)/i.test(pathname)) {
+    if (dismissGoogleInterstitials()) return;
+  }
 
   // Continue / I agree
   if (!emailInput && !passwordInput) {
@@ -1627,8 +1670,20 @@ function dismissGoogleInterstitials() {
   const onGds = host.includes('gds.google.com');
   const onFlow = host.includes('flow.google.com') || host.includes('labs.google');
   const onAccounts = host.includes('accounts.google.com') || host.includes('accounts.youtube.com');
-  const pageLooksRecovery = /make sure you can always sign in|add a recovery phone|your recovery email|set a home address|home and work addresses|recovery options|keep your account safe/i.test(bodySlice);
-  const pathLooksRecovery = /recovery|speedbump|interstitial|accountrecovery|phone|home.?address/i.test(path) || path.includes('/web/recoveryoptions');
+  // Never interrupt active Google sign-in / TOTP — bouncing to Flow here aborts Next.
+  const onActiveChallenge =
+    onAccounts &&
+    (/\/challenge\//i.test(path) ||
+      /\/signin\//i.test(path) ||
+      /\/v3\/signin\//i.test(path) ||
+      /\/ServiceLogin/i.test(path) ||
+      /\/AddSession/i.test(path) ||
+      /\/accountchooser/i.test(path) ||
+      document.querySelector('input[name="totpPin"], input#totpPin, input[name="Passwd"], input#identifierId'));
+  if (onActiveChallenge) return false;
+
+  const pageLooksRecovery = /make sure you can always sign in|add a recovery phone|your recovery email|set a home address|home and work addresses|recovery options/i.test(bodySlice);
+  const pathLooksRecovery = /recovery|speedbump|interstitial|accountrecovery|home.?address/i.test(path) || path.includes('/web/recoveryoptions');
 
   // Smart-app / "Open in the Google Flow app" banner — hide + click X
   try {
@@ -1700,7 +1755,8 @@ function dismissGoogleInterstitials() {
     return true;
   }
 
-  // gds / recovery stuck with no Cancel visible — bounce back to Flow
+  // gds / recovery stuck with no Cancel — never bounce while still on accounts.google.com
+  if (onAccounts) return false;
   if (onGds || (pageLooksRecovery && !onFlow)) {
     try {
       if (!window.__flowRecoveryBounceAt) window.__flowRecoveryBounceAt = 0;
@@ -1745,7 +1801,21 @@ function forceRenameLiteEverywhere() {
 }
 
 function hideUltraControls() {
-  // Ultra / model tier hiding disabled — show all options
+  try {
+    // Hide "ULTRA" model tier chips / toggles in Flow settings
+    document.querySelectorAll('button, [role="button"], [role="radio"], [role="tab"], span, div, label').forEach((el) => {
+      if (!el || el.getAttribute('data-flow-hidden') === '1') return;
+      if (el.childElementCount > 6) return;
+      const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!t || t.length > 24) return;
+      if (!/^ultra$/i.test(t)) return;
+      const target =
+        el.closest('button, [role="button"], [role="radio"], [role="tab"], [role="option"], label') || el;
+      hideEl(target);
+    });
+  } catch (e) {}
 }
 
 function killAccountPopupNow() {
@@ -1998,26 +2068,43 @@ function hideGalleryEditControls() {
 // Hide Google Flow internal low credits warning banner (safely without touching parents/sidebar)
 function hideGoogleCreditsWarningBanner() {
   try {
-    const banners = document.querySelectorAll('[role="alert"], [role="status"], .credit-banner, .low-credits-banner');
-    banners.forEach(el => {
-      if (!el || el.tagName === 'BODY' || el.tagName === 'HTML' || el.tagName === 'MAIN' || el.tagName === 'NAV' || el.tagName === 'ASIDE' || el.tagName === 'HEADER') return;
+    const isCreditsNag = (txt) => {
+      const t = String(txt || '');
+      if (!t) return false;
+      return (
+        /out of Google Flow credits/i.test(t) ||
+        /running low on Google Flow credits/i.test(t) ||
+        /You're running low on/i.test(t) ||
+        /top up to get more/i.test(t) ||
+        /Add AI credits/i.test(t) ||
+        (/Google Flow credits/i.test(t) && /wait until they refresh|top up|get more/i.test(t))
+      );
+    };
+
+    const candidates = document.querySelectorAll(
+      '[role="alert"], [role="status"], [role="dialog"], aside, section, div, banner'
+    );
+    candidates.forEach((el) => {
+      if (!el || el.tagName === 'BODY' || el.tagName === 'HTML' || el.tagName === 'MAIN' || el.tagName === 'NAV' || el.tagName === 'HEADER') return;
       if (el.id === 'flow-generation-toast' || el.closest('#flow-generation-toast')) return;
-      if (el.querySelector('nav, aside, button[aria-label*="tool" i], a[href*="/project"]')) return;
+      if (el.querySelector('nav, aside, textarea, [contenteditable="true"], flow-prompt')) return;
 
       const txt = (el.innerText || el.textContent || '').trim();
-      if (!txt) return;
+      if (!txt || txt.length > 420) return;
+      if (!isCreditsNag(txt)) return;
 
-      if (
-        txt.includes("running low on Google Flow credits") ||
-        txt.includes("You're running low on") ||
-        txt.includes("top up to get more now")
-      ) {
-        el.style.setProperty('display', 'none', 'important');
-        el.style.setProperty('visibility', 'hidden', 'important');
-        el.style.setProperty('height', '0px', 'important');
-        el.style.setProperty('min-height', '0px', 'important');
-        el.style.setProperty('opacity', '0', 'important');
-        el.style.setProperty('pointer-events', 'none', 'important');
+      const r = el.getBoundingClientRect();
+      // Prefer banner-sized nodes; still hide small "Add AI credits" chips
+      if (r.height > 220 && r.width > 900 && !/Add AI credits/i.test(txt)) return;
+
+      hideEl(el);
+    });
+
+    // Explicit CTA button
+    document.querySelectorAll('button, a, [role="button"]').forEach((el) => {
+      const t = (el.innerText || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      if (/^Add AI credits$/i.test(t) || /Add AI credits/i.test(t)) {
+        hideEl(el.closest('[role="alert"], [role="status"], section, div') || el);
       }
     });
   } catch (e) {}
@@ -2068,6 +2155,8 @@ window.addEventListener('click', (e) => {
     try {
       killAccountPopupNow();
       hideExistingProjects();
+      hideUltraControls();
+      hideGoogleCreditsWarningBanner();
     } catch (e) {}
   };
   const obs = new MutationObserver(() => {
@@ -2111,6 +2200,22 @@ function applyCssRules() {
     header button[aria-label*="Manage your Google Account" i],
     header button[aria-label*="Account" i],
     header img[src*="googleusercontent.com"] {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+    }
+
+    /* Google Flow credits nag + Add AI credits CTA */
+    [role="alert"],
+    [role="status"] {
+      /* filtered in JS; keep selectors for common credit copy via attribute tricks below */
+    }
+
+    /* Hide ULTRA tier chips (exact-label match via JS; CSS backup for common patterns) */
+    button[aria-label="Ultra" i],
+    button[aria-label*="Ultra model" i],
+    [role="radio"][aria-label="Ultra" i],
+    [role="tab"][aria-label="Ultra" i] {
       display: none !important;
       visibility: hidden !important;
       pointer-events: none !important;
@@ -2261,10 +2366,12 @@ try {
 
 function driveGoogle2faClicks() {
   const host = location.hostname || '';
-  if (!host.includes('accounts.google.com')) return;
+  if (!host.includes('accounts.google.com') && !host.includes('accounts.youtube.com')) return;
   const path = location.pathname || '';
   const now = Date.now();
-  if (/\/challenge\/totp/i.test(path)) {
+  // SetSID / totp UI — request OTP; Next click is owned by runGoogleAutoLogin
+  const totpEl = document.querySelector('input[name="totpPin"], input#totpPin, input[autocomplete="one-time-code"]');
+  if (/\/challenge\/totp/i.test(path) || /\/SetSID/i.test(path) || totpEl) {
     if (now - (driveGoogle2faClicks._otpAt || 0) > 2000) {
       driveGoogle2faClicks._otpAt = now;
       try { ipcRenderer.sendToHost('request-otp'); } catch (e) {}
@@ -2319,12 +2426,12 @@ function driveGoogle2faClicks() {
 // Periodic polling — keep Flow light to avoid black-screen freezes
 setInterval(() => {
   const host = location.hostname || '';
-  const onGoogleAuth = host.includes('accounts.google.com');
+  const onGoogleAuth = host.includes('accounts.google.com') || host.includes('accounts.youtube.com');
   const onGds = host.includes('gds.google.com');
   const onFlow = host.includes('flow.google.com') || host.includes('labs.google');
   if (onGoogleAuth) driveGoogle2faClicks();
   runGoogleAutoLogin();
-  dismissGoogleInterstitials();
+  if (!onGoogleAuth) dismissGoogleInterstitials();
   if (onGoogleAuth || onGds) return;
   if (onFlow) {
     maskFlowWorkspace();

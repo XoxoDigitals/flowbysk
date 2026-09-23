@@ -585,6 +585,10 @@ router.put('/users/:id/ban', requireAdminAuth, async (req, res) => {
     banReason: req.body?.reason || '',
   });
   if (!updated) return res.status(404).json({ success: false, error: 'User not found' });
+  // Ban must revoke session + wipe Google so the EXE logs out on next poll / credit call
+  if (banned) {
+    await db.forceLogoutAndWipe(owned.user.id);
+  }
   await db.addLog(owned.actor.id, req.admin.username, banned ? 'ban_user' : 'unban_user', {
     targetUserId: updated.id,
     targetUsername: updated.username,
