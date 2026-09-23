@@ -22,7 +22,14 @@ app.get('/', (req, res) => {
 });
 
 app.use('/api/admin', adminRoutes);
-app.use('/api/client', clientRoutes);
+app.use('/api/v2/client', clientRoutes);
+app.use('/api/client', (req, res) => {
+  res.status(410).json({
+    success: false,
+    code: 'FORCE_UPDATE',
+    error: 'Please download the latest Flow Browser.',
+  });
+});
 app.use('/api/session', sessionRoutes);
 app.use('/api/reseller', resellerRoutes);
 
@@ -101,7 +108,7 @@ db.ready()
       console.log(`Flow Creator Ai API server on port ${PORT}`);
       console.log(`Admin UI:   http://localhost:3100/admin`);
       console.log(`Demo Flow:  http://localhost:${PORT}/demo-flow`);
-      console.log(`Client API: http://localhost:${PORT}/api/client`);
+      console.log(`Client API: http://localhost:${PORT}/api/v2/client`);
       console.log(`Data store: PostgreSQL (Prisma) — data.json is not live`);
       console.log(`====================================================`);
     });

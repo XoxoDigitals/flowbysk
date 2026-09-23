@@ -639,6 +639,22 @@ router.post('/users/bulk-delete', requireAdminAuth, async (req, res) => {
   });
 });
 
+router.post('/users/:id/force-logout', requireAdminAuth, async (req, res) => {
+  const owned = await ownedUserOr404(req, res);
+  if (!owned) return;
+  const result = await db.forceLogoutAndWipe(owned.user.id);
+  await db.addLog(owned.actor.id, owned.actor.username, 'force_logout_wipe', {
+    targetUserId: owned.user.id,
+    targetUsername: owned.user.username,
+    sessionVersion: result.sessionVersion,
+  });
+  res.json({
+    success: true,
+    message: 'Session revoked. Client will clear Google cookies and return to login.',
+    ...result,
+  });
+});
+
 router.delete('/users/:id', requireAdminAuth, async (req, res) => {
   const owned = await ownedUserOr404(req, res);
   if (!owned) return;

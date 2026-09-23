@@ -98,7 +98,7 @@ async function getStdBalance(userId) {
 }
 
 async function setStdBalance(userId, balance, opts = {}) {
-  const bal = Math.max(0, Math.round(Number(balance) || 0));
+  const bal = Math.round(Number(balance) || 0);
   const prev = await getStdBalance(userId);
   await prisma.wallet.upsert({
     where: { userId_walletType: { userId, walletType: 'STANDARD' } },
@@ -197,6 +197,8 @@ async function mapCustomer(user, metaMap, ownerLookup) {
     lastLoginAt: user.lastSeenAt ? new Date(user.lastSeenAt).toISOString() : null,
     activeServerId: meta.activeServerId || null,
     maxParallel,
+    sessionVersion: Number(meta.sessionVersion) || 0,
+    pendingGoogleWipe: !!meta.pendingGoogleWipe,
     resellerId: ownerResellerId,
     ownerId,
     ownerAdminId,
@@ -786,9 +788,38 @@ class Database {
   async deductUserCredits(id, amount) {
     await this.ready();
     const current = await getStdBalance(id);
-    const next = Math.max(0, current - Math.abs(Number(amount) || 0));
-    await setStdBalance(id, next);
+    const next = current - Math.abs(Number(amount) || 0);
+    await setStdBalance(id, next, { type: 'SPEND', reason: 'use_credit' });
     return next;
+  }
+
+  async bumpSessionVersion(userId) {
+    await this.ready();
+    const map = await getUserMetaMap();
+    const cur = Number(map[userId]?.sessionVersion) || 0;
+    const next = cur + 1;
+    await patchUserMeta(userId, { sessionVersion: next });
+    return next;
+  }
+
+  async setPendingGoogleWipe(userId, value = true) {
+    await this.ready();
+    await patchUserMeta(userId, { pendingGoogleWipe: !!value });
+    return !!value;
+  }
+
+  async clearPendingGoogleWipe(userId) {
+    await this.ready();
+    await patchUserMeta(userId, { pendingGoogleWipe: false });
+    return true;
+  }
+
+  /** Invalidate JWT session and flag Google cookie wipe for the next client poll. */
+  async forceLogoutAndWipe(userId) {
+    await this.ready();
+    const sv = await this.bumpSessionVersion(userId);
+    await this.setPendingGoogleWipe(userId, true);
+    return { sessionVersion: sv, pendingGoogleWipe: true };
   }
 
   async deleteUser(id) {
@@ -871,10 +902,21 @@ class Database {
     await this.ready();
     try {
       await prisma.sharedGoogleAccount.delete({ where: { id } });
-      return true;
     } catch {
       return false;
     }
+    // Clear assignments so clients drop this Google account on next check/login
+    try {
+      const meta = await getUserMetaMap();
+      for (const [uid, m] of Object.entries(meta || {})) {
+        if (m?.activeServerId === id) {
+          await this.updateUser(uid, { activeServerId: null });
+        }
+      }
+    } catch (err) {
+      console.warn('[db] clear assignments after deleteServer:', err.message);
+    }
+    return true;
   }
 
   async assignmentCounts() {

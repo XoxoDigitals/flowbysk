@@ -25,6 +25,15 @@ async function requireUserAuth(req, res, next) {
     if (!user.isActive || user.banned) {
       return res.status(403).json({ success: false, error: 'Your account has been deactivated by administrator.' });
     }
+    const tokenSv = decoded.sv;
+    const currentSv = Number(user.sessionVersion) || 0;
+    if (tokenSv == null || Number(tokenSv) !== currentSv) {
+      return res.status(401).json({
+        success: false,
+        code: 'SESSION_REPLACED',
+        error: 'Logged in on another device. Please sign in again.',
+      });
+    }
     const now = new Date();
     const expiry = new Date(user.planExpiry);
     if (expiry <= now) {
@@ -39,6 +48,27 @@ async function requireUserAuth(req, res, next) {
   } catch (err) {
     return res.status(401).json({ success: false, error: 'Session expired or invalid. Please log in again.' });
   }
+}
+
+function effectiveCredits(user) {
+  return Math.max(0, Number(user?.credits) || 0);
+}
+
+function publicUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName || '',
+    credits: effectiveCredits(user),
+    planExpiry: user.planExpiry,
+    isActive: user.isActive !== false,
+    banned: !!user.banned,
+    maxParallel: user.maxParallel || 1,
+    plan: user.planName || 'Standard',
+    resellerId: user.resellerId || null,
+    ownerLabel: user.ownerLabel || null,
+    activeServerId: user.activeServerId || null,
+  };
 }
 
 async function getUserServers(user) {
@@ -57,23 +87,6 @@ async function resolveActiveServer(user) {
     if (selected) return selected;
   }
   return db.pickLeastLoadedServer(availableServers);
-}
-
-function publicUser(user) {
-  return {
-    id: user.id,
-    username: user.username,
-    displayName: user.displayName || '',
-    credits: user.credits,
-    planExpiry: user.planExpiry,
-    isActive: user.isActive !== false,
-    banned: !!user.banned,
-    maxParallel: user.maxParallel || 1,
-    plan: user.planName || 'Standard',
-    resellerId: user.resellerId || null,
-    ownerLabel: user.ownerLabel || null,
-    activeServerId: user.activeServerId || null,
-  };
 }
 
 function publicServerPayload(server) {
@@ -147,11 +160,13 @@ async function loginClientUser(username, password, ip) {
   }
 
   await db.updateUser(user.id, { lastLoginAt: new Date().toISOString() });
+  const sessionVersion = await db.bumpSessionVersion(user.id);
+  await db.clearPendingGoogleWipe(user.id);
   let freshUser = await db.getUserById(user.id);
-  await db.addLog(user.id, user.username, 'client_login', { ip: ip || '' });
+  await db.addLog(user.id, user.username, 'client_login', { ip: ip || '', sessionVersion });
 
   const token = jwt.sign(
-    { userId: user.id, username: user.username },
+    { userId: user.id, username: user.username, sv: sessionVersion },
     await jwtSecret(),
     { expiresIn: '30d' }
   );
@@ -202,13 +217,15 @@ router.post('/verify-session', requireUserAuth, async (req, res) => {
 
   const availableServers = await getUserServers(user);
   const activeServer = await resolveActiveServer(user);
+  const forceClearGoogle = !!user.pendingGoogleWipe;
 
   res.json({
     success: true,
+    forceClearGoogle,
     user: {
       id: user.id,
       username: user.username,
-      credits: user.credits,
+      credits: effectiveCredits(user),
       planExpiry: user.planExpiry,
     },
     servers: availableServers.map((s) => ({
@@ -222,6 +239,11 @@ router.post('/verify-session', requireUserAuth, async (req, res) => {
     activeServer: publicServerPayload(activeServer),
     settings: await clientSettingsPayload(),
   });
+});
+
+router.post('/ack-google-wipe', requireUserAuth, async (req, res) => {
+  await db.clearPendingGoogleWipe(req.user.id);
+  res.json({ success: true });
 });
 
 router.post('/switch-server', requireUserAuth, async (req, res) => {
@@ -273,12 +295,15 @@ router.post('/request-server-change', requireUserAuth, async (req, res) => {
 router.post('/use-credit', requireUserAuth, async (req, res) => {
   const { amount = 1, reason = 'generation' } = req.body;
   const user = req.user;
-  if (user.credits < amount) {
-    return res.status(400).json({ success: false, error: 'Insufficient credits balance' });
-  }
   const remaining = await db.deductUserCredits(user.id, amount);
   await db.addLog(user.id, user.username, 'use_credit', { amount, remaining, reason });
-  res.json({ success: true, credits: remaining });
+  const credits = Math.max(0, remaining);
+  const body = { success: true, credits };
+  if (remaining <= 0) {
+    body.code = 'NO_CREDITS';
+    body.error = 'You have no credits left. Please renew your credits to continue.';
+  }
+  res.json(body);
 });
 
 router.get('/extension-status', requireUserAuth, async (req, res) => {
@@ -296,7 +321,7 @@ router.get('/extension-status', requireUserAuth, async (req, res) => {
       plan: daysRemaining > 0 ? 'Active' : 'Expired',
       planExpiresAt: user.planExpiry,
       daysRemaining,
-      credits: user.credits,
+      credits: effectiveCredits(user),
     },
     assignedAccount: activeServer
       ? {

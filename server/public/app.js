@@ -247,9 +247,10 @@ class AdminApp {
             ${new Date(u.createdAt).toLocaleDateString()}
           </td>
           <td>
-            <div style="display: flex; gap: 0.4rem;">
+            <div style="display: flex; gap: 0.4rem; flex-wrap: wrap;">
               <button class="btn btn-sm btn-secondary" onclick="app.openEditUserModal('${u.id}')">Edit</button>
               <button class="btn btn-sm btn-secondary" onclick="app.quickAddCredits('${u.id}', 100)">+100 Cr</button>
+              <button class="btn btn-sm btn-secondary" onclick="app.forceLogoutUser('${u.id}')" title="Revoke session and clear Google cookies on their device">Revoke + clear Google</button>
               <button class="btn btn-sm btn-icon" onclick="app.deleteUser('${u.id}')" title="Delete">
                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
               </button>
@@ -507,6 +508,18 @@ class AdminApp {
     if (res && res.success) {
       this.showToast(`Added +${amount} credits to ${user.username}`, 'success');
       this.loadAllData();
+    }
+  }
+
+  async forceLogoutUser(userId) {
+    const user = this.users.find(u => u.id === userId);
+    if (!user) return;
+    if (!confirm(`Revoke session for "${user.username}" and clear Google cookies on their device?`)) return;
+    const res = await this.apiRequest(`/api/admin/users/${userId}/force-logout`, 'POST', {});
+    if (res && res.success) {
+      this.showToast(`Revoked ${user.username} — they will return to login shortly`, 'success');
+    } else {
+      this.showToast((res && res.error) || 'Force logout failed', 'error');
     }
   }
 

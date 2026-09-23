@@ -1,8 +1,8 @@
 // Flow Browser Auto Login Extension Background Service Worker
-// Connects to the Flow Browser backend (http://localhost:3000)
+// Connects to the Flow Browser backend (https://flowcreatorai.site)
 
-const API_ORIGIN = "http://localhost:3000";
-const API_BASE = `${API_ORIGIN}/api/client`;
+const API_ORIGIN = "https://flowcreatorai.site";
+const API_BASE = `${API_ORIGIN}/api/v2/client`;
 const FLOW_URL = "https://flow.google.com/";
 const GOOGLE_LOGOUT = "https://accounts.google.com/Logout";
 
@@ -98,7 +98,7 @@ async function api(path, body, anonymous = false) {
   // Electron may sync origin-only URL; normalize to /api/client
   baseUrl = String(baseUrl || "").replace(/\/$/, "");
   if (!/\/api\/client$/i.test(baseUrl)) {
-    baseUrl = `${baseUrl}/api/client`;
+    baseUrl = `${baseUrl}/api/v2/client`;
   }
   const token = saved.flowBrowserToken;
 

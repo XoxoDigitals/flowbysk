@@ -1,10 +1,15 @@
 ﻿using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 
 namespace FlowBrowser;
@@ -26,6 +31,27 @@ public partial class MainWindow : Window
     string? _flowCredTarget;
     int _autofillGeneration;
     long _lastAutofillKickMs;
+    bool _onGoogleAuth;
+    bool _captchaActive;
+    /// <summary>Sticky until explicit login-done — keeps overlay across reloads/bounces.</summary>
+    bool _authLoginActive;
+    /// <summary>0=off, 1=cover, 2=captcha — only transition when this changes.</summary>
+    int _authUiMode = -1;
+    Window? _authCoverWindow;
+    DispatcherTimer? _authCoverPinTimer;
+
+    const int AuthUiOff = 0;
+    const int AuthUiCover = 1;
+    const int AuthUiCaptcha = 2;
+
+    static readonly IntPtr HwndaTop = new(0);
+    const uint SwpNomove = 0x0002;
+    const uint SwpNosize = 0x0001;
+    const uint SwpNoactivate = 0x0010;
+
+    [DllImport("user32.dll")]
+    static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
 
     public MainWindow()
     {
@@ -36,6 +62,26 @@ public partial class MainWindow : Window
             {
                 try { DragMove(); } catch { /* ignore */ }
             }
+        };
+        LocationChanged += (_, _) => SyncAuthCoverBounds();
+        SizeChanged += (_, _) => SyncAuthCoverBounds();
+        Activated += (_, _) =>
+        {
+            if (_authUiMode == AuthUiCover)
+                PinAuthCoverAboveWebView();
+        };
+        Deactivated += (_, _) =>
+        {
+            // Don't keep a topmost cover over other apps
+            if (_authCoverWindow != null)
+                _authCoverWindow.Topmost = false;
+        };
+        StateChanged += (_, _) =>
+        {
+            if (WindowState == WindowState.Minimized)
+                HideAuthCoverWindow();
+            else
+                ApplyAuthOverlayState();
         };
         Loaded += async (_, _) => await InitAsync();
     }
@@ -57,7 +103,12 @@ public partial class MainWindow : Window
 
         var flowOpts = new CoreWebView2EnvironmentOptions(
             additionalBrowserArguments: "--remote-debugging-port=9223");
-        var shellEnv = await CoreWebView2Environment.CreateAsync(userDataFolder: _shellUserData);
+        var shellOpts = new CoreWebView2EnvironmentOptions(
+            additionalBrowserArguments: "--remote-debugging-port=9222");
+        var shellEnv = await CoreWebView2Environment.CreateAsync(
+            browserExecutableFolder: null,
+            userDataFolder: _shellUserData,
+            options: shellOpts);
         var flowEnv = await CoreWebView2Environment.CreateAsync(
             browserExecutableFolder: null,
             userDataFolder: _flowUserData,
@@ -84,12 +135,20 @@ public partial class MainWindow : Window
         core.Settings.AreDevToolsEnabled = false;
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
-        // Suppress native alert/confirm chrome (clipped in frameless window)
+        // Suppress native alert/confirm — clipped in frameless window (use in-app modal instead)
         core.ScriptDialogOpening += (_, e) =>
         {
-            // Accept alerts so scripts don't hang; treat confirm as Cancel
-            if (e.Kind == CoreWebView2ScriptDialogKind.Alert)
-                e.Accept();
+            var deferral = e.GetDeferral();
+            try
+            {
+                if (e.Kind == CoreWebView2ScriptDialogKind.Alert)
+                    e.Accept();
+                // Confirm/Prompt: no Accept → Cancel
+            }
+            finally
+            {
+                deferral.Complete();
+            }
         };
         core.WebMessageReceived += Shell_WebMessageReceived;
         core.SetVirtualHostNameToFolderMapping(
@@ -143,13 +202,52 @@ public partial class MainWindow : Window
             }
         };
 
+        // Nav lock is MAIN-FRAME only. Never filter WebResourceRequested / fetch / XHR /
+        // images / scripts — those must stay fully enabled app-wide.
+        // Iframes: never cancel (recaptcha widgets load in frames).
+        core.FrameNavigationStarting += (_, e) =>
+        {
+            // Intentionally do not cancel — background frame requests stay open
+        };
+
         core.NavigationStarting += (_, e) =>
         {
+            var uri = e.Uri ?? "";
+            var cur = FlowView.CoreWebView2?.Source ?? "";
+
+            // Captcha / recaptcha surfaces: allow any main-frame helper navigation
+            // (recaptcha.net, youtube checkConnection, …) so the widget is not blanked.
+            if (_captchaActive || IsCaptchaUnlockUrl(uri) || IsCaptchaUnlockUrl(cur))
+            {
+                UpdateAuthOverlayFromUrl(uri);
+                PostToShell(new
+                {
+                    type = "flow-event",
+                    @event = "did-start-loading",
+                    url = uri
+                });
+                return;
+            }
+
+            // Top-level page navigation allowlist only (Flow + Google login)
+            if (!IsAllowedFlowNavigation(uri))
+            {
+                e.Cancel = true;
+                Debug.WriteLine("[NavLock] blocked top-level: " + uri);
+                var fallback = string.IsNullOrWhiteSpace(_flowCredTarget)
+                    ? "https://flow.google.com/"
+                    : _flowCredTarget!;
+                if (!string.Equals(uri, fallback, StringComparison.OrdinalIgnoreCase))
+                    _ = NavigateFlowSafeAsync(fallback);
+                return;
+            }
+
+            UpdateAuthOverlayFromUrl(uri);
             PostToShell(new
             {
                 type = "flow-event",
                 @event = "did-start-loading",
-                url = e.Uri
+                url = uri
             });
         };
         core.NavigationCompleted += (_, e) =>
@@ -174,6 +272,7 @@ public partial class MainWindow : Window
                 });
                 return;
             }
+            UpdateAuthOverlayFromUrl(url);
             PostToShell(new { type = "flow-event", @event = "did-navigate", url });
             PostToShell(new { type = "flow-event", @event = "did-finish-load", url });
             PostToShell(new { type = "flow-event", @event = "dom-ready", url });
@@ -182,6 +281,7 @@ public partial class MainWindow : Window
         core.HistoryChanged += (_, _) =>
         {
             var url = core.Source ?? "";
+            UpdateAuthOverlayFromUrl(url);
             PostToShell(new { type = "flow-event", @event = "did-navigate-in-page", url });
             PostToShell(new { type = "flow-event", @event = "page-title-updated", url });
             _ = TryHostGoogleAutofillAsync(url);
@@ -189,10 +289,20 @@ public partial class MainWindow : Window
         core.NewWindowRequested += (_, e) =>
         {
             e.Handled = true;
-            if (!string.IsNullOrWhiteSpace(e.Uri) && e.Uri.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            if (string.IsNullOrWhiteSpace(e.Uri) || !e.Uri.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                return;
+            var cur = FlowView.CoreWebView2?.Source ?? "";
+            // Captcha: allow any popup. Otherwise only allowlisted top-level destinations.
+            if (_captchaActive || IsCaptchaUnlockUrl(e.Uri) || IsCaptchaUnlockUrl(cur) || IsAllowedFlowNavigation(e.Uri))
             {
                 core.Navigate(e.Uri);
+                return;
             }
+            Debug.WriteLine("[NavLock] blocked popup: " + e.Uri);
+            var fallback = string.IsNullOrWhiteSpace(_flowCredTarget)
+                ? "https://flow.google.com/"
+                : _flowCredTarget!;
+            core.Navigate(fallback);
         };
         core.DownloadStarting += (_, e) =>
         {
@@ -236,15 +346,17 @@ public partial class MainWindow : Window
         _shellMode = mode;
         Dispatcher.Invoke(() =>
         {
-            if (mode == "full")
+            if (_shellMode == "full")
             {
                 // WebView2 uses native HWNDs — ZIndex cannot cover Flow. Hide it while overlays show.
                 FlowView.Visibility = Visibility.Collapsed;
                 ShellView.Height = double.NaN;
                 ShellView.VerticalAlignment = VerticalAlignment.Stretch;
                 ShellView.Margin = new Thickness(0);
-                Panel.SetZIndex(ShellView, 2);
+                Panel.SetZIndex(ShellView, 10);
                 Panel.SetZIndex(FlowView, 1);
+                SyncOverlayMargins();
+                ApplyAuthOverlayState(); // hides cover while full; sticky flags kept for chrome return
             }
             else
             {
@@ -253,10 +365,581 @@ public partial class MainWindow : Window
                 ShellView.VerticalAlignment = VerticalAlignment.Top;
                 ShellView.Margin = new Thickness(0);
                 FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
-                Panel.SetZIndex(ShellView, 2);
+                Panel.SetZIndex(ShellView, 10);
                 Panel.SetZIndex(FlowView, 1);
+                SyncOverlayMargins();
+                ApplyAuthOverlayState();
             }
         });
+    }
+
+    static bool IsGoogleAuthUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        try
+        {
+            var host = new Uri(url).Host;
+            return host.Equals("accounts.google.com", StringComparison.OrdinalIgnoreCase)
+                   || host.EndsWith(".accounts.google.com", StringComparison.OrdinalIgnoreCase)
+                   || host.Equals("accounts.youtube.com", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return url.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    static bool IsFlowWorkspaceUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        try
+        {
+            var host = new Uri(url).Host.ToLowerInvariant();
+            return host == "flow.google.com"
+                   || host.EndsWith(".flow.google.com")
+                   || host == "labs.google"
+                   || host.EndsWith(".labs.google");
+        }
+        catch
+        {
+            var u = url.ToLowerInvariant();
+            return u.Contains("flow.google.com") || u.Contains("labs.google");
+        }
+    }
+
+    /// <summary>
+    /// Extra Google hosts/paths that appear mid sign-in (AccountChooser, legacy ServiceLogin).
+    /// </summary>
+    static bool IsGoogleAuthRelatedUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (IsGoogleAuthUrl(url)) return true;
+        try
+        {
+            var uri = new Uri(url);
+            var host = uri.Host.ToLowerInvariant();
+            var path = (uri.AbsolutePath ?? "").ToLowerInvariant();
+            if (host == "google.com" || host == "www.google.com")
+            {
+                return path.StartsWith("/accountchooser")
+                       || path.StartsWith("/signin")
+                       || path.StartsWith("/accounts")
+                       || path.StartsWith("/servicelogin")
+                       || path.StartsWith("/logout")
+                       || path.StartsWith("/oauth")
+                       || path.Contains("signin")
+                       || path.Contains("recaptcha");
+            }
+            if (host.Contains("gstatic.com") && path.Contains("recaptcha"))
+                return true;
+            // Post-login recovery / home-address interstitials (auto-dismissed by flow-inject)
+            if (host == "gds.google.com" || host.EndsWith(".gds.google.com"))
+                return true;
+            return false;
+        }
+        catch
+        {
+            return url.Contains("gds.google.com", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// Top-level navigations allowed in Flow Browser: Flow workspace + Google login only.
+    /// Does NOT apply to iframes, XHR, fetch, images, or scripts — those are never filtered.
+    /// </summary>
+    bool IsAllowedFlowNavigation(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (url.StartsWith("about:", StringComparison.OrdinalIgnoreCase)) return true;
+        if (url.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) return true;
+        if (url.StartsWith("blob:", StringComparison.OrdinalIgnoreCase)) return true;
+        if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (IsFlowWorkspaceUrl(url)) return true;
+        if (IsGoogleAuthRelatedUrl(url)) return true;
+        if (IsCaptchaHelperHost(url)) return true;
+
+        // During Google sign-in, allow connectivity helpers as top-level (rare but needed)
+        if (_authLoginActive || _captchaActive)
+        {
+            try
+            {
+                var host = new Uri(url).Host.ToLowerInvariant();
+                if (host == "youtube.com" || host.EndsWith(".youtube.com")) return true;
+                if (host == "google.com" || host == "www.google.com") return true;
+                if (host.Contains("mail.google.com")) return false;
+                if (host.Contains("drive.google.com")) return false;
+                if (host.Contains("docs.google.com")) return false;
+                if (host.Contains("myaccount.google.com")) return false;
+            }
+            catch { /* fall through */ }
+        }
+
+        try
+        {
+            var host = new Uri(url).Host.ToLowerInvariant();
+            if (host.Contains("myaccount.google.com")) return false;
+            if (host.Contains("mail.google.com")) return false;
+            if (host.Contains("drive.google.com")) return false;
+            if (host.Contains("docs.google.com")) return false;
+            if (host.Contains("youtube.com")) return false;
+            if (host.Contains("play.google.com")) return false;
+        }
+        catch { /* fall through */ }
+
+        return false;
+    }
+
+    /// <summary>Hosts used by captcha widgets (safe as top-level or frames).</summary>
+    static bool IsCaptchaHelperHost(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        try
+        {
+            var host = new Uri(url).Host.ToLowerInvariant();
+            if (host == "recaptcha.net" || host.EndsWith(".recaptcha.net")) return true;
+            if (host.Contains("recaptcha")) return true;
+            if (host.Contains("hcaptcha.com")) return true;
+            if (host.Contains("challenges.cloudflare.com")) return true;
+            if (host.EndsWith(".gstatic.com") || host == "gstatic.com") return true;
+            if (host.EndsWith(".googleusercontent.com")) return true;
+            if (host.EndsWith(".googleapis.com")) return true;
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    void UpdateAuthOverlayFromUrl(string? url)
+    {
+        // Logout / about:blank cleanup must not start the sticky cover by itself
+        if (IsGoogleLogoutUrl(url) || IsAboutBlank(url))
+        {
+            if (!_authLoginActive)
+            {
+                _onGoogleAuth = false;
+                _captchaActive = false;
+                ApplyAuthOverlayState();
+                return;
+            }
+            // Mid-session logout as part of account switch — keep cover if already sticky
+        }
+
+        // Host-side URL check — lift cover immediately on /challenge/recaptcha (don't wait for inject)
+        if (IsGoogleRecaptchaChallengeUrl(url))
+        {
+            _authLoginActive = true;
+            _onGoogleAuth = true;
+            _captchaActive = true;
+            ApplyAuthOverlayState();
+            return;
+        }
+
+        if (IsGoogleAuthRelatedUrl(url) && !IsGoogleLogoutUrl(url))
+        {
+            _authLoginActive = true;
+            _onGoogleAuth = true;
+            // Resume cover on normal sign-in steps after leaving /challenge/recaptcha
+            if (IsGoogleCredentialStepUrl(url))
+                _captchaActive = false;
+            ApplyAuthOverlayState();
+            return;
+        }
+
+        if (IsGoogleLogoutUrl(url) && _authLoginActive)
+        {
+            _onGoogleAuth = true;
+            ApplyAuthOverlayState();
+            return;
+        }
+
+        if (IsFlowWorkspaceUrl(url))
+        {
+            // Do NOT clear sticky cover on Flow URL alone — fresh-login bounce and
+            // continue redirects flicker the overlay if we drop it here.
+            // Cover ends only via HandleAuthOverlayCommand(done: true).
+            if (_authLoginActive)
+            {
+                _onGoogleAuth = true;
+                ApplyAuthOverlayState();
+                return;
+            }
+            _onGoogleAuth = false;
+            _captchaActive = false;
+            ApplyAuthOverlayState();
+            return;
+        }
+
+        // about:blank / blocked / other during sticky login — keep covering
+        if (_authLoginActive)
+        {
+            _onGoogleAuth = true;
+            ApplyAuthOverlayState();
+            return;
+        }
+
+        _onGoogleAuth = false;
+        _captchaActive = false;
+        ApplyAuthOverlayState();
+    }
+
+    static bool IsAboutBlank(string? url) =>
+        !string.IsNullOrWhiteSpace(url) &&
+        url.StartsWith("about:", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Captcha / recaptcha URL — disable top-level nav lock so helper redirects can complete.
+    /// (Background requests are never locked anywhere in the app.)
+    /// </summary>
+    static bool IsCaptchaUnlockUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        var u = url.ToLowerInvariant();
+        return u.Contains("captcha")
+               || u.Contains("recaptcha")
+               || u.Contains("hcaptcha")
+               || u.Contains("recaptcha.net")
+               || u.Contains("challenges.cloudflare");
+    }
+
+    /// <summary>
+    /// Top-level Google sign-in recaptcha challenge — user must interact; cover must lift.
+    /// </summary>
+    static bool IsGoogleRecaptchaChallengeUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        var u = url.ToLowerInvariant();
+        if (u.Contains("recaptcha") || u.Contains("hcaptcha"))
+            return true;
+        // "captcha" alone — but not "captcha" inside unrelated strings on pwd pages
+        if (u.Contains("/captcha") || u.Contains("captcha?") || u.Contains("captcha&") || u.Contains("captcha="))
+            return true;
+        if (u.Contains("challenge/recaptcha") || u.Contains("challenge/ipp") || u.Contains("challenge/az") ||
+            u.Contains("challenge/bc") || u.Contains("challenge/wp"))
+            return true;
+        if (u.Contains("/challenge/") &&
+            !u.Contains("/challenge/pwd") &&
+            !u.Contains("/challenge/totp") &&
+            !u.Contains("/challenge/selection") &&
+            !u.Contains("/challenge/sk") &&
+            !u.Contains("/challenge/iap") &&
+            !u.Contains("/challenge/dp") &&
+            !u.Contains("/challenge/ootp"))
+            return true;
+        return false;
+    }
+
+    /// <summary>Email / password / OTP steps where auto-login cover should be back on.</summary>
+    static bool IsGoogleCredentialStepUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        try
+        {
+            var path = new Uri(url).AbsolutePath.ToLowerInvariant();
+            return path.Contains("/identifier")
+                   || path.Contains("/challenge/pwd")
+                   || path.Contains("/challenge/totp")
+                   || path.Contains("/challenge/ipp")
+                   || path.Contains("/challenge/sk")
+                   || path.Contains("/challenge/selection")
+                   || path.Contains("/rejected")
+                   || path.Contains("/speedbump");
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    static bool IsGoogleLogoutUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        try
+        {
+            var uri = new Uri(url);
+            var host = uri.Host.ToLowerInvariant();
+            var path = (uri.AbsolutePath ?? "").ToLowerInvariant();
+            if (host.Contains("accounts.google.com") && path.Contains("logout"))
+                return true;
+            if ((host == "google.com" || host == "www.google.com") && path.StartsWith("/logout"))
+                return true;
+            return false;
+        }
+        catch
+        {
+            return url.Contains("logout", StringComparison.OrdinalIgnoreCase)
+                   && url.Contains("google", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    void HandleAuthOverlayCommand(bool show, bool captcha, bool done)
+    {
+        if (done)
+        {
+            // Ignore premature done while still on Google auth (reload / inject race)
+            var cur = FlowView.CoreWebView2?.Source ?? "";
+            if (IsGoogleAuthRelatedUrl(cur))
+            {
+                Debug.WriteLine("[AuthOverlay] ignore done — still on Google auth");
+                _authLoginActive = true;
+                _onGoogleAuth = true;
+                if (IsGoogleRecaptchaChallengeUrl(cur))
+                    _captchaActive = true;
+                ApplyAuthOverlayState();
+                return;
+            }
+            _captchaActive = false;
+            _onGoogleAuth = false;
+            _authLoginActive = false;
+            ApplyAuthOverlayState();
+            return;
+        }
+        if (captcha)
+        {
+            _captchaActive = true;
+            _onGoogleAuth = true;
+            _authLoginActive = true;
+            ApplyAuthOverlayState();
+            return;
+        }
+        // show / resume after captcha — never clear sticky session
+        // But do not force cover back on while the URL is still a recaptcha challenge
+        var live = FlowView.CoreWebView2?.Source ?? "";
+        if (IsGoogleRecaptchaChallengeUrl(live))
+        {
+            _captchaActive = true;
+            _onGoogleAuth = true;
+            _authLoginActive = true;
+            ApplyAuthOverlayState();
+            return;
+        }
+        _captchaActive = false;
+        _onGoogleAuth = true;
+        _authLoginActive = true;
+        ApplyAuthOverlayState();
+    }
+
+    void SyncOverlayMargins()
+    {
+        var top = _shellMode == "full" ? 0 : _chromeHeight;
+        AuthOverlay.Margin = new Thickness(0, top, 0, 0);
+        CaptchaBanner.Margin = new Thickness(0, top, 0, 0);
+    }
+
+    void ApplyAuthOverlayState()
+    {
+        Dispatcher.Invoke(() =>
+        {
+            SyncOverlayMargins();
+
+            int want;
+            if (_shellMode == "full" || WindowState == WindowState.Minimized)
+                want = AuthUiOff;
+            else if ((_authLoginActive || _onGoogleAuth) && _captchaActive)
+                want = AuthUiCaptcha;
+            else if (_authLoginActive || _onGoogleAuth)
+                want = AuthUiCover;
+            else
+                want = AuthUiOff;
+
+            // Idempotent — avoid Hide/Show flicker on every navigation tick
+            if (want == _authUiMode)
+            {
+                if (want == AuthUiCover)
+                {
+                    SyncAuthCoverBounds();
+                    PinAuthCoverAboveWebView();
+                }
+                return;
+            }
+            _authUiMode = want;
+
+            if (want == AuthUiCaptcha)
+            {
+                AuthOverlay.Visibility = Visibility.Collapsed;
+                CaptchaBanner.Visibility = Visibility.Visible;
+                StopAuthCoverPinTimer();
+                HideAuthCoverWindow();
+                return;
+            }
+
+            if (want == AuthUiCover)
+            {
+                AuthOverlay.Visibility = Visibility.Visible;
+                CaptchaBanner.Visibility = Visibility.Collapsed;
+                ShowAuthCoverWindow();
+                StartAuthCoverPinTimer();
+                return;
+            }
+
+            AuthOverlay.Visibility = Visibility.Collapsed;
+            CaptchaBanner.Visibility = Visibility.Collapsed;
+            StopAuthCoverPinTimer();
+            HideAuthCoverWindow();
+        });
+    }
+
+    void StartAuthCoverPinTimer()
+    {
+        if (_authCoverPinTimer != null) return;
+        _authCoverPinTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };
+        _authCoverPinTimer.Tick += (_, _) =>
+        {
+            if (_authUiMode != AuthUiCover) return;
+            SyncAuthCoverBounds();
+            PinAuthCoverAboveWebView();
+        };
+        _authCoverPinTimer.Start();
+    }
+
+    void StopAuthCoverPinTimer()
+    {
+        if (_authCoverPinTimer == null) return;
+        _authCoverPinTimer.Stop();
+        _authCoverPinTimer = null;
+    }
+
+    void PinAuthCoverAboveWebView()
+    {
+        if (_authCoverWindow == null || !_authCoverWindow.IsVisible) return;
+        try
+        {
+            // Keep cover above WebView2 HWND during page reloads (airspace fights)
+            if (IsActive)
+                _authCoverWindow.Topmost = true;
+            var hwnd = new WindowInteropHelper(_authCoverWindow).Handle;
+            if (hwnd != IntPtr.Zero)
+                SetWindowPos(hwnd, HwndaTop, 0, 0, 0, 0, SwpNomove | SwpNosize | SwpNoactivate);
+        }
+        catch { /* ignore */ }
+    }
+
+    void EnsureAuthCoverWindow()
+    {
+        if (_authCoverWindow != null) return;
+
+        var spinBorder = new Border
+        {
+            Width = 52,
+            Height = 52,
+            CornerRadius = new CornerRadius(26),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x40, 0xCB, 0xD5, 0xE1)),
+            BorderThickness = new Thickness(3),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 18),
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            Child = new System.Windows.Shapes.Ellipse
+            {
+                Width = 10,
+                Height = 10,
+                Fill = new SolidColorBrush(Color.FromRgb(0x38, 0xBD, 0xF8)),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(0, 2, 2, 0)
+            }
+        };
+        var rotate = new RotateTransform();
+        spinBorder.RenderTransform = rotate;
+        var spinAnim = new DoubleAnimation(0, 360, new Duration(TimeSpan.FromSeconds(0.75)))
+        {
+            RepeatBehavior = RepeatBehavior.Forever
+        };
+        rotate.BeginAnimation(RotateTransform.AngleProperty, spinAnim);
+
+        var panel = new StackPanel
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            MaxWidth = 420
+        };
+        panel.Children.Add(spinBorder);
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Signing you in…",
+            FontSize = 22,
+            FontWeight = FontWeights.Bold,
+            Foreground = new SolidColorBrush(Color.FromRgb(0xF8, 0xFA, 0xFC)),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 8)
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Automatic Google login is running. Please wait.",
+            FontSize = 14,
+            Foreground = new SolidColorBrush(Color.FromRgb(0x94, 0xA3, 0xB8)),
+            TextWrapping = TextWrapping.Wrap,
+            TextAlignment = TextAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center
+        });
+
+        // Opaque (no AllowsTransparency) — transparent covers flicker and show Google UI through
+        _authCoverWindow = new Window
+        {
+            Owner = this,
+            WindowStyle = WindowStyle.None,
+            AllowsTransparency = false,
+            Background = new SolidColorBrush(Color.FromRgb(0x02, 0x06, 0x17)),
+            ShowInTaskbar = false,
+            ResizeMode = ResizeMode.NoResize,
+            ShowActivated = false,
+            Focusable = false,
+            Title = "FlowAuthCover",
+            Content = panel,
+            IsHitTestVisible = true
+        };
+    }
+
+    void ShowAuthCoverWindow()
+    {
+        EnsureAuthCoverWindow();
+        if (_authCoverWindow == null) return;
+        if (!_authCoverWindow.IsVisible)
+            _authCoverWindow.Show();
+        SyncAuthCoverBounds();
+        PinAuthCoverAboveWebView();
+    }
+
+    void HideAuthCoverWindow()
+    {
+        if (_authCoverWindow == null) return;
+        _authCoverWindow.Topmost = false;
+        if (_authCoverWindow.IsVisible)
+            _authCoverWindow.Hide();
+    }
+
+    void SyncAuthCoverBounds()
+    {
+        if (_authCoverWindow == null || !_authCoverWindow.IsVisible) return;
+        if (!IsVisible || WindowState == WindowState.Minimized) return;
+        if (FlowView.Visibility != Visibility.Visible || FlowView.ActualWidth < 2 || FlowView.ActualHeight < 2)
+            return;
+
+        try
+        {
+            var topLeft = FlowView.PointToScreen(new Point(0, 0));
+            var source = PresentationSource.FromVisual(this);
+            if (source?.CompositionTarget != null)
+            {
+                var dip = source.CompositionTarget.TransformFromDevice.Transform(topLeft);
+                _authCoverWindow.Left = dip.X;
+                _authCoverWindow.Top = dip.Y;
+            }
+            else
+            {
+                _authCoverWindow.Left = topLeft.X;
+                _authCoverWindow.Top = topLeft.Y;
+            }
+            _authCoverWindow.Width = Math.Max(2, FlowView.ActualWidth);
+            _authCoverWindow.Height = Math.Max(2, FlowView.ActualHeight);
+        }
+        catch
+        {
+            /* layout not ready */
+        }
     }
 
     /// <summary>
@@ -274,12 +957,15 @@ public partial class MainWindow : Window
                 ShellView.VerticalAlignment = VerticalAlignment.Top;
                 ShellView.Margin = new Thickness(0);
                 FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
-                Panel.SetZIndex(ShellView, 2);
+                Panel.SetZIndex(ShellView, 10);
                 Panel.SetZIndex(FlowView, 1);
+                SyncOverlayMargins();
+                ApplyAuthOverlayState();
             }
             else
             {
                 FlowView.Visibility = Visibility.Visible;
+                SyncAuthCoverBounds();
             }
         });
         await Task.Delay(60);
@@ -359,6 +1045,8 @@ public partial class MainWindow : Window
             if (string.IsNullOrWhiteSpace(_flowCredEmail)) return;
             var u = url ?? FlowView.CoreWebView2.Source ?? "";
             if (!u.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase)) return;
+            // Never autofill / inject page overlays on recaptcha — blanks the challenge
+            if (_captchaActive || IsGoogleRecaptchaChallengeUrl(u)) return;
 
             // Debounce — HistoryChanged fires often on Google SPA and was spawning fill loops
             var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -399,6 +1087,7 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(_flowCredEmail)) return;
         var src = FlowView.CoreWebView2.Source ?? "";
         if (!src.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase)) return;
+        if (_captchaActive || IsGoogleRecaptchaChallengeUrl(src)) return;
         var email = JsString(_flowCredEmail);
         var password = JsString(_flowCredPassword ?? "");
         // Once-per-step autofill — never re-click Next after a successful submit on this path
@@ -412,6 +1101,10 @@ public partial class MainWindow : Window
 
   const st = window.__flowHostAuto = window.__flowHostAuto || {{}};
   const path = location.pathname || '';
+  if (/recaptcha/i.test(path)) {{
+    try {{ document.getElementById('__flow_host_ol__')?.remove(); }} catch (e) {{}}
+    return {{ ok:false, reason:'recaptcha' }};
+  }}
   const stepKey = path.split('/').slice(0, 5).join('/');
 
   const visible = (el) => {{
@@ -445,23 +1138,9 @@ public partial class MainWindow : Window
   }};
 
   try {{
-    const onPwd = /\\/challenge\\/pwd/i.test(path) || !!document.querySelector('input[type=""password""]');
-    if (!document.getElementById('__flow_host_ol__') && !st.overlayDismissed && !onPwd) {{
-      const s = document.createElement('style');
-      s.id = '__flow_host_ol_style__';
-      s.textContent = '#__flow_host_ol__{{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:rgba(2,6,23,.82);color:#f8fafc;font-family:Segoe UI,system-ui,sans-serif;cursor:pointer}}#__flow_host_ol__ .c{{text-align:center;pointer-events:none}}#__flow_host_ol__ h3{{margin:0 0 8px;font-size:20px}}#__flow_host_ol__ p{{margin:0;color:#94a3b8;font-size:14px}}';
-      (document.head||document.documentElement).appendChild(s);
-      const ol = document.createElement('div');
-      ol.id = '__flow_host_ol__';
-      ol.innerHTML = '<div class=""c""><h3>Signing you in…</h3><p>Automatic Google login · click anywhere to watch</p></div>';
-      ol.addEventListener('click', () => {{ st.overlayDismissed = true; ol.remove(); }}, {{ once:true }});
-      (document.body||document.documentElement).appendChild(ol);
-    }}
-    // Hide overlay on password so user can see the field / captcha
-    if (onPwd) {{
-      const ol = document.getElementById('__flow_host_ol__');
-      if (ol) ol.remove();
-    }}
+    // Never paint an in-page cover — host WPF overlay owns that (page cover blanked captcha)
+    try {{ document.getElementById('__flow_host_ol__')?.remove(); }} catch (e) {{}}
+    try {{ document.getElementById('__flow_host_ol_style__')?.remove(); }} catch (e) {{}}
   }} catch (e) {{}}
 
   const pwd = Array.from(document.querySelectorAll('input[name=""Passwd""], input[type=""password""], input[autocomplete*=""current-password""]')).find(el => visible(el));
@@ -475,7 +1154,7 @@ public partial class MainWindow : Window
       setTimeout(() => {{
         if (st[pwdKey] === 'submitted') return;
         if (clickNext()) st[pwdKey] = 'submitted';
-      }}, 500);
+      }}, 1500);
     }}
     return {{ ok, step:'password', already }};
   }}
@@ -491,7 +1170,7 @@ public partial class MainWindow : Window
       setTimeout(() => {{
         if (st[emKey] === 'submitted') return;
         if (clickNext()) st[emKey] = 'submitted';
-      }}, 1100);
+      }}, 1500);
     }}
     return {{ ok, step:'email', already }};
   }}
@@ -584,6 +1263,24 @@ public partial class MainWindow : Window
             _ = CdpMouseClickAsync(x, y);
         }
 
+        // Host owns the full-page Google auth cover (WebView2 HWND airspace)
+        if (string.Equals(channel, "auth:captcha", StringComparison.OrdinalIgnoreCase) &&
+            root.TryGetProperty("data", out var captchaData) &&
+            captchaData.ValueKind == JsonValueKind.Object)
+        {
+            var active = captchaData.TryGetProperty("active", out var a) && a.ValueKind == JsonValueKind.True;
+            HandleAuthOverlayCommand(show: !active, captcha: active, done: false);
+        }
+        else if (string.Equals(channel, "auth:auto-login", StringComparison.OrdinalIgnoreCase) &&
+                 root.TryGetProperty("data", out var alData) &&
+                 alData.ValueKind == JsonValueKind.Object)
+        {
+            var done = alData.TryGetProperty("done", out var doneEl) && doneEl.ValueKind == JsonValueKind.True;
+            var captcha = alData.TryGetProperty("captcha", out var capEl) && capEl.ValueKind == JsonValueKind.True;
+            var overlay = alData.TryGetProperty("overlay", out var ovEl) && ovEl.ValueKind == JsonValueKind.True;
+            HandleAuthOverlayCommand(show: overlay || (!done && !captcha && _onGoogleAuth), captcha: captcha, done: done);
+        }
+
         PostToShell(new
         {
             type = "flow-event",
@@ -627,7 +1324,7 @@ public partial class MainWindow : Window
     const btn = document.querySelector('#totpNext button, #totpNext') ||
       Array.from(document.querySelectorAll('button')).find(b => /^\\s*next\\s*$/i.test((b.innerText || '').trim()));
     if (btn) {{ try {{ btn.click(); }} catch (e) {{}} }}
-  }}, 500);
+  }}, 1500);
   return 'filled:' + (el.value || '').length;
 }})()";
             var result = await FlowView.CoreWebView2.ExecuteScriptAsync(script);
@@ -684,6 +1381,8 @@ public partial class MainWindow : Window
                     {
                         ShellView.Height = _chromeHeight;
                         FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
+                        SyncOverlayMargins();
+                        SyncAuthCoverBounds();
                     }
                 });
                 break;
@@ -763,6 +1462,14 @@ public partial class MainWindow : Window
                 SetShellMode(mode == "full" ? "full" : "chrome");
                 break;
             }
+            case "authOverlay":
+            {
+                var show = root.TryGetProperty("show", out var s) && s.ValueKind == JsonValueKind.True;
+                var captcha = root.TryGetProperty("captcha", out var cEl) && cEl.ValueKind == JsonValueKind.True;
+                var done = root.TryGetProperty("done", out var dEl) && dEl.ValueKind == JsonValueKind.True;
+                HandleAuthOverlayCommand(show, captcha, done);
+                break;
+            }
         }
         await Task.CompletedTask;
     }
@@ -772,7 +1479,16 @@ public partial class MainWindow : Window
         switch (cmd)
         {
             case "getConfig":
-                return JsonSerializer.Deserialize<object>(_config.ToJson());
+                return new
+                {
+                    serverUrl = string.IsNullOrWhiteSpace(_config.ServerUrl)
+                        ? AppConfig.DefaultServerUrl
+                        : _config.ServerUrl,
+                    authToken = _config.AuthToken,
+                    user = _config.User,
+                    activeServer = _config.ActiveServer,
+                    zoomLevel = _config.ZoomLevel
+                };
             case "saveServerUrl":
             {
                 var url = payload.TryGetProperty("url", out var u) ? u.GetString() : null;
@@ -841,6 +1557,15 @@ public partial class MainWindow : Window
 
     async Task ClearFlowSessionAsync()
     {
+        // Drop sticky Google auth cover immediately — wipe is not a sign-in session
+        Dispatcher.Invoke(() =>
+        {
+            _captchaActive = false;
+            _onGoogleAuth = false;
+            _authLoginActive = false;
+            ApplyAuthOverlayState();
+        });
+
         if (FlowView.CoreWebView2 == null) return;
         try
         {
@@ -852,17 +1577,39 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             Debug.WriteLine("ClearFlowSession: " + ex.Message);
-            // Fallback: wipe cookies for Google hosts
-            try
-            {
-                foreach (var host in new[] { "https://accounts.google.com", "https://flow.google.com", "https://www.google.com" })
-                {
-                    var cookies = await FlowView.CoreWebView2.CookieManager.GetCookiesAsync(host);
-                    foreach (var cookie in cookies)
-                        FlowView.CoreWebView2.CookieManager.DeleteCookie(cookie);
-                }
-            }
-            catch { /* ignore */ }
         }
+
+        // Always try cookie wipe for Google / Flow hosts
+        try
+        {
+            var hosts = new[]
+            {
+                "https://accounts.google.com",
+                "https://flow.google.com",
+                "https://labs.google",
+                "https://www.google.com",
+                "https://google.com",
+                "https://myaccount.google.com",
+                "https://oauth2.googleapis.com"
+            };
+            foreach (var host in hosts)
+            {
+                var cookies = await FlowView.CoreWebView2.CookieManager.GetCookiesAsync(host);
+                foreach (var cookie in cookies)
+                    FlowView.CoreWebView2.CookieManager.DeleteCookie(cookie);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("ClearFlowCookies: " + ex.Message);
+        }
+
+        Dispatcher.Invoke(() =>
+        {
+            _captchaActive = false;
+            _onGoogleAuth = false;
+            _authLoginActive = false;
+            ApplyAuthOverlayState();
+        });
     }
 }

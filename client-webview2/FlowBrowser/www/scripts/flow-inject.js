@@ -31,6 +31,11 @@
 })();
 const { ipcRenderer } = window;
 
+if (window.__flowInjectBootstrapped) {
+  console.warn('[Flow Inject] duplicate inject skipped');
+} else {
+  window.__flowInjectBootstrapped = true;
+
 // =========================================================================
 // MASKING RULES & CREDENTIALS STATE
 // =========================================================================
@@ -39,17 +44,7 @@ const TARGET_MODEL_DISPLAY = "Veo 3.1 - Fast";
 const TARGET_MODEL_SHORT = "Fast";
 
 let maskingRules = {
-  modelRenames: [
-    { originalName: "Veo 3.1 - Lite [Lower Priority]", displayName: TARGET_MODEL_DISPLAY, enabled: true },
-    { originalName: "Veo 3.1 - Lite (Lower Priority)", displayName: TARGET_MODEL_DISPLAY, enabled: true },
-    { originalName: "Veo 3.1 - Lite [lower priority]", displayName: TARGET_MODEL_DISPLAY, enabled: true },
-    { originalName: "Veo 3.1 [Lower Priority]", displayName: TARGET_MODEL_DISPLAY, enabled: true },
-    { originalName: "Veo 3.1 (Lower Priority)", displayName: TARGET_MODEL_DISPLAY, enabled: true },
-    { originalName: "Veo 3.1 - Lite", displayName: TARGET_MODEL_DISPLAY, enabled: true },
-    { originalName: "Veo 3.1 Lite", displayName: TARGET_MODEL_DISPLAY, enabled: true },
-    { originalName: "Lite [Lower Priority]", displayName: TARGET_MODEL_DISPLAY, enabled: true },
-    { originalName: "Lite (Lower Priority)", displayName: TARGET_MODEL_DISPLAY, enabled: true }
-  ],
+  modelRenames: [],
   cssSelectorsToHide: [],
   customCss: ''
 };
@@ -77,6 +72,8 @@ let autoLoginState = {
   otpRequested: false,
   otpFilled: false,
   captchaPaused: false,
+  captchaHits: 0,
+  captchaMisses: 0,
   overlayDismissed: false,
   lastHostNotify: '',
 };
@@ -733,10 +730,7 @@ setTimeout(() => {
 setupGenerateActionHook();
 
 // =========================================================================
-// MODEL LOCKING & RENAMING ENGINE
-// Requirement:
-// 1. Hide ALL models except Veo lower priority
-// 2. Rename lower priority model strictly to "Fast" (or "Veo 3.1 - Fast"), NOT "Lite"
+// MODEL ENGINE (locking/renaming disabled — show all Google Flow models)
 // =========================================================================
 
 function isLowerPriorityOption(text, el) {
@@ -831,43 +825,8 @@ function isOtherModelOption(text, el) {
   );
 }
 
-// Collapse any Lite / Lower Priority / mangled Veo label to a clean "Veo 3.1 - Fast"
-function renameLowerPriorityText(element) {
-  if (!element) return;
-  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-  let node;
-  while ((node = walker.nextNode())) {
-    const raw = node.nodeValue;
-    if (!raw) continue;
-    const val = raw.trim();
-    if (!val || /banana|nano|imagen/i.test(val)) continue;
-    if (val === TARGET_MODEL_DISPLAY) continue;
-
-    const looksLikeVeoLabel =
-      /veo\s*3\.1/i.test(val) ||
-      /lower\s*priority/i.test(val) ||
-      (/^\s*(lite|fast)\s*$/i.test(val) && (
-        element.getAttribute?.('data-is-lower-priority') === 'true' ||
-        element.getAttribute?.('data-is-veo-model') === 'true' ||
-        getActivePromptMode() === 'video'
-      ));
-
-    const mangled = /veo\s*3\.1(?:\s*-\s*veo\s*3\.1){1,}/i.test(val);
-    if (!looksLikeVeoLabel && !mangled) continue;
-    if (val.length > 120) continue;
-
-    // Only rewrite dedicated model-label text nodes (avoids eating longer UI sentences)
-    if (
-      mangled ||
-      /lower\s*priority/i.test(val) ||
-      /veo\s*3\.1.*\blite\b/i.test(val) ||
-      /veo\s*3\.1.*\bfast\b/i.test(val) ||
-      /^\s*(lite|fast)\s*$/i.test(val)
-    ) {
-      node.nodeValue = TARGET_MODEL_DISPLAY;
-    }
-  }
-}
+// Model renaming removed — show original Google Flow labels
+function renameLowerPriorityText(_element) {}
 
 function isSettingsOverlayPanel(el) {
   if (!el) return false;
@@ -894,293 +853,11 @@ function dismissVideoModelMenus() {
 }
 
 function enforceModelRestrictions() {
-  const hostname = window.location.hostname;
-  if (!hostname.includes('flow.google.com') && !hostname.includes('labs.google')) return;
-
-  const currentMode = getActivePromptMode();
-
-  // 1. Find model picker option elements (menus + listboxes)
-  const optionCandidates = document.querySelectorAll(`
-    mat-option,
-    .mat-option,
-    .mat-mdc-option,
-    [role="option"],
-    [role="menuitem"],
-    flow-model-picker [role="option"],
-    flow-model-picker mat-option,
-    [role="listbox"] mat-option,
-    [role="listbox"] [role="option"],
-    [role="menu"] [role="menuitem"],
-    [data-testid*="model-option"]
-  `);
-
-  let keptFastOption = false;
-  optionCandidates.forEach(opt => {
-    const text = (opt.innerText || opt.textContent || '').trim();
-    if (!text || text.length > 120) return;
-
-    const isSettingControl =
-      text.includes('16:9') || text.includes('9:16') || text.includes('1:1') || text.includes('4:3') || text.includes('3:4') ||
-      text.includes('720p') || text.includes('1080p') ||
-      /^x[1-4]$/i.test(text) || /^[468]s$/i.test(text) ||
-      text.toLowerCase() === 'image' || text.toLowerCase() === 'video' ||
-      text.toLowerCase() === 'frames' || text.toLowerCase() === 'ingredients';
-
-    if (isSettingControl) {
-      opt.style.removeProperty('display');
-      opt.style.removeProperty('visibility');
-      opt.style.removeProperty('pointer-events');
-      opt.style.removeProperty('opacity');
-      return;
-    }
-
-    const isAllowed =
-      isLowerPriorityOption(text, opt) ||
-      /veo\s*3\.1\s*-\s*fast/i.test(text) ||
-      text.trim() === 'Fast';
-
-    if (isAllowed) {
-      opt.setAttribute('data-is-lower-priority', 'true');
-      renameLowerPriorityText(opt);
-      if (keptFastOption) {
-        // Duplicate Fast rows after rename — keep only the first
-        opt.style.setProperty('display', 'none', 'important');
-        opt.style.setProperty('visibility', 'hidden', 'important');
-        opt.style.setProperty('height', '0px', 'important');
-        opt.style.setProperty('pointer-events', 'none', 'important');
-        opt.style.setProperty('opacity', '0', 'important');
-        return;
-      }
-      keptFastOption = true;
-      opt.style.removeProperty('display');
-      opt.style.setProperty('display', 'flex', 'important');
-      opt.style.setProperty('visibility', 'visible', 'important');
-      opt.style.setProperty('opacity', '1', 'important');
-      opt.style.setProperty('pointer-events', 'auto', 'important');
-      opt.style.removeProperty('height');
-      opt.style.removeProperty('min-height');
-    } else if (isOtherModelOption(text, opt) || /^omni\b/i.test(text) || /veo\s*3\.1\s*-\s*quality/i.test(text) || /^ultra$/i.test(text)) {
-      opt.style.setProperty('display', 'none', 'important');
-      opt.style.setProperty('visibility', 'hidden', 'important');
-      opt.style.setProperty('height', '0px', 'important');
-      opt.style.setProperty('min-height', '0px', 'important');
-      opt.style.setProperty('margin', '0px', 'important');
-      opt.style.setProperty('padding', '0px', 'important');
-      opt.style.setProperty('pointer-events', 'none', 'important');
-      opt.style.setProperty('opacity', '0', 'important');
-    }
-  });
-
-  // 2. Manage trigger buttons in the workspace & overlays
-  const triggerElements = document.querySelectorAll(`
-    button,
-    [role="button"],
-    [data-testid*="model-picker"],
-    [data-testid*="model-select"],
-    flow-model-picker
-  `);
-
-  triggerElements.forEach(btn => {
-    const text = (btn.innerText || btn.textContent || '').trim();
-
-    // A. Main Generation Settings Pill (e.g. "Video Ã‚Â· 720p Ã‚Â· 8s Ã¢â€“Â­ x2")
-    const isMainSettingsPill =
-      text.includes('720p') || text.includes('1080p') ||
-      (text.includes('8s') && (text.includes('x1') || text.includes('x2') || text.includes('x4') || text.includes('Video') || text.includes('Image'))) ||
-      text.includes('16:9') || text.includes('9:16') || text.includes('1:1') || text.includes('4:3') ||
-      /^video\s*Ã‚Â·/i.test(text) || /^image\s*Ã‚Â·/i.test(text) ||
-      btn.closest('.prompt-settings-pill, [data-testid*="generation-settings"]') !== null;
-
-    if (isMainSettingsPill) {
-      btn.style.removeProperty('cursor');
-      btn.style.setProperty('cursor', 'pointer', 'important');
-      btn.style.setProperty('pointer-events', 'auto', 'important');
-      btn.style.setProperty('display', 'inline-flex', 'important');
-      btn.style.setProperty('visibility', 'visible', 'important');
-      btn.style.setProperty('opacity', '1', 'important');
-      // Walk up a few parents in case a prior lock set pointer-events:none
-      let p = btn.parentElement;
-      for (let i = 0; i < 3 && p; i++) {
-        if (p.style && p.style.pointerEvents === 'none') p.style.setProperty('pointer-events', 'auto', 'important');
-        p = p.parentElement;
-      }
-      const chevron = btn.querySelector('svg, .chevron, [class*="arrow"], [class*="chevron"], [data-icon*="arrow"]');
-      if (chevron) {
-        chevron.style.removeProperty('display');
-      }
-      return;
-    }
-
-    // B. Inside the Settings Overlay: The Model Selector Row
-    const isModelFamilySelector = (
-      btn.getAttribute('aria-label') === 'Select model family' ||
-      btn.getAttribute('aria-haspopup') === 'listbox' ||
-      btn.getAttribute('aria-haspopup') === 'menu' ||
-      btn.querySelector('.model-select-trigger-content') !== null ||
-      btn.closest('flow-model-picker, [data-testid*="model-picker"], .model-selector') !== null
-    ) && !btn.closest('flow-media-card, flow-video-card, [data-testid*="media-card"], flow-project-card');
-
-    if (isModelFamilySelector) {
-      const isImageModel = currentMode === 'image' || text.includes('Banana') || text.includes('Nano') || text.includes('Imagen');
-
-      if (isImageModel) {
-        // IMAGE MODE: Always allow opening dropdown, always show chevron, never disable!
-        btn.removeAttribute('data-is-veo-model');
-        btn.removeAttribute('data-is-lower-priority');
-        btn.style.setProperty('cursor', 'pointer', 'important');
-        btn.style.setProperty('pointer-events', 'auto', 'important');
-
-        const chevrons = btn.querySelectorAll('mat-icon, svg, .chevron, [class*="arrow"], [class*="chevron"], [data-icon*="arrow"], [class*="drop"]');
-        chevrons.forEach(ch => {
-          ch.style.removeProperty('display');
-          ch.style.removeProperty('visibility');
-          ch.style.removeProperty('opacity');
-          ch.style.removeProperty('width');
-          ch.style.removeProperty('height');
-          ch.style.removeProperty('font-size');
-          ch.style.removeProperty('margin');
-          ch.style.removeProperty('padding');
-          ch.style.setProperty('display', 'inline-flex', 'important');
-          ch.style.setProperty('visibility', 'visible', 'important');
-          ch.style.setProperty('opacity', '1', 'important');
-        });
-        return;
-      }
-
-      // VIDEO MODE: lock to Veo 3.1 - Fast (underlying Lite Lower Priority)
-      const isAllowedVeo = isLowerPriorityOption(text, btn) ||
-        /veo\s*3\.1.*lite/i.test(text) ||
-        /lower\s*priority/i.test(text) ||
-        text.includes('Veo 3.1 - Fast') ||
-        text.trim() === 'Fast';
-
-      if (isAllowedVeo) {
-        btn.setAttribute('data-is-veo-model', 'true');
-        btn.setAttribute('data-is-lower-priority', 'true');
-        renameLowerPriorityText(btn);
-
-        // Disable opening model dropdown once locked
-        btn.style.setProperty('cursor', 'default', 'important');
-        btn.style.setProperty('pointer-events', 'none', 'important');
-
-        const chevrons = btn.querySelectorAll('mat-icon, svg, .chevron, [class*="arrow"], [class*="chevron"], [data-icon*="arrow"], [class*="drop"]');
-        chevrons.forEach(ch => {
-          ch.style.setProperty('display', 'none', 'important');
-          ch.style.setProperty('visibility', 'hidden', 'important');
-          ch.style.setProperty('opacity', '0', 'important');
-        });
-      } else {
-        // Wrong video model — keep clickable so auto-switcher can open/select Fast
-        btn.removeAttribute('data-is-veo-model');
-        btn.removeAttribute('data-is-lower-priority');
-        btn.style.setProperty('cursor', 'pointer', 'important');
-        btn.style.setProperty('pointer-events', 'auto', 'important');
-      }
-      return;
-    }
-
-    // C. Other model triggers
-    if (isLowerPriorityOption(text, btn)) {
-      btn.setAttribute('data-is-lower-priority', 'true');
-      renameLowerPriorityText(btn);
-    }
-  });
+  // Model locking disabled — leave Google Flow model picker alone
 }
 
-let isSwitchingVideoModel = false;
-let lastSwitchTimestamp = 0;
-
 function autoSelectLowerPriorityModel() {
-  const currentMode = getActivePromptMode();
-  if (currentMode !== 'video') return;
-
-  const now = Date.now();
-  if (isSwitchingVideoModel || (now - lastSwitchTimestamp < 1500)) return;
-
-  const isInsideProject = window.location.pathname.includes('/project') || 
-                          window.location.href.includes('/project') ||
-                          document.querySelector('flow-canvas, .workspace-canvas, [data-testid*="canvas"], [aria-label*="Ingredients" i], [aria-label*="Frames" i]') !== null;
-  if (!isInsideProject) return;
-
-  const triggerElements = document.querySelectorAll(`
-    flow-model-picker button,
-    [data-testid*="model-picker"] button,
-    [data-testid*="model-select"],
-    button[aria-label*="model" i],
-    .model-selector button,
-    [aria-label="Select model family"],
-    button[aria-haspopup="listbox"],
-    button[aria-haspopup="menu"]
-  `);
-
-  for (const btn of triggerElements) {
-    if (btn.closest('header, nav, flow-app-header') || btn.classList.contains('back-button') || (btn.getAttribute('aria-label') || '').toLowerCase().includes('back')) {
-      continue;
-    }
-
-    const text = (btn.innerText || btn.textContent || '').trim();
-    if (!text) continue;
-    const t = text.toLowerCase();
-
-    // Already Veo 3.1 Lite Lower Priority:
-    if (isLowerPriorityOption(text, btn) || (t.includes('lite') && t.includes('veo')) || t.includes('lower priority')) {
-      btn.setAttribute('data-is-veo-model', 'true');
-      btn.setAttribute('data-is-lower-priority', 'true');
-      renameLowerPriorityText(btn);
-      continue;
-    }
-
-    // Skip if it's an image model text:
-    if (t.includes('banana') || t.includes('nano') || t.includes('imagen')) {
-      continue;
-    }
-
-    // Wrong video model detected (Omni 1.1 Flash, Quality, Veo 2, Flash, etc.):
-    if (t.includes('omni') || t.includes('quality') || t.includes('veo 2') || t.includes('flash')) {
-      console.log('[Flow Model Engine] Auto-switching wrong video model (' + text + ') to Veo 3.1 - Fast...');
-      isSwitchingVideoModel = true;
-      lastSwitchTimestamp = now;
-
-      // Ensure button can be clicked
-      btn.removeAttribute('data-is-veo-model');
-      btn.removeAttribute('data-is-lower-priority');
-      btn.style.setProperty('pointer-events', 'auto', 'important');
-      btn.style.setProperty('cursor', 'pointer', 'important');
-
-      // Click to open the model dropdown
-      btn.click();
-
-      // Poll for the options
-      let attempts = 0;
-      const selectTimer = setInterval(() => {
-        attempts++;
-        const options = Array.from(document.querySelectorAll(`
-          mat-option,
-          .mat-option,
-          [role="option"],
-          flow-model-picker [role="option"],
-          [role="listbox"] div,
-          [role="listbox"] button
-        `));
-
-        const fastOpt = options.find(opt => isLowerPriorityOption(opt.innerText || opt.textContent, opt));
-        if (fastOpt) {
-          clearInterval(selectTimer);
-          console.log('[Flow Model Engine] Found Veo 3.1 - Fast option, clicking to select!');
-          fastOpt.click();
-          setTimeout(() => {
-            renameLowerPriorityText(btn);
-            isSwitchingVideoModel = false;
-          }, 150);
-        } else if (attempts > 15) {
-          clearInterval(selectTimer);
-          isSwitchingVideoModel = false;
-        }
-      }, 100);
-
-      break;
-    }
-  }
+  // Auto-switch to Lite disabled — user can pick any model
 }
 
 // =========================================================================
@@ -1485,63 +1162,13 @@ function removeCaptchaBanner() {
 }
 
 function ensureAutoLoginOverlay() {
-  if (autoLoginState.overlayDismissed || autoLoginState.captchaPaused) {
+  // Host owns the full-page mask (WPF AuthOverlay). Page DOM overlays cannot cover Google login reliably.
+  if (autoLoginState.captchaPaused) {
     removeAutoLoginOverlay();
     return;
   }
-  if (document.getElementById('__flow_auto_login_overlay__')) return;
-
-  if (!document.getElementById('__flow_auto_login_overlay_style__')) {
-    const style = document.createElement('style');
-    style.id = '__flow_auto_login_overlay_style__';
-    style.textContent = `
-      #__flow_auto_login_overlay__ {
-        position: fixed; inset: 0; z-index: 2147483000;
-        display: flex; align-items: center; justify-content: center;
-        background: radial-gradient(circle at 40% 30%, rgba(15,23,42,.88), rgba(2,6,23,.94));
-        backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-        cursor: pointer; font-family: "Segoe UI", system-ui, sans-serif;
-        color: #f8fafc; user-select: none;
-      }
-      #__flow_auto_login_overlay__ .flow-ol-card {
-        text-align: center; max-width: 360px; padding: 28px 24px; pointer-events: none;
-      }
-      #__flow_auto_login_overlay__ .flow-ol-spin {
-        width: 48px; height: 48px; margin: 0 auto 18px;
-        border: 3px solid rgba(148,163,184,.25); border-top-color: #38bdf8;
-        border-radius: 50%; animation: __flow_ol_spin .75s linear infinite;
-      }
-      @keyframes __flow_ol_spin { to { transform: rotate(360deg); } }
-      #__flow_auto_login_overlay__ h3 {
-        margin: 0 0 8px; font-size: 20px; font-weight: 700; letter-spacing: -.02em;
-      }
-      #__flow_auto_login_overlay__ p {
-        margin: 0; font-size: 14px; line-height: 1.45; color: #94a3b8;
-      }
-      #__flow_auto_login_overlay__ .flow-ol-hint {
-        margin-top: 14px; font-size: 12px; color: #64748b;
-      }
-    `;
-    (document.head || document.documentElement).appendChild(style);
-  }
-
-  const el = document.createElement('div');
-  el.id = '__flow_auto_login_overlay__';
-  el.setAttribute('role', 'status');
-  el.innerHTML = `
-    <div class="flow-ol-card">
-      <div class="flow-ol-spin" aria-hidden="true"></div>
-      <h3>Signing you in…</h3>
-      <p>Google login is running automatically. You don’t need to type anything.</p>
-      <p class="flow-ol-hint">Click anywhere to watch the page</p>
-    </div>
-  `;
-  el.addEventListener('click', () => {
-    autoLoginState.overlayDismissed = true;
-    removeAutoLoginOverlay();
-    notifyAuthHost('auth:auto-login', { overlay: false, captcha: false, watching: true });
-  }, { once: true });
-  (document.body || document.documentElement).appendChild(el);
+  autoLoginState.overlayDismissed = false;
+  removeAutoLoginOverlay();
   notifyAuthHost('auth:auto-login', { overlay: true, captcha: false });
 }
 
@@ -1572,26 +1199,53 @@ function showCaptchaBanner() {
   const el = document.createElement('div');
   el.id = '__flow_captcha_banner__';
   el.setAttribute('role', 'alert');
-  el.innerHTML = `Complete the reCAPTCHA below<small>We’ll continue signing you in automatically afterward</small>`;
+  el.innerHTML = `<strong>Please solve the captcha</strong><small>Complete the challenge below — we will continue signing you in automatically</small>`;
   (document.body || document.documentElement).appendChild(el);
 }
 
 function syncGoogleAuthChrome() {
   const host = location.hostname || '';
+  const path = location.pathname || '';
   if (!host.includes('accounts.google.com')) {
-    if (autoLoginState.captchaPaused || document.getElementById('__flow_auto_login_overlay__') || document.getElementById('__flow_captcha_banner__')) {
-      autoLoginState.captchaPaused = false;
-      removeAutoLoginOverlay();
-      removeCaptchaBanner();
-      notifyAuthHost('auth:auto-login', { overlay: false, captcha: false, done: true });
-    }
+    // Do NOT send done:true here — intermediate redirects leave accounts.google.com briefly.
+    // Host keeps the overlay sticky until flow.google.com / explicit workspace done.
+    removeAutoLoginOverlay();
+    removeCaptchaBanner();
     return { captcha: false };
   }
 
-  if (!credentials.email) return { captcha: false };
+  // URL-level recaptcha challenge — lift cover immediately (no debounce)
+  const urlIsRecaptcha = /challenge\/recaptcha|\/recaptcha/i.test(path + location.search);
+  if (urlIsRecaptcha) {
+    autoLoginState.captchaHits = 2;
+    autoLoginState.captchaMisses = 0;
+    if (!autoLoginState.captchaPaused) {
+      console.log('[Flow Preload] reCAPTCHA URL — pausing auto-login');
+      autoLoginState.captchaPaused = true;
+      autoLoginState.overlayDismissed = false;
+      showCaptchaBanner();
+      notifyAuthHost('auth:captcha', { active: true });
+      notifyAuthHost('auth:auto-login', { overlay: false, captcha: true });
+    } else {
+      showCaptchaBanner();
+    }
+    return { captcha: true };
+  }
 
-  const captcha = detectGoogleCaptcha();
-  if (captcha) {
+  // Debounced captcha detection — single-frame false positives were lifting the cover
+  const captchaNow = detectGoogleCaptcha();
+  if (captchaNow) {
+    autoLoginState.captchaHits = (autoLoginState.captchaHits || 0) + 1;
+    autoLoginState.captchaMisses = 0;
+  } else {
+    autoLoginState.captchaMisses = (autoLoginState.captchaMisses || 0) + 1;
+    autoLoginState.captchaHits = 0;
+  }
+
+  const captchaConfirmed = autoLoginState.captchaHits >= 2;
+  const captchaCleared = autoLoginState.captchaMisses >= 3;
+
+  if (captchaConfirmed) {
     if (!autoLoginState.captchaPaused) {
       console.log('[Flow Preload] reCAPTCHA detected — pausing auto-login');
       autoLoginState.captchaPaused = true;
@@ -1606,6 +1260,11 @@ function syncGoogleAuthChrome() {
   }
 
   if (autoLoginState.captchaPaused) {
+    if (!captchaCleared) {
+      // Still waiting for captcha to fully clear — keep cover lifted
+      showCaptchaBanner();
+      return { captcha: true };
+    }
     console.log('[Flow Preload] reCAPTCHA cleared — resuming auto-login');
     autoLoginState.captchaPaused = false;
     autoLoginState.overlayDismissed = false;
@@ -1613,19 +1272,20 @@ function syncGoogleAuthChrome() {
     notifyAuthHost('auth:captcha', { active: false });
   }
 
+  // Signal host to keep native overlay (page DOM overlay is a no-op)
   if (!autoLoginState.done) ensureAutoLoginOverlay();
   return { captcha: false };
 }
 
 function runGoogleAutoLogin() {
+  // Overlay / captcha chrome first — even before credentials arrive
+  const chrome = syncGoogleAuthChrome();
+  if (chrome && chrome.captcha) return;
+
   if (!credentials.email) {
     try { ipcRenderer.sendToHost('request-credentials'); } catch (e) {}
     return;
   }
-
-  // Overlay / reCAPTCHA chrome — run even during action cooldown
-  const chrome = syncGoogleAuthChrome();
-  if (chrome && chrome.captcha) return;
 
   const now = Date.now();
   if (now - autoLoginState.lastActionTime < autoLoginState.actionCooldownMs) return;
@@ -1808,7 +1468,7 @@ function runGoogleAutoLogin() {
           document.querySelector('#totpNext button, #totpNext, #idvPreregisteredPhoneNext button') ||
           buttonByLabel(/^next$/i);
         if (next && isElementVisible(next)) next.click();
-      }, 1400);
+      }, 1800);
     }
     return;
   }
@@ -1876,7 +1536,7 @@ function runGoogleAutoLogin() {
           window.__flowHostAuto['pwd:' + location.pathname.split('/').slice(0, 5).join('/')] = 'submitted';
         } catch (e) {}
         submitGoogleNext('password', passwordInput);
-      }, 1400);
+      }, 1600);
     }
     return;
   }
@@ -1930,25 +1590,122 @@ function runGoogleAutoLogin() {
       autoLoginState.submittedKeys.delete(submitKey);
       autoLoginState.submittedKeys.delete(`identifier:${pathname}:submit`);
       console.log('[Flow Preload] Retrying email Next, attempt', autoLoginState.attempts);
-      submitGoogleNext('identifier', emailInput);
-      const next = document.querySelector('#identifierNext button, #identifierNext') || buttonByLabel(/^next$/i);
-      if (next && isElementVisible(next)) hardClick(next);
+      setTimeout(() => {
+        if (!emailInput.isConnected) return;
+        if (/\/challenge\/pwd/i.test(location.pathname)) return;
+        submitGoogleNext('identifier', emailInput);
+        const next = document.querySelector('#identifierNext button, #identifierNext') || buttonByLabel(/^next$/i);
+        if (next && isElementVisible(next)) hardClick(next);
+      }, 1500);
     }
     return;
   }
 
-  // Recovery skip
-  const skipBtn = document.querySelector('#recoverySkip, button[jsname="j6LnO"]');
-  if (skipBtn && isElementVisible(skipBtn)) {
-    clickOnce('recovery-skip', skipBtn);
-    return;
-  }
+  // Recovery / home-address / interstitial skip
+  if (dismissGoogleInterstitials()) return;
 
   // Continue / I agree
   if (!emailInput && !passwordInput) {
     const cont = buttonByLabel(/^(continue|i agree|confirm)$/i);
     if (cont) clickOnce('continue:' + pathname, cont);
   }
+}
+
+/** Cancel recovery phone/email, home address (gds), and hide "Open in Google Flow app" banner. */
+function dismissGoogleInterstitials() {
+  const host = (location.hostname || '').toLowerCase();
+  const path = (location.pathname || '').toLowerCase();
+  const bodySlice = ((document.body && document.body.innerText) || '').slice(0, 2800);
+  const onGds = host.includes('gds.google.com');
+  const onFlow = host.includes('flow.google.com') || host.includes('labs.google');
+  const onAccounts = host.includes('accounts.google.com') || host.includes('accounts.youtube.com');
+  const pageLooksRecovery = /make sure you can always sign in|add a recovery phone|your recovery email|set a home address|home and work addresses|recovery options|keep your account safe/i.test(bodySlice);
+  const pathLooksRecovery = /recovery|speedbump|interstitial|accountrecovery|phone|home.?address/i.test(path) || path.includes('/web/recoveryoptions');
+
+  // Smart-app / "Open in the Google Flow app" banner — hide + click X
+  try {
+    document.querySelectorAll('div, section, aside, [role="banner"], [class*="banner"], [class*="promo"], [class*="install"]').forEach((el) => {
+      if (!el || el.getAttribute('data-flow-hidden') === '1') return;
+      const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!t || t.length > 140) return;
+      const isAppBanner =
+        /open in the google flow app/i.test(t) ||
+        (/google flow/i.test(t) && /open in/i.test(t));
+      if (!isAppBanner) return;
+      let closer = null;
+      el.querySelectorAll('button, a, [role="button"], [aria-label]').forEach((b) => {
+        const bt = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
+        const al = b.getAttribute('aria-label') || '';
+        if (/^(×|✕|x|close|dismiss)$/i.test(bt) || /close|dismiss|cancel/i.test(al)) {
+          closer = closer || b;
+        }
+      });
+      if (closer && isElementVisible(closer)) {
+        clickOnce('flow-app-banner-x:' + (closer.innerText || 'x').slice(0, 12), closer);
+      }
+      hideEl(el);
+    });
+  } catch (e) {}
+
+  if (!onGds && !pageLooksRecovery && !pathLooksRecovery) {
+    // Still try classic recoverySkip on accounts
+    if (onAccounts) {
+      const skipBtn = document.querySelector('#recoverySkip, button[jsname="j6LnO"]');
+      if (skipBtn && isElementVisible(skipBtn)) {
+        clickOnce('recovery-skip', skipBtn);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const skipBtn = document.querySelector(
+    '#recoverySkip, button[jsname="j6LnO"], [data-id="skip"], [aria-label*="Skip" i], [aria-label*="Cancel" i], [aria-label*="Not now" i], [aria-label*="No thanks" i]'
+  );
+  if (skipBtn && isElementVisible(skipBtn)) {
+    clickOnce('recovery-skip', skipBtn);
+    return true;
+  }
+
+  const dismissRe = /^(cancel|skip|not now|no thanks|remind me later|maybe later|later|close|dismiss|not interested)$/i;
+  const cands = [];
+  document.querySelectorAll('button, a, [role="button"], div[role="link"], span[role="button"]').forEach((el) => {
+    if (!isElementVisible(el)) return;
+    const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+    if (!t || t.length > 42) return;
+    if (!dismissRe.test(t)) return;
+    // Never click Save / Next / Continue on these screens
+    if (/^(save|next|continue|done|submit|add)$/i.test(t)) return;
+    cands.push(el);
+  });
+  if (cands.length) {
+    cands.sort((a, b) => {
+      const score = (el) => {
+        const t = (el.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (t === 'cancel') return 0;
+        if (t === 'skip' || t === 'not now' || t === 'no thanks') return 1;
+        return 2;
+      };
+      return score(a) - score(b);
+    });
+    clickOnce('recovery-dismiss:' + (cands[0].innerText || 'x').slice(0, 20), cands[0]);
+    return true;
+  }
+
+  // gds / recovery stuck with no Cancel visible — bounce back to Flow
+  if (onGds || (pageLooksRecovery && !onFlow)) {
+    try {
+      if (!window.__flowRecoveryBounceAt) window.__flowRecoveryBounceAt = 0;
+      const now = Date.now();
+      if (now - window.__flowRecoveryBounceAt > 4500) {
+        window.__flowRecoveryBounceAt = now;
+        console.log('[Flow Preload] Bouncing off Google recovery interstitial');
+        location.replace('https://flow.google.com/');
+        return true;
+      }
+    } catch (e) {}
+  }
+  return false;
 }
 
 
@@ -1976,48 +1733,28 @@ function hideEl(el) {
 }
 
 function forceRenameLiteEverywhere() {
-  if (!document.body) return;
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  let node;
-  while ((node = walker.nextNode())) {
-    const v = node.nodeValue;
-    if (!v || !/lower\s*priority|veo\s*3\.1\s*-\s*lite|veo\s*3\.1\s*lite/i.test(v)) continue;
-    if (/banana|nano|imagen/i.test(v)) continue;
-    let n = v
-      .replace(/Veo\s*3\.1\s*-\s*Lite\s*\[Lower\s*Priority\]/gi, TARGET_MODEL_DISPLAY)
-      .replace(/Veo\s*3\.1\s*-\s*Lite\s*\(Lower\s*Priority\)/gi, TARGET_MODEL_DISPLAY)
-      .replace(/Veo\s*3\.1\s*-\s*Lite\s*\[lower\s*priority\]/gi, TARGET_MODEL_DISPLAY)
-      .replace(/Veo\s*3\.1\s*\[Lower\s*Priority\]/gi, TARGET_MODEL_DISPLAY)
-      .replace(/Veo\s*3\.1\s*\(Lower\s*Priority\)/gi, TARGET_MODEL_DISPLAY)
-      .replace(/Veo\s*3\.1\s*-\s*Lite/gi, TARGET_MODEL_DISPLAY)
-      .replace(/Veo\s*3\.1\s*Lite/gi, TARGET_MODEL_DISPLAY)
-      .replace(/Lite\s*\[Lower\s*Priority\]/gi, TARGET_MODEL_SHORT)
-      .replace(/Lite\s*\(Lower\s*Priority\)/gi, TARGET_MODEL_SHORT)
-      .replace(/\[Lower\s*Priority\]/gi, '')
-      .replace(/\(Lower\s*Priority\)/gi, '')
-      .replace(/Lower\s*Priority/gi, TARGET_MODEL_SHORT);
-    n = n.replace(/Veo\s*3\.1(?:\s*-\s*Veo\s*3\.1)+(?:\s*-\s*Fast)?/gi, TARGET_MODEL_DISPLAY);
-    if (n !== v) node.nodeValue = n;
-  }
+  // Model renaming disabled
 }
 
 function hideUltraControls() {
-  document.querySelectorAll('button, [role="tab"], [role="radio"], [role="button"], span, div, label').forEach((el) => {
-    if (el.childElementCount > 4) return;
-    const t = (el.innerText || el.textContent || '').replace(/\s+/g, '').trim();
-    if (!/^ULTRA$/i.test(t)) return;
-    const group = el.closest('[role="group"], [class*="segment"], [class*="toggle"], [class*="pill"], [class*="chip"]') || el;
-    hideEl(group);
-  });
+  // Ultra / model tier hiding disabled — show all options
 }
 
 function killAccountPopupNow() {
+  // Never scrub Google sign-in / captcha pages — the needle "protected by recaptcha"
+  // was matching the real challenge UI and hideEl()'d the whole page (0×0 blank).
+  try {
+    const host = (location.hostname || '').toLowerCase();
+    if (host.includes('accounts.google.com') || host.includes('accounts.youtube.com')) return;
+    const path = (location.pathname || '').toLowerCase();
+    if (path.includes('recaptcha') || path.includes('captcha') || /\/challenge\//.test(path)) return;
+  } catch (e) {}
+
   const needles = [
     'sign out of all accounts',
     'visible watermarking',
     'credits refresh daily',
     'create avatar',
-    'this site is protected by recaptcha'
   ];
 
   const all = document.querySelectorAll(
@@ -2029,6 +1766,8 @@ function killAccountPopupNow() {
     const raw = el.innerText || el.textContent || '';
     if (!raw || raw.length > 1000) continue;
     const t = raw.toLowerCase().replace(/\s+/g, ' ');
+    // Never treat reCAPTCHA footer copy as an account popup
+    if (t.includes('recaptcha') || t.includes('captcha')) continue;
     const hit = needles.some((n) => t.includes(n));
     const hasEmail = /[\w.+-]+@[\w.-]+\.\w+/.test(t);
     if (!hit && !(hasEmail && (t.includes('google') || t.includes('sign out') || t.includes('watermark')))) continue;
@@ -2058,6 +1797,7 @@ function killAccountPopupNow() {
     if (el.childElementCount > 8) return;
     const t = (el.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
     if (!t || t.length > 140) return;
+    if (t.includes('recaptcha') || t.includes('captcha')) return;
     if (
       t === 'sign out of all accounts' ||
       t === 'visible watermarking' ||
@@ -2105,6 +1845,10 @@ function ensureNewProjectClickable() {
 }
 
 function hideExistingProjects() {
+  try {
+    const host = (location.hostname || '').toLowerCase();
+    if (host.includes('accounts.google.com') || host.includes('accounts.youtube.com')) return;
+  } catch (e) {}
   if (/\/project\//i.test(window.location.pathname || '')) {
     ensureNewProjectClickable();
     return;
@@ -2305,7 +2049,14 @@ window.addEventListener('click', (e) => {
 
 // Continuously scrub account popup as soon as it mounts
 (function installAccountKillerObserver() {
+  const onGoogleAuth = () => {
+    try {
+      const host = (location.hostname || '').toLowerCase();
+      return host.includes('accounts.google.com') || host.includes('accounts.youtube.com');
+    } catch (e) { return false; }
+  };
   const run = () => {
+    if (onGoogleAuth()) return;
     try {
       killAccountPopupNow();
       hideExistingProjects();
@@ -2357,6 +2108,17 @@ function applyCssRules() {
       pointer-events: none !important;
     }
 
+    /* "Open in the Google Flow app" smart banner */
+    [data-flow-hidden="1"] {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      height: 0 !important;
+      max-height: 0 !important;
+      overflow: hidden !important;
+      opacity: 0 !important;
+    }
+
     /* Gallery edit / delete affordances */
     flow-media-card button[aria-label*="Delete" i],
     flow-media-card button[aria-label*="Rename" i],
@@ -2398,72 +2160,8 @@ function applyCssRules() {
   styleEl.textContent = css;
 }
 
-// Text Replacement Engine for Model Renaming
-function replaceModelNamesInNode(node) {
-  if (!node) return;
-
-  const rules = [
-    { originalName: "Veo 3.1 - Lite [Lower Priority]", displayName: TARGET_MODEL_DISPLAY },
-    { originalName: "Veo 3.1 - Lite (Lower Priority)", displayName: TARGET_MODEL_DISPLAY },
-    { originalName: "Veo 3.1 - Lite [lower priority]", displayName: TARGET_MODEL_DISPLAY },
-    { originalName: "Veo 3.1 [Lower Priority]", displayName: TARGET_MODEL_DISPLAY },
-    { originalName: "Veo 3.1 (Lower Priority)", displayName: TARGET_MODEL_DISPLAY },
-    { originalName: "Veo 3.1 - Lite", displayName: TARGET_MODEL_DISPLAY },
-    { originalName: "Veo 3.1 Lite", displayName: TARGET_MODEL_DISPLAY },
-    { originalName: "Lite [Lower Priority]", displayName: TARGET_MODEL_DISPLAY },
-    { originalName: "Lite (Lower Priority)", displayName: TARGET_MODEL_DISPLAY },
-    ...(maskingRules.modelRenames || []).filter(r => r && r.enabled && r.originalName && r.displayName)
-  ];
-
-  if (node.nodeType === Node.TEXT_NODE) {
-    let text = node.nodeValue;
-    if (!text) return;
-    const tLower = text.toLowerCase();
-    if (tLower.includes('banana') || tLower.includes('nano') || tLower.includes('imagen')) return;
-    if (text.trim() === TARGET_MODEL_DISPLAY) return;
-    // Fix previously mangled duplicated labels
-    if (/veo\s*3\.1(?:\s*-\s*veo\s*3\.1){1,}/i.test(text)) {
-      node.nodeValue = TARGET_MODEL_DISPLAY;
-      return;
-    }
-
-    let modified = false;
-    rules.forEach(rule => {
-      if (rule.originalName && rule.displayName !== undefined && text.includes(rule.originalName)) {
-        // Avoid nested replace creating "Veo 3.1 - Veo 3.1 - Fast"
-        if (rule.originalName.length < 12 && text.includes(TARGET_MODEL_DISPLAY)) return;
-        text = text.replaceAll(rule.originalName, rule.displayName);
-        modified = true;
-        if (node.parentElement) node.parentElement.setAttribute('data-is-lower-priority', 'true');
-      }
-    });
-    if (modified) node.nodeValue = text;
-  } else if (node.nodeType === Node.ELEMENT_NODE) {
-    ['aria-label', 'title', 'placeholder'].forEach(attr => {
-      if (node.hasAttribute(attr)) {
-        let val = node.getAttribute(attr);
-        if (!val) return;
-        const vLower = val.toLowerCase();
-        if (vLower.includes('banana') || vLower.includes('nano') || vLower.includes('imagen')) return;
-        if (/veo\s*3\.1(?:\s*-\s*veo\s*3\.1){1,}/i.test(val)) {
-          node.setAttribute(attr, TARGET_MODEL_DISPLAY);
-          return;
-        }
-        let modified = false;
-        rules.forEach(rule => {
-          if (rule.originalName && rule.displayName !== undefined && val.includes(rule.originalName)) {
-            if (rule.originalName.length < 12 && val.includes(TARGET_MODEL_DISPLAY)) return;
-            val = val.replaceAll(rule.originalName, rule.displayName);
-            modified = true;
-            node.setAttribute('data-is-lower-priority', 'true');
-          }
-        });
-        if (modified) node.setAttribute(attr, val);
-      }
-    });
-    node.childNodes.forEach(child => replaceModelNamesInNode(child));
-  }
-}
+// Model renaming disabled — leave Google Flow labels unchanged
+function replaceModelNamesInNode(_node) {}
 
 // DOM Observer â€” never thrash Google Sign-in; debounce heavily on Flow (black-screen freeze)
 function initDomObserver() {
@@ -2495,7 +2193,7 @@ function initDomObserver() {
 // Host IPC Listeners
 ipcRenderer.on('apply-masking-rules', (event, rules) => {
   if (rules) {
-    maskingRules = { ...maskingRules, ...rules };
+    maskingRules = { ...maskingRules, ...rules, modelRenames: [] };
     applyCssRules();
     replaceModelNamesInNode(document.body || document.documentElement);
     maskFlowWorkspace();
@@ -2604,10 +2302,12 @@ function driveGoogle2faClicks() {
 setInterval(() => {
   const host = location.hostname || '';
   const onGoogleAuth = host.includes('accounts.google.com');
+  const onGds = host.includes('gds.google.com');
   const onFlow = host.includes('flow.google.com') || host.includes('labs.google');
   if (onGoogleAuth) driveGoogle2faClicks();
   runGoogleAutoLogin();
-  if (onGoogleAuth) return;
+  dismissGoogleInterstitials();
+  if (onGoogleAuth || onGds) return;
   if (onFlow) {
     maskFlowWorkspace();
     enforceModelRestrictions();
@@ -2644,4 +2344,6 @@ window.addEventListener('click', (e) => {
     }, 50);
   }
 }, true);
+
+} // end __flowInjectBootstrapped
 
