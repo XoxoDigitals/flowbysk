@@ -1293,9 +1293,9 @@ function runGoogleAutoLogin() {
   const hostname = window.location.hostname;
   const pathname = window.location.pathname || '';
 
-  // Flow / Labs: if already in workspace, stop. Guest landing is handled by
-  // AppShell after a server switch (pending fresh login) — do not redirect here
-  // (that caused login loops).
+  // Flow / Labs: if already in workspace, stop. Never auto-click "Sign in" here —
+  // that restarted Google OAuth while the SPA was still hydrating (login loop).
+  // AppShell owns AddSession when a fresh Google login is required.
   if (hostname.includes('flow.google.com') || hostname.includes('labs.google')) {
     removeAutoLoginOverlay();
     removeCaptchaBanner();
@@ -1304,13 +1304,14 @@ function runGoogleAutoLogin() {
       (document.querySelector('header, flow-app-header, [role="banner"]') &&
         document.querySelector('[role="main"], [role="tablist"], textarea, [contenteditable="true"]'))
     );
-    if (isWorkspace) {
+    if (isWorkspace || autoLoginState.done) {
       autoLoginState.done = true;
       notifyAuthHost('auth:auto-login', { overlay: false, captcha: false, done: true });
       return;
     }
-    const ctaBtn = buttonByLabel(/^(create with google flow|try in google flow|sign in|sign in with google)$/i);
-    if (ctaBtn && now - autoLoginState.lastActionTime > 3500 && !autoLoginState.submittedKeys.has('flow-cta')) {
+    // Guest marketing CTAs only (not Sign in) — and only once, after a long settle.
+    const ctaBtn = buttonByLabel(/^(create with google flow|try in google flow)$/i);
+    if (ctaBtn && now - autoLoginState.lastActionTime > 8000 && !autoLoginState.submittedKeys.has('flow-cta')) {
       clickOnce('flow-cta', ctaBtn);
     }
     return;
@@ -2212,6 +2213,16 @@ function applyCredentialsFromHost(creds) {
   const forceReset = !!creds.forceReset || (prevEmail && nextEmail && prevEmail !== nextEmail);
   credentials = { ...credentials, ...creds };
   console.log('[Flow Preload] Credentials applied for:', credentials.email, forceReset ? '(reset)' : '');
+  const onFlow =
+    (location.hostname || '').includes('flow.google.com') ||
+    (location.hostname || '').includes('labs.google');
+  // On Flow, never reset/re-run auto-login just because credentials arrived for
+  // the first time in this document — that re-clicked Sign in after OAuth return.
+  if (onFlow && !forceReset) {
+    if (autoLoginState.done) return;
+    setTimeout(() => runGoogleAutoLogin(), 200);
+    return;
+  }
   if (forceReset || !prevEmail) {
     resetAutoLoginState();
     credentials._otp = '';

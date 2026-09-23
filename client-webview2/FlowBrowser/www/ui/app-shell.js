@@ -698,10 +698,10 @@ class FlowBrowserApp {
     const prevIdMissing = !!(prevId && !list.some((s) => s.id === prevId));
     const reassigned = !!(prevId && nextId && prevId !== nextId);
     const emailChanged = !!(prevEmail && nextEmail && prevEmail !== nextEmail);
-    // No saved assignment but cookies may still hold an old Google login — wipe once
-    const firstAssignWithUnknownPast = !prevId && !!nextId;
+    // Do NOT wipe solely because there was no prior assignment — that forced
+    // AddSession on every cold login and fought OAuth return (Google login loop).
 
-    const mustWipe = prevIdMissing || reassigned || emailChanged || firstAssignWithUnknownPast;
+    const mustWipe = prevIdMissing || reassigned || emailChanged;
     if (!mustWipe) return false;
 
     console.warn('[AppShell] Wiping Google session on login', {
@@ -718,6 +718,7 @@ class FlowBrowserApp {
     } catch (e) {}
     this._pendingFreshLogin = true;
     this._pendingFreshLoginAt = Date.now();
+    this._freshLoginStarted = false;
     this._lastAutoFillKey = null;
     this.activeServer = activeServer || null;
     if (this.config) this.config.activeServer = this.activeServer;
@@ -1047,6 +1048,7 @@ class FlowBrowserApp {
           await window.electronAPI.clearPartitionSession();
           this._pendingFreshLogin = true;
           this._pendingFreshLoginAt = Date.now();
+          this._freshLoginStarted = false;
         } else {
           this._pendingFreshLogin = false;
         }
@@ -1073,10 +1075,13 @@ class FlowBrowserApp {
     if (!this._pendingFreshLogin) return;
     const href = String(url || '');
     if (!href.includes('flow.google.com') && !href.includes('labs.google')) return;
+    // Already bounced to Google once this cycle — never schedule again
+    if (this._freshLoginStarted) return;
     if (this._freshLoginTimer) clearTimeout(this._freshLoginTimer);
     this._freshLoginTimer = setTimeout(() => {
       if (!this._pendingFreshLogin) return;
       this._pendingFreshLogin = false;
+      this._freshLoginStarted = true;
       const continueUrl = (this.activeServer?.targetUrl || 'https://flow.google.com').replace(/\/$/, '') + '/';
       const googleLoginUrl =
         'https://accounts.google.com/AddSession?hl=en&continue=' +
@@ -1826,6 +1831,8 @@ class FlowBrowserApp {
       this.hideGoogleAuthBanner();
       this.hideLoadingOverlay();
       this._totpFilling = false;
+      this._pendingFreshLogin = false;
+      this._freshLoginStarted = true;
       this.postAuthOverlay({ show: false, done: true });
       return;
     }
