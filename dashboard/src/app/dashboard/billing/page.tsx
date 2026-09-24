@@ -31,8 +31,8 @@ export default function BillingPage() {
       return;
     }
     Promise.all([
-      flowFetch('/api/client/me').then((r) => (r.ok ? r.json() : null)),
-      flowFetch('/api/client/activity').then((r) => (r.ok ? r.json() : null)),
+      flowFetch('/api/v2/client/me').then((r) => (r.ok ? r.json() : null)),
+      flowFetch('/api/v2/client/activity').then((r) => (r.ok ? r.json() : null)),
     ])
       .then(([me, activity]) => {
         if (me?.user) setUser(me.user);

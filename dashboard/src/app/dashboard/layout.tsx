@@ -65,7 +65,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         router.push('/auth/login');
         return;
       }
-      const res = await flowFetch('/api/client/me');
+      const res = await flowFetch('/api/v2/client/me');
       if (!res.ok) {
         clearSession();
         router.push('/auth/login');

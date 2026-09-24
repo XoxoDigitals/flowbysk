@@ -23,7 +23,7 @@ export default function DashboardSettingsPage() {
       router.push('/auth/login');
       return;
     }
-    flowFetch('/api/client/me')
+    flowFetch('/api/v2/client/me')
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.user) {
@@ -41,7 +41,7 @@ export default function DashboardSettingsPage() {
     setMessage('');
     setError('');
     try {
-      const res = await flowFetch('/api/client/profile', {
+      const res = await flowFetch('/api/v2/client/profile', {
         method: 'PUT',
         body: JSON.stringify({
           displayName: name,

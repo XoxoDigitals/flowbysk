@@ -7,6 +7,7 @@ import { Menu, X } from 'lucide-react';
 import SiteBrand from './SiteBrand';
 import ThemeToggle from './ThemeToggle';
 import { useSiteSettings } from './SiteSettingsProvider';
+import { readSession } from '@/lib/flowApi';
 
 export default function Navbar() {
   const pathname = usePathname();
@@ -15,6 +16,11 @@ export default function Navbar() {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
+    // Prefer local session — /api/auth/me is a public shim (may be unauthenticated)
+    const session = readSession();
+    if (session?.username) {
+      setUser({ email: session.username, role: session.role });
+    }
     fetch('/api/auth/me')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {

@@ -25,7 +25,7 @@ export default function DashboardPage() {
   const [androidPkg, setAndroidPkg] = useState<DownloadMeta>(null);
 
   useEffect(() => {
-    flowFetch('/api/client/me')
+    flowFetch('/api/v2/client/me')
       .then(async (res) => {
         if (!res.ok) return;
         const data = await res.json();

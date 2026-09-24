@@ -73,6 +73,35 @@ app.get('/api/public/notices', async (req, res) => {
   }
 });
 
+/** Public marketing plans (Next rewrites /api/* → Express). */
+app.get('/api/plans', async (req, res) => {
+  try {
+    const plans = (await db.getPlans()).filter((p) => p.isActive !== false);
+    res.json({
+      success: true,
+      plans: plans.map((p) => ({
+        id: p.id,
+        name: p.name,
+        description: p.description || null,
+        priceMonthly: p.priceMonthly,
+        contactSeller: !!p.contactSeller,
+        maxParallel: p.maxParallel,
+        standardCreditsCycle: p.standardCreditsCycle,
+        proCreditsCycle: p.proCreditsCycle,
+        features: Array.isArray(p.features) ? p.features : [],
+        isActive: p.isActive !== false,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/** Navbar auth probe — browser session is JWT in localStorage, not cookies. */
+app.get('/api/auth/me', (req, res) => {
+  res.json({ authenticated: false, user: null });
+});
+
 app.get('/download/flow-browser', async (req, res) => {
   await downloads.streamPackage('windows', res);
 });
