@@ -21,6 +21,7 @@ type SiteForm = {
   ticketSystemEnabled: boolean;
   contactPageEnabled: boolean;
   maintenanceMode: boolean;
+  clientApiVersion: 'v2' | 'v3';
 };
 
 type DownloadPackage = {
@@ -48,6 +49,7 @@ const emptySite: SiteForm = {
   ticketSystemEnabled: true,
   contactPageEnabled: true,
   maintenanceMode: false,
+  clientApiVersion: 'v2',
 };
 
 function formatBytes(n: number) {
@@ -135,6 +137,7 @@ export default function AdminSettingsPage() {
       ticketSystemEnabled: row.ticketSystemEnabled !== false,
       contactPageEnabled: row.contactPageEnabled !== false,
       maintenanceMode: row.maintenanceMode === true,
+      clientApiVersion: row.clientApiVersion === 'v3' ? 'v3' : 'v2',
     });
     setSocial(row.socialLinks || {});
     if (noticesRes.ok) setNotices(noticesData.notices || []);
@@ -482,6 +485,23 @@ export default function AdminSettingsPage() {
             </p>
           </div>
           <Toggle on={site.maintenanceMode} onLabel="ON" offLabel="Off" onChange={(maintenanceMode) => setSite({ ...site, maintenanceMode })} />
+        </div>
+        <div
+          className="flex items-center justify-between gap-4 rounded-2xl border px-4 py-3"
+          style={{ borderColor: site.clientApiVersion === 'v3' ? 'var(--a1)' : 'var(--line)' }}
+        >
+          <div>
+            <div className="text-sm font-medium">Client API v3</div>
+            <p className="text-xs text-[var(--ink3)]">
+              Hard cutover: when ON, /api/v2/client stops (FORCE_UPDATE). New Flow Browser + web dashboard auto-use v3. Old EXEs must update.
+            </p>
+          </div>
+          <Toggle
+            on={site.clientApiVersion === 'v3'}
+            onLabel="v3 ON"
+            offLabel="v2"
+            onChange={(on) => setSite({ ...site, clientApiVersion: on ? 'v3' : 'v2' })}
+          />
         </div>
 
         <div>

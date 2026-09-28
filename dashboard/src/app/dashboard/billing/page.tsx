@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { flowFetch, readSession } from '@/lib/flowApi';
+import { clientApiPath, flowFetch, readSession } from '@/lib/flowApi';
 import { useRouter } from 'next/navigation';
 
 type Me = {
@@ -31,8 +31,8 @@ export default function BillingPage() {
       return;
     }
     Promise.all([
-      flowFetch('/api/v2/client/me').then((r) => (r.ok ? r.json() : null)),
-      flowFetch('/api/v2/client/activity').then((r) => (r.ok ? r.json() : null)),
+      flowFetch(clientApiPath('/me')).then((r) => (r.ok ? r.json() : null)),
+      flowFetch(clientApiPath('/activity')).then((r) => (r.ok ? r.json() : null)),
     ])
       .then(([me, activity]) => {
         if (me?.user) setUser(me.user);

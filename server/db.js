@@ -54,6 +54,11 @@ async function setJsonSetting(key, value) {
   return value;
 }
 
+function normalizeClientApiVersion(value) {
+  const v = String(value || '').trim().toLowerCase();
+  return v === 'v3' ? 'v3' : 'v2';
+}
+
 async function getRuntime() {
   const base = {
     appName: BRAND,
@@ -63,10 +68,13 @@ async function getRuntime() {
     cssSelectorsToHide: [],
     customCss: '',
     downloads: { windows: null, android: null },
+    clientApiVersion: 'v2',
     jwtSecret: process.env.JWT_SECRET || 'flow_super_secret_jwt_key_2026',
   };
   const stored = (await getJsonSetting(RUNTIME_KEY, {})) || {};
-  return { ...base, ...stored, downloads: { ...base.downloads, ...(stored.downloads || {}) } };
+  const merged = { ...base, ...stored, downloads: { ...base.downloads, ...(stored.downloads || {}) } };
+  merged.clientApiVersion = normalizeClientApiVersion(merged.clientApiVersion);
+  return merged;
 }
 
 async function patchRuntime(patch) {
@@ -410,6 +418,7 @@ class Database {
       maintenanceMode: !!site?.maintenanceMode,
       socialLinks: site?.socialLinks || {},
       downloads: runtime.downloads || { windows: null, android: null },
+      clientApiVersion: normalizeClientApiVersion(runtime.clientApiVersion),
     };
   }
 
@@ -448,10 +457,14 @@ class Database {
       'downloads',
       'appName',
       'jwtSecret',
+      'clientApiVersion',
     ];
     const runtimePatch = {};
     for (const k of runtimeKeys) {
       if (body[k] !== undefined) runtimePatch[k] = body[k];
+    }
+    if (runtimePatch.clientApiVersion !== undefined) {
+      runtimePatch.clientApiVersion = normalizeClientApiVersion(runtimePatch.clientApiVersion);
     }
     if (Object.keys(runtimePatch).length) await patchRuntime(runtimePatch);
     return this.getSettings();

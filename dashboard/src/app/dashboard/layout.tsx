@@ -15,7 +15,7 @@ import SiteBrand from '@/components/SiteBrand';
 import AnnouncementSocialIcons from '@/components/AnnouncementSocialIcons';
 import { useTheme } from '@/components/ThemeProvider';
 import { useSiteSettings } from '@/components/SiteSettingsProvider';
-import { clearSession, FLOW_API, flowFetch, readSession } from '@/lib/flowApi';
+import { clearSession, FLOW_API, clientApiPath, flowFetch, readSession, resolveClientApiVersion } from '@/lib/flowApi';
 
 interface UserData {
   id: string;
@@ -65,7 +65,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         router.push('/auth/login');
         return;
       }
-      const res = await flowFetch('/api/v2/client/me');
+      await resolveClientApiVersion(true);
+      const res = await flowFetch(clientApiPath('/me'));
       if (!res.ok) {
         clearSession();
         router.push('/auth/login');

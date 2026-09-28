@@ -1,6 +1,44 @@
 // Flow Browser App Shell Controller
 
-const CLIENT_API = '/api/v2/client';
+/** Active client API base — resolved from /api/public/branding (v2 or v3). */
+let CLIENT_API = '/api/v2/client';
+
+function normalizeClientApiVersion(value) {
+  return String(value || '').toLowerCase() === 'v3' ? 'v3' : 'v2';
+}
+
+async function resolveClientApiBase(serverUrl, force = false) {
+  const base = String(serverUrl || '').replace(/\/$/, '') || 'https://flowcreatorai.site';
+  try {
+    const res = await fetch(`${base}/api/public/branding`, { cache: 'no-store' });
+    const data = await res.json();
+    const ver = normalizeClientApiVersion(data?.settings?.clientApiVersion);
+    CLIENT_API = `/api/${ver}/client`;
+    console.log('[ClientAPI] active:', CLIENT_API);
+    return CLIENT_API;
+  } catch (err) {
+    if (!force) console.warn('[ClientAPI] branding failed, keeping', CLIENT_API, err?.message || err);
+    return CLIENT_API;
+  }
+}
+
+/**
+ * If response is FORCE_UPDATE, refresh branding and return true when base changed
+ * so the caller can retry once on the new path.
+ */
+async function maybeSwitchClientApiOnForceUpdate(serverUrl, data) {
+  if (!data || data.code !== 'FORCE_UPDATE') return false;
+  const prev = CLIENT_API;
+  await resolveClientApiBase(serverUrl, true);
+  return CLIENT_API !== prev;
+}
+
+/** Production: restore session when token is valid. */
+const DEBUG_ALWAYS_ASK_LOGIN = false;
+/** Production: autofill + auto-click Next / 2FA. */
+const DEBUG_SKIP_GOOGLE_NEXT = false;
+/** Production: auth overlay/cover enabled. */
+const DEBUG_DISABLE_AUTH_OVERLAY = false;
 
 class FlowBrowserApp {
   constructor() {
@@ -138,9 +176,14 @@ class FlowBrowserApp {
     // Downloads events
     this.btnToggleDownloads.addEventListener('click', () => {
       this.downloadDrawer.classList.toggle('hidden');
+      if (!this.downloadDrawer.classList.contains('hidden')) {
+        window.electronAPI.setShellMode?.('full');
+      }
+      this.syncShellModeFromUi();
     });
     this.btnCloseDownloads.addEventListener('click', () => {
       this.downloadDrawer.classList.add('hidden');
+      this.syncShellModeFromUi();
     });
 
     this.initAndroidSettingsMenu();
@@ -337,15 +380,18 @@ class FlowBrowserApp {
         this.inputServerUrl.value = this.config.serverUrl;
       }
 
+      // Pick v2 or v3 before any client API call
+      await resolveClientApiBase(this.config.serverUrl);
+
       if (!this.inputUsername.value && this.config?.user?.username) {
         this.inputUsername.value = this.config.user.username;
       } else if (!this.inputUsername.value) {
         this.inputUsername.value = 'user1';
       }
 
-      // Prefer saved session (v2 verify) — only show login if token missing / rejected
+      // Prefer saved session (v2/v3 verify) — only show login if token missing / rejected
       this.hideLoadingOverlay();
-      if (this.config.authToken) {
+      if (!DEBUG_ALWAYS_ASK_LOGIN && this.config.authToken) {
         const ok = await this.verifyExistingSession();
         if (ok) return;
       }
@@ -411,7 +457,13 @@ class FlowBrowserApp {
         return true;
       } else {
         const code = data && data.code;
-        if (code === 'SESSION_REPLACED' || code === 'NO_CREDITS' || code === 'FORCE_UPDATE' || code === 'BANNED' || code === 'PLAN_EXPIRED') {
+        if (code === 'FORCE_UPDATE') {
+          const switched = await maybeSwitchClientApiOnForceUpdate(this.config.serverUrl, data);
+          if (switched) return this.verifyExistingSession();
+          await this.forceLogout(data.error || 'Please download the latest Flow Browser.');
+          return false;
+        }
+        if (code === 'SESSION_REPLACED' || code === 'NO_CREDITS' || code === 'BANNED' || code === 'PLAN_EXPIRED') {
           await this.forceLogout(data.error || 'Please sign in again.');
           return false;
         }
@@ -436,12 +488,25 @@ class FlowBrowserApp {
     else if (!this.config.serverUrl) this.config.serverUrl = serverUrl;
 
     try {
+      await resolveClientApiBase(serverUrl);
       const res = await fetch(`${serverUrl}${CLIENT_API}/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       });
-      const data = await res.json();
+      let data = await res.json();
+
+      if ((!data || !data.success) && data && data.code === 'FORCE_UPDATE') {
+        const switched = await maybeSwitchClientApiOnForceUpdate(serverUrl, data);
+        if (switched) {
+          const retry = await fetch(`${serverUrl}${CLIENT_API}/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+          });
+          data = await retry.json();
+        }
+      }
 
       if (data && data.success) {
         // Snapshot BEFORE overwriting — used to detect removed Google assignments
@@ -798,11 +863,16 @@ class FlowBrowserApp {
       const data = await res.json().catch(() => ({}));
       if (!data || !data.success) {
         const code = data && data.code;
+        if (code === 'FORCE_UPDATE') {
+          const switched = await maybeSwitchClientApiOnForceUpdate(this.config.serverUrl, data);
+          if (switched) return; // next poll uses v3
+          await this.forceLogout((data && data.error) || 'Please download the latest Flow Browser.');
+          return;
+        }
         // Only explicit session codes — bare 401/403 during blips must not clear Google cookies
         if (
           code === 'SESSION_REPLACED' ||
           code === 'NO_CREDITS' ||
-          code === 'FORCE_UPDATE' ||
           code === 'BANNED' ||
           code === 'PLAN_EXPIRED'
         ) {
@@ -949,24 +1019,34 @@ class FlowBrowserApp {
       if (!item) return;
       e.stopPropagation();
       const action = item.getAttribute('data-settings-action');
-      closeMenu();
       switch (action) {
         case 'change-account':
+          closeMenu();
           this.requestBalancedServerAndLaunch(true);
           break;
         case 'reload':
+          closeMenu();
           this.reloadWebview();
           break;
         case 'clear-cookies':
+          closeMenu();
           this.handleClearCookies();
           break;
         case 'downloads':
+          // Keep shell full while opening downloads — closing settings first
+          // collapsed the shell strip and hid the drawer under Flow.
           this.downloadDrawer?.classList.remove('hidden');
+          this.androidSettingsSheet.classList.add('hidden');
+          this.btnAndroidSettings?.setAttribute('aria-expanded', 'false');
+          window.electronAPI.setShellMode?.('full');
+          this.syncShellModeFromUi();
           break;
         case 'logout':
+          closeMenu();
           this.handleLogout();
           break;
         default:
+          closeMenu();
           break;
       }
     });
@@ -1204,6 +1284,11 @@ class FlowBrowserApp {
         if (!live) return;
         this.updateDebugUrl(live);
         if (!/accounts\.google\.com|accounts\.youtube\.com/i.test(live)) return;
+        if (DEBUG_SKIP_GOOGLE_NEXT) {
+          // Keep URL live; do not drive overlay or auto-Next from the poller
+          if (DEBUG_DISABLE_AUTH_OVERLAY) this.postAuthOverlay({ show: false, captcha: false });
+          return;
+        }
 
         // Recaptcha challenge — no fills, no overlays, keep cover lifted
         if (/challenge\/recaptcha|\/recaptcha/i.test(live)) {
@@ -1237,6 +1322,12 @@ class FlowBrowserApp {
         }
 
         if (!this.activeServer?.email) return;
+        // Selection / sk must run even if a sticky _totpFilling flag was left on
+        if (/challenge\/(selection|skotp|sk|iap|dp|ootp)/i.test(live) && !/challenge\/totp/i.test(live)) {
+          this._totpFilling = false;
+          this.tryGoogleAutoFill(live);
+          return;
+        }
         if (/challenge\/totp|accounts\.youtube\.com\/accounts\/SetSID/i.test(live)) {
           this._totpFilling = true;
           this.postAuthOverlay({ show: true, captcha: false });
@@ -1403,7 +1494,9 @@ class FlowBrowserApp {
         try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Unidentified' })); } catch (e) {}
         return (el.value || '') === val;
       };
+      const skipAutoNext = ${DEBUG_SKIP_GOOGLE_NEXT ? 'true' : 'false'};
       const clickNext = (kind) => {
+        if (skipAutoNext) return false;
         let next = null;
         if (kind === 'password') next = document.querySelector('#passwordNext button, #passwordNext');
         else if (kind === 'identifier') next = document.querySelector('#identifierNext button, #identifierNext');
@@ -1436,13 +1529,17 @@ class FlowBrowserApp {
         if (!ok) return { ok:false, step:'password', reason:'fill-failed', valLen:(pwd.value||'').length };
         if (st[key] !== 'clicked') {
           st[key] = 'clicked';
-          setTimeout(() => {
-            if (document.querySelector('input[name="totpPin"], input#totpPin')) return;
-            if ((pwd.value || '') === password) { clickNext('password'); st[key] = 'done'; }
-            else delete st[key];
-          }, 1600);
+          if (!skipAutoNext) {
+            setTimeout(() => {
+              if (document.querySelector('input[name="totpPin"], input#totpPin')) return;
+              if ((pwd.value || '') === password) { clickNext('password'); st[key] = 'done'; }
+              else delete st[key];
+            }, 1600);
+          } else {
+            st[key] = 'done';
+          }
         }
-        return { ok:true, step:'password', valLen:(pwd.value||'').length };
+        return { ok:true, step: skipAutoNext ? 'password-filled-manual-next' : 'password', valLen:(pwd.value||'').length };
       }
 
       // SPA lag: URL already /challenge/pwd but password input not mounted yet — do not re-submit email
@@ -1459,13 +1556,17 @@ class FlowBrowserApp {
         if (!ok) return { ok:false, step:'email', reason:'fill-failed' };
         if (st[key] !== 'clicked') {
           st[key] = 'clicked';
-          setTimeout(() => {
-            if (/\\/challenge\\/pwd/i.test(location.pathname)) return;
-            if ((emailEl.value || '').toLowerCase() === email.toLowerCase()) { clickNext('identifier'); st[key] = 'done'; }
-            else delete st[key];
-          }, 1600);
+          if (!skipAutoNext) {
+            setTimeout(() => {
+              if (/\\/challenge\\/pwd/i.test(location.pathname)) return;
+              if ((emailEl.value || '').toLowerCase() === email.toLowerCase()) { clickNext('identifier'); st[key] = 'done'; }
+              else delete st[key];
+            }, 1600);
+          } else {
+            st[key] = 'done';
+          }
         }
-        return { ok:true, step:'email', value:(emailEl.value||'').slice(0,24) };
+        return { ok:true, step: skipAutoNext ? 'email-filled-manual-next' : 'email', value:(emailEl.value||'').slice(0,24) };
       }
       return { ok:false, reason:'no-field', path };
     })()`;
@@ -1492,6 +1593,10 @@ class FlowBrowserApp {
   async tryGoogleAutoFill(url) {
     if (!url || !this.activeServer || !this.activeServer.email) return;
     const href = String(url);
+    if (DEBUG_DISABLE_AUTH_OVERLAY) {
+      // Keep Google UI visible while debugging
+      this.postAuthOverlay({ show: false, captcha: false });
+    }
     if (href.includes('flow.google.com') || href.includes('labs.google')) {
       this.hideGoogleAuthBanner();
       this._totpFilling = false;
@@ -1503,12 +1608,12 @@ class FlowBrowserApp {
       this._pwdCredPushed = false;
       return;
     }
-    if (!href.includes('accounts.google.com')) return;
+    if (!href.includes('accounts.google.com') && !href.includes('accounts.youtube.com')) return;
     if (/challenge\/recaptcha|\/recaptcha/i.test(href)) {
       this._captchaActive = true;
       this._totpFilling = false;
       this.showGoogleAuthBanner('Please solve the captcha below', true);
-      this.postAuthOverlay({ show: false, captcha: true });
+      if (!DEBUG_DISABLE_AUTH_OVERLAY) this.postAuthOverlay({ show: false, captcha: true });
       return;
     }
     // TOTP / authenticator — keep cover on (auto-fill). Do not clear captcha flag
@@ -1519,15 +1624,91 @@ class FlowBrowserApp {
       this._captchaActive = false;
     }
 
-    if (!this.googleAuthBanner || this.googleAuthBanner.classList.contains('hidden')) {
-      this.showGoogleAuthBanner('Signing you in automatically…', false);
-    }
-    // Always keep opaque cover during password↔OTP; only real recaptcha lifts it
-    if (!this._captchaActive || this._totpFilling) {
-      this.postAuthOverlay({ show: true, captcha: false });
+    if (!DEBUG_DISABLE_AUTH_OVERLAY) {
+      if (!this.googleAuthBanner || this.googleAuthBanner.classList.contains('hidden')) {
+        this.showGoogleAuthBanner('Signing you in automatically…', false);
+      }
+      if (!this._captchaActive || this._totpFilling) {
+        this.postAuthOverlay({ show: true, captcha: false });
+      }
     }
 
     const now = Date.now();
+    // 2FA method chooser / security-key — MUST run before _totpFilling early-return
+    // (otherwise challenge/selection stays stuck forever)
+    const on2faNav = !DEBUG_SKIP_GOOGLE_NEXT &&
+      /challenge\/(selection|skotp|sk|iap|dp|ootp)(?:\/|$|\?)/i.test(href) &&
+      !/challenge\/totp/i.test(href);
+    if (on2faNav) {
+      // Clear sticky TOTP flag if Google bounced us back to the chooser
+      this._totpFilling = false;
+      try {
+        const twoFa = await this.webview.executeJavaScript(`(() => {
+          const visible = (el) => {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            if (r.width < 2 || r.height < 2) return false;
+            const s = getComputedStyle(el);
+            return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+          };
+          const center = (el) => {
+            const r = el.getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          };
+          const isAuth = (raw) => {
+            const t = String(raw || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            if (!t || t.length > 220) return false;
+            if (/one-time security code|tap yes|use your passkey|can.?t find an eligible|g\\.co\\/sc/i.test(t) &&
+                !/authenticator/i.test(t)) return false;
+            return /google authenticator/i.test(t) ||
+              (/authenticator app/i.test(t) && /code|verification|get/i.test(t)) ||
+              (/verification code/i.test(t) && /authenticator/i.test(t)) ||
+              (/get a verification code/i.test(t) && /authenticator/i.test(t)) ||
+              (/authentication app/i.test(t));
+          };
+          const text = (document.body && document.body.innerText || '');
+          const onChooser = /choose how you want to sign in|choose a way/i.test(text);
+          const onSecurityCode = /g\\.co\\/sc|get a code to sign in/i.test(text) && !onChooser && !/authenticator app/i.test(text);
+
+          if (onSecurityCode || /\\/challenge\\/sk/i.test(location.pathname || '')) {
+            const tryAnother = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], span')).find(el =>
+              /^try another way$/i.test((el.innerText || '').replace(/\\s+/g, ' ').trim()) && visible(el)
+            );
+            if (tryAnother) return { action: 'try-another', ...center(tryAnother) };
+          }
+
+          if (onChooser || /authenticator/i.test(text) || /\\/challenge\\/selection/i.test(location.pathname || '')) {
+            const cands = Array.from(document.querySelectorAll(
+              '[data-challengeid], [data-challengetype], [data-action="selectchallenge"], li, div[role="link"], div[role="button"], button, a'
+            )).filter(el => visible(el) && isAuth(el.getAttribute('aria-label') || el.innerText || ''));
+            cands.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+            if (cands[0]) {
+              const el = cands[0].closest('[data-challengeid], [data-challengetype], li, [role="link"], [role="button"], button, a') || cands[0];
+              return { action: 'auth-app', ...center(el), text: (el.innerText || '').slice(0, 80) };
+            }
+          }
+          return { action: 'none', path: location.pathname };
+        })()`);
+        console.log('[AppShell] 2FA helper:', twoFa);
+        if (twoFa && (twoFa.action === 'try-another' || twoFa.action === 'auth-app') && twoFa.x > 0 && twoFa.y > 0) {
+          const clickKey = 'cdp|' + twoFa.action + '|' + href.split('?')[0];
+          if (this._lastCdpClickKey !== clickKey || Date.now() - (this._lastCdpClickAt || 0) > 1400) {
+            this._lastCdpClickKey = clickKey;
+            this._lastCdpClickAt = Date.now();
+            window.chrome?.webview?.postMessage(JSON.stringify({
+              type: 'cmd',
+              cmd: 'cdpClick',
+              x: twoFa.x,
+              y: twoFa.y
+            }));
+          }
+        }
+      } catch (err) {
+        console.warn('[AppShell] 2FA selection helper:', err.message);
+      }
+      return;
+    }
+
     // Fill email/password — fire-and-forget so 2FA helpers never block the next pwd tick
     // Skip entirely while OTP UI is active — re-submitting password bounces the flow
     if (this._totpFilling || onTotpPath) {
@@ -1547,85 +1728,6 @@ class FlowBrowserApp {
         email: this.activeServer.email,
         password: this.activeServer.password || ''
       }).catch(() => {});
-    }
-
-    // 2FA navigation clicks — never on the code page (that page must be filled, not clicked)
-    const on2faNav = /challenge\/(selection|skotp|sk|iap|dp)(?:\/|$|\?)/i.test(href) &&
-      !/challenge\/totp/i.test(href);
-    if (on2faNav) {
-      try {
-        const twoFa = await this.webview.executeJavaScript(`(() => {
-          const visible = (el) => {
-            if (!el) return false;
-            const r = el.getBoundingClientRect();
-            if (r.width < 2 || r.height < 2) return false;
-            const s = getComputedStyle(el);
-            return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
-          };
-          const center = (el) => {
-            const r = el.getBoundingClientRect();
-            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-          };
-          const isAuth = (raw) => {
-            const t = String(raw || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-            if (!t || t.length > 180) return false;
-            if (/one-time security code|tap yes|use your passkey|can.?t find an eligible|g\\.co\\/sc/.test(t)) return false;
-            return /google authenticator/.test(t) || (/authenticator/.test(t) && /code|verification|app/.test(t));
-          };
-          const text = (document.body && document.body.innerText || '');
-          const onChooser = /choose how you want to sign in/i.test(text);
-          const onSecurityCode = /g\\.co\\/sc|get a code to sign in/i.test(text) && !onChooser && !/authenticator app/i.test(text);
-
-          if (onSecurityCode) {
-            const tryAnother = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], span')).find(el =>
-              /^try another way$/i.test((el.innerText || '').replace(/\\s+/g, ' ').trim()) && visible(el)
-            );
-            if (tryAnother) return { action: 'try-another', ...center(tryAnother) };
-          }
-
-          if (onChooser || /authenticator/i.test(text)) {
-            const cands = Array.from(document.querySelectorAll(
-              '[data-challengeid], [data-challengetype], [data-action="selectchallenge"], li, div[role="link"], div[role="button"], button, a'
-            )).filter(el => visible(el) && isAuth(el.getAttribute('aria-label') || el.innerText || ''));
-            cands.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
-            if (cands[0]) {
-              const el = cands[0].closest('[data-challengeid], [data-challengetype], li, [role="link"], [role="button"], button, a') || cands[0];
-              return { action: 'auth-app', ...center(el), text: (el.innerText || '').slice(0, 80) };
-            }
-          }
-          return { action: 'none', path: location.pathname };
-        })()`);
-        console.log('[AppShell] 2FA helper:', twoFa);
-        if (twoFa && (twoFa.action === 'try-another' || twoFa.action === 'auth-app') && twoFa.x > 0 && twoFa.y > 0) {
-          const clickKey = 'cdp|' + twoFa.action + '|' + href.split('?')[0];
-          if (this._lastCdpClickKey !== clickKey || Date.now() - (this._lastCdpClickAt || 0) > 2500) {
-            this._lastCdpClickKey = clickKey;
-            this._lastCdpClickAt = Date.now();
-            window.chrome?.webview?.postMessage(JSON.stringify({
-              type: 'cmd',
-              cmd: 'cdpClick',
-              x: twoFa.x,
-              y: twoFa.y
-            }));
-          }
-        }
-      } catch (err) {
-        console.warn('[AppShell] 2FA selection helper:', err.message);
-      }
-    }
-
-    // Fill authenticator code on the TOTP page (host writes the field — page scripts were not applying it)
-    // Google SPA often keeps /identifier or youtube SetSID in the URL while Authenticator UI is showing
-    const onTotpUrl =
-      /challenge\/totp/i.test(href) ||
-      /challenge\/totp/i.test(String(live || '')) ||
-      /accounts\.youtube\.com\/accounts\/SetSID/i.test(href) ||
-      /accounts\.youtube\.com\/accounts\/SetSID/i.test(String(live || ''));
-    if (onTotpUrl) {
-      this._totpFilling = true;
-      this.postAuthOverlay({ show: true, captcha: false });
-      this.pushTotpFromBackend();
-      return;
     }
   }
 
@@ -1729,7 +1831,13 @@ class FlowBrowserApp {
         if (data.code === 'NO_CREDITS' || (Number(data.credits) || 0) <= 0) {
           await this.forceLogout(data.error || 'You have no credits left. Please renew and sign in again.');
         }
-      } else if (data && (data.code === 'NO_CREDITS' || data.code === 'BANNED' || data.code === 'FORCE_UPDATE' || data.code === 'SESSION_REPLACED' || data.code === 'PLAN_EXPIRED')) {
+      } else if (data && data.code === 'FORCE_UPDATE') {
+        const switched = await maybeSwitchClientApiOnForceUpdate(this.config.serverUrl, data);
+        if (switched) {
+          return this.handleCreditDeduction(eventData);
+        }
+        await this.forceLogout(data.error || 'Please download the latest Flow Browser.');
+      } else if (data && (data.code === 'NO_CREDITS' || data.code === 'BANNED' || data.code === 'SESSION_REPLACED' || data.code === 'PLAN_EXPIRED')) {
         await this.forceLogout(data.error || 'Please sign in again.');
       } else if (!data?.success && (res.status === 401 || res.status === 403)) {
         // Ban/disable during generation — logout immediately even if code missing
@@ -1863,6 +1971,10 @@ class FlowBrowserApp {
 
   /** Drive native WPF/Android auth cover (WebView2 page overlays cannot mask Google login). */
   postAuthOverlay(opts = {}) {
+    if (DEBUG_DISABLE_AUTH_OVERLAY) {
+      // Force cover off during manual debug
+      opts = { show: false, captcha: false, done: !!opts.done };
+    }
     try {
       window.chrome?.webview?.postMessage(JSON.stringify({
         type: 'cmd',

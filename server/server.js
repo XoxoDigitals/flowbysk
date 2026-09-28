@@ -22,13 +22,37 @@ app.get('/', (req, res) => {
 });
 
 app.use('/api/admin', adminRoutes);
+
+const forceUpdatePayload = {
+  success: false,
+  code: 'FORCE_UPDATE',
+  error: 'Please download the latest Flow Browser.',
+};
+
+async function getClientApiVersion() {
+  try {
+    const settings = (await db.getSettings()) || {};
+    return String(settings.clientApiVersion || 'v2').toLowerCase() === 'v3' ? 'v3' : 'v2';
+  } catch {
+    return 'v2';
+  }
+}
+
+/** Hard cutover: when admin enables v3, kill all /api/v2/client traffic. */
+app.use('/api/v2/client', async (req, res, next) => {
+  try {
+    if ((await getClientApiVersion()) === 'v3') {
+      return res.status(410).json(forceUpdatePayload);
+    }
+  } catch {
+    /* fall through to live v2 */
+  }
+  return next();
+});
 app.use('/api/v2/client', clientRoutes);
+app.use('/api/v3/client', clientRoutes);
 app.use('/api/client', (req, res) => {
-  res.status(410).json({
-    success: false,
-    code: 'FORCE_UPDATE',
-    error: 'Please download the latest Flow Browser.',
-  });
+  res.status(410).json(forceUpdatePayload);
 });
 app.use('/api/session', sessionRoutes);
 app.use('/api/reseller', resellerRoutes);
@@ -58,6 +82,7 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
+        clientApiVersion: String(settings.clientApiVersion || 'v2').toLowerCase() === 'v3' ? 'v3' : 'v2',
       },
     });
   } catch (err) {
@@ -137,7 +162,7 @@ db.ready()
       console.log(`Flow Creator Ai API server on port ${PORT}`);
       console.log(`Admin UI:   http://localhost:3100/admin`);
       console.log(`Demo Flow:  http://localhost:${PORT}/demo-flow`);
-      console.log(`Client API: http://localhost:${PORT}/api/v2/client`);
+      console.log(`Client API: http://localhost:${PORT}/api/v2/client (+ /api/v3/client)`);
       console.log(`Data store: PostgreSQL (Prisma) — data.json is not live`);
       console.log(`====================================================`);
     });

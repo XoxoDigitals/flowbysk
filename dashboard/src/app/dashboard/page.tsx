@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { Download } from 'lucide-react';
-import { downloadFlowAndroidUrl, downloadFlowUrl, FLOW_API, flowFetch } from '@/lib/flowApi';
+import { downloadFlowAndroidUrl, downloadFlowUrl, FLOW_API, clientApiPath, flowFetch } from '@/lib/flowApi';
 
 type Me = {
   credits: number;
@@ -25,7 +25,7 @@ export default function DashboardPage() {
   const [androidPkg, setAndroidPkg] = useState<DownloadMeta>(null);
 
   useEffect(() => {
-    flowFetch('/api/v2/client/me')
+    flowFetch(clientApiPath('/me'))
       .then(async (res) => {
         if (!res.ok) return;
         const data = await res.json();

@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import ThemeToggle from '@/components/ThemeToggle';
 import { useTheme } from '@/components/ThemeProvider';
-import { clearSession, flowFetch, readSession } from '@/lib/flowApi';
+import { clearSession, clientApiPath, flowFetch, readSession } from '@/lib/flowApi';
 import { useRouter } from 'next/navigation';
 
 export default function DashboardSettingsPage() {
@@ -23,7 +23,7 @@ export default function DashboardSettingsPage() {
       router.push('/auth/login');
       return;
     }
-    flowFetch('/api/v2/client/me')
+    flowFetch(clientApiPath('/me'))
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.user) {
@@ -41,7 +41,7 @@ export default function DashboardSettingsPage() {
     setMessage('');
     setError('');
     try {
-      const res = await flowFetch('/api/v2/client/profile', {
+      const res = await flowFetch(clientApiPath('/profile'), {
         method: 'PUT',
         body: JSON.stringify({
           displayName: name,
