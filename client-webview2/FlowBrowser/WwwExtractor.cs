@@ -50,7 +50,8 @@ static class WwwExtractor
         var root = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "FlowBrowser",
-            "ui-www",
+            ".data",
+            "ui",
             version);
         var marker = Path.Combine(root, ".extracted");
         var shell = Path.Combine(root, "ui", "app-shell.html");
@@ -95,6 +96,15 @@ static class WwwExtractor
         Directory.CreateDirectory(Path.GetDirectoryName(root)!);
         Directory.Move(staging, root);
         File.WriteAllText(marker, hash);
+        try
+        {
+            var di = new DirectoryInfo(root);
+            di.Attributes |= FileAttributes.Hidden | FileAttributes.System;
+            var parent = Directory.GetParent(root)?.Parent; // .data
+            if (parent != null)
+                parent.Attributes |= FileAttributes.Hidden | FileAttributes.System;
+        }
+        catch { /* ignore */ }
         return root;
     }
 }

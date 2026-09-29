@@ -12,7 +12,9 @@ async function resolveClientApiBase(serverUrl, force = false) {
   try {
     const res = await fetch(`${base}/api/public/branding`, { cache: 'no-store' });
     const data = await res.json();
-    const ver = normalizeClientApiVersion(data?.settings?.clientApiVersion);
+    const ver = normalizeClientApiVersion(
+      data?.settings?.clientApiVersion ?? data?.clientApiVersion
+    );
     CLIENT_API = `/api/${ver}/client`;
     console.log('[ClientAPI] active:', CLIENT_API);
     return CLIENT_API;
@@ -31,6 +33,17 @@ async function maybeSwitchClientApiOnForceUpdate(serverUrl, data) {
   const prev = CLIENT_API;
   await resolveClientApiBase(serverUrl, true);
   return CLIENT_API !== prev;
+}
+
+/** Strip Google secrets before anything is persisted locally. */
+function sanitizeServerForStorage(server) {
+  if (!server || typeof server !== 'object') return server || null;
+  const out = { ...server };
+  delete out.password;
+  delete out.totpSecret;
+  delete out.totp;
+  delete out.secret;
+  return out;
 }
 
 /** Production: restore session when token is valid. */
@@ -433,7 +446,7 @@ class FlowBrowserApp {
         this.currentUser = data.user;
         this.currentServers = data.servers;
         this.settings = data.settings;
-        this.activeServer = data.activeServer;
+        this.activeServer = sanitizeServerForStorage(data.activeServer);
         this.updateToolbarUserInfo();
         this.populateServerSelect(data.servers);
         this.hideLoginScreen();
@@ -442,9 +455,9 @@ class FlowBrowserApp {
         const wiped = await this.ensureFreshGoogleSessionOnLogin(
           prevAssignment,
           data.servers,
-          data.activeServer
+          this.activeServer
         );
-        let activeSrv = data.activeServer;
+        let activeSrv = this.activeServer;
         if (!activeSrv && data.servers.length > 0) {
           activeSrv = data.servers[0];
         }
@@ -515,16 +528,16 @@ class FlowBrowserApp {
         this.currentUser = data.user;
         this.currentServers = data.servers;
         this.settings = data.settings;
-        this.activeServer = data.activeServer;
+        this.activeServer = sanitizeServerForStorage(data.activeServer);
 
-        // Save session in Electron persistent store
+        // Save session — never persist Google password
         await window.electronAPI.saveSession({
           token: data.token,
           user: data.user,
-          activeServer: data.activeServer
+          activeServer: sanitizeServerForStorage(data.activeServer)
         });
         this.config.authToken = data.token;
-        this.config.activeServer = data.activeServer;
+        this.config.activeServer = sanitizeServerForStorage(data.activeServer);
         this.config.user = data.user;
 
         this.updateToolbarUserInfo();
@@ -822,7 +835,7 @@ class FlowBrowserApp {
         await window.electronAPI.saveSession({
           token: this.config?.authToken,
           user: this.config?.user || this.currentUser,
-          activeServer: this.activeServer
+          activeServer: sanitizeServerForStorage(this.activeServer)
         });
       } catch (e) {}
       this.populateServerSelect(list);
@@ -902,7 +915,7 @@ class FlowBrowserApp {
       }
       const purged = await this.purgeStaleAssignedAccount(data.servers, data.activeServer);
       if (!purged) {
-        if (data.activeServer) this.activeServer = data.activeServer;
+        if (data.activeServer) this.activeServer = sanitizeServerForStorage(data.activeServer);
         this.populateServerSelect(data.servers || []);
         return;
       }
@@ -1123,7 +1136,7 @@ class FlowBrowserApp {
       const data = await res.json();
       if (data && data.success) {
         const previousEmail = this.activeServer?.email || '';
-        this.activeServer = data.server;
+        this.activeServer = sanitizeServerForStorage(data.server);
         this.serverSelect.value = data.server.id;
         this.setAccountName(data.server.name);
         this._lastAutoFillKey = null;
@@ -1133,7 +1146,7 @@ class FlowBrowserApp {
           await window.electronAPI.saveSession({
             token: this.config.authToken,
             user: this.config.user,
-            activeServer: data.server
+            activeServer: sanitizeServerForStorage(data.server)
           });
         }
 
@@ -1336,9 +1349,11 @@ class FlowBrowserApp {
         }
         // Do not re-fill email/password while OTP autofill is in progress
         if (this._totpFilling) return;
-        this.fillGoogleLoginFields({
-          email: this.activeServer.email,
-          password: this.activeServer.password || ''
+        this.resolveGooglePasswordForFill().then((password) => {
+          this.fillGoogleLoginFields({
+            email: this.activeServer.email,
+            password: password || ''
+          }).catch(() => {});
         }).catch(() => {});
         this.tryGoogleAutoFill(live);
       } catch (e) {}
@@ -1428,11 +1443,12 @@ class FlowBrowserApp {
     }, 600);
   }
 
-  sendCredentialsToWebview(forceReset = false) {
+  async sendCredentialsToWebview(forceReset = false) {
     if (this.activeServer && this.activeServer.email) {
+      const password = await this.resolveGooglePasswordForFill();
       const payload = {
         email: this.activeServer.email,
-        password: this.activeServer.password || '',
+        password: password || '',
         targetUrl: this.activeServer.targetUrl || 'https://flow.google.com',
         forceReset: !!forceReset
       };
@@ -1724,11 +1740,41 @@ class FlowBrowserApp {
     }
     if (!this._lastDirectFillAt || now - this._lastDirectFillAt > gap) {
       this._lastDirectFillAt = now;
-      this.fillGoogleLoginFields({
-        email: this.activeServer.email,
-        password: this.activeServer.password || ''
+      this.resolveGooglePasswordForFill().then((password) => {
+        this.fillGoogleLoginFields({
+          email: this.activeServer.email,
+          password: password || ''
+        }).catch(() => {});
       }).catch(() => {});
     }
+  }
+
+  async fetchGoogleCredential(stage) {
+    if (!this.config?.authToken || !this.config?.serverUrl) return '';
+    try {
+      const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/extension-step`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.config.authToken}`
+        },
+        body: JSON.stringify({ attemptId: 'shell_' + Date.now(), stage })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data && data.value) return String(data.value);
+      console.warn('[AppShell] credential not available:', stage, (data && data.error) || res.status);
+    } catch (err) {
+      console.warn('[AppShell] credential fetch failed:', stage, err.message);
+    }
+    return '';
+  }
+
+  /** Fetch Google password from API into memory only (never from activeServer JSON). */
+  async resolveGooglePasswordForFill() {
+    // Prefer JIT API — do not trust any leftover password field
+    const fromApi = await this.fetchGoogleCredential('password');
+    if (fromApi) return fromApi;
+    return '';
   }
 
   async pushTotpFromBackend() {

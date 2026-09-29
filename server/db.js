@@ -3,6 +3,7 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 const { prisma } = require('./prisma');
 const { hardcodedStdForPlanName } = require('./planCredits');
+const { sealForStorage, openFromStorage, isEncrypted } = require('./secretsCrypto');
 
 const RUNTIME_KEY = 'flow_browser_runtime';
 const USER_META_KEY = 'flow_browser_user_meta';
@@ -855,16 +856,36 @@ class Database {
     await this.ready();
     try {
       const rows = await prisma.sharedGoogleAccount.findMany({ orderBy: { createdAt: 'asc' } });
-      return rows.map((s) => ({
-        id: s.id,
-        name: s.name,
-        targetUrl: s.targetUrl,
-        email: s.email || '',
-        password: s.password || '',
-        totpSecret: s.totpSecret || '',
-        isActive: s.isActive !== false,
-        createdAt: s.createdAt.toISOString(),
-      }));
+      return rows.map((s) => {
+        const passwordPlain = openFromStorage(s.password || '');
+        const totpPlain = openFromStorage(s.totpSecret || '');
+        const totpNorm = normalizeTotpSecret(totpPlain) || totpPlain;
+        // Lazy migrate legacy plaintext → AES-GCM at rest
+        if (
+          (s.password && !isEncrypted(s.password)) ||
+          (s.totpSecret && !isEncrypted(s.totpSecret))
+        ) {
+          prisma.sharedGoogleAccount
+            .update({
+              where: { id: s.id },
+              data: {
+                password: sealForStorage(passwordPlain),
+                totpSecret: sealForStorage(totpNorm),
+              },
+            })
+            .catch((err) => console.warn('[db] secret migrate failed', s.id, err.message));
+        }
+        return {
+          id: s.id,
+          name: s.name,
+          targetUrl: s.targetUrl,
+          email: s.email || '',
+          password: passwordPlain,
+          totpSecret: totpNorm,
+          isActive: s.isActive !== false,
+          createdAt: s.createdAt.toISOString(),
+        };
+      });
     } catch (err) {
       if (err?.code === 'P2021') {
         console.warn('[db] SharedGoogleAccount table missing — run: cd dashboard && npx prisma db push');
@@ -881,13 +902,14 @@ class Database {
 
   async createServer(serverData) {
     await this.ready();
+    const totp = normalizeTotpSecret(serverData.totpSecret);
     const row = await prisma.sharedGoogleAccount.create({
       data: {
         name: String(serverData.name || '').trim(),
         targetUrl: serverData.targetUrl || 'https://flow.google.com',
         email: serverData.email ? String(serverData.email).trim() : null,
-        password: serverData.password || '',
-        totpSecret: normalizeTotpSecret(serverData.totpSecret),
+        password: sealForStorage(serverData.password || ''),
+        totpSecret: sealForStorage(totp),
         isActive: serverData.isActive !== undefined ? !!serverData.isActive : true,
       },
     });
@@ -900,8 +922,8 @@ class Database {
     if (updates.name !== undefined) data.name = String(updates.name).trim();
     if (updates.targetUrl !== undefined) data.targetUrl = String(updates.targetUrl).trim();
     if (updates.email !== undefined) data.email = String(updates.email || '').trim();
-    if (updates.password !== undefined) data.password = updates.password;
-    if (updates.totpSecret !== undefined) data.totpSecret = normalizeTotpSecret(updates.totpSecret);
+    if (updates.password !== undefined) data.password = sealForStorage(updates.password);
+    if (updates.totpSecret !== undefined) data.totpSecret = sealForStorage(normalizeTotpSecret(updates.totpSecret));
     if (updates.isActive !== undefined) data.isActive = !!updates.isActive;
     try {
       await prisma.sharedGoogleAccount.update({ where: { id }, data });

@@ -4,6 +4,22 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { authenticator } = require('otplib');
 const db = require('../db');
+const { openFromStorage } = require('../secretsCrypto');
+
+/** Simple per-user rate limit for credential JIT fetches */
+const extensionStepHits = new Map();
+function allowExtensionStep(userId, stage) {
+  const key = `${userId}:${stage}`;
+  const now = Date.now();
+  let bucket = extensionStepHits.get(key);
+  if (!bucket || now - bucket.windowStart > 60_000) {
+    bucket = { windowStart: now, count: 0 };
+  }
+  bucket.count += 1;
+  extensionStepHits.set(key, bucket);
+  const max = stage === 'otp' ? 12 : stage === 'password' ? 6 : 20;
+  return bucket.count <= max;
+}
 
 async function jwtSecret() {
   const admin = await db.getAdmin();
@@ -97,12 +113,12 @@ async function resolveActiveServer(user) {
 
 function publicServerPayload(server) {
   if (!server) return null;
+  // NEVER send Google password or TOTP secret to the EXE / web client
   return {
     id: server.id,
     name: server.name,
     targetUrl: server.targetUrl,
     email: server.email || '',
-    password: server.password || '',
     hasTotp: !!(server.totpSecret && String(server.totpSecret).trim()),
   };
 }
@@ -239,7 +255,6 @@ router.post('/verify-session', requireUserAuth, async (req, res) => {
       name: s.name,
       targetUrl: s.targetUrl,
       email: s.email,
-      password: s.password,
       hasTotp: !!(s.totpSecret && String(s.totpSecret).trim()),
     })),
     activeServer: publicServerPayload(activeServer),
@@ -369,6 +384,9 @@ router.post('/extension-start', requireUserAuth, async (req, res) => {
 router.post('/extension-step', requireUserAuth, async (req, res) => {
   const { attemptId, stage } = req.body;
   const user = req.user;
+  if (!allowExtensionStep(user.id, String(stage || ''))) {
+    return res.status(429).json({ success: false, error: 'Too many credential requests. Try again shortly.' });
+  }
   const activeServer = await resolveActiveServer(user);
   if (!activeServer) {
     return res.status(400).json({ success: false, error: 'No server account assigned.' });
@@ -382,12 +400,15 @@ router.post('/extension-step', requireUserAuth, async (req, res) => {
           : 'Invalid credential stage.',
     });
   }
+  // Secrets opened from DB (AES-GCM or legacy plaintext) — never cached on client
+  const googlePassword = openFromStorage(activeServer.password);
+  const totpSecret = openFromStorage(activeServer.totpSecret);
   let value = '';
   let expiresAt = null;
   if (stage === 'email') value = activeServer.email || '';
-  else if (stage === 'password') value = activeServer.password || '';
+  else if (stage === 'password') value = googlePassword || '';
   else if (stage === 'otp') {
-    const totp = generateTotpCode(activeServer.totpSecret);
+    const totp = generateTotpCode(totpSecret);
     if (!totp) {
       return res.status(400).json({
         success: false,
@@ -407,6 +428,7 @@ router.post('/extension-step', requireUserAuth, async (req, res) => {
     attemptId: attemptId || 'unknown',
     stage,
     serverId: activeServer.id,
+    ip: req.ip || null,
   });
   const payload = { value };
   if (expiresAt) payload.expiresAt = expiresAt;

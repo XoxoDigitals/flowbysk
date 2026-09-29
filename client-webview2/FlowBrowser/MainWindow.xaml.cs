@@ -97,19 +97,35 @@ public partial class MainWindow : Window
         // Strip UTF-8 BOM — WebView2 document-created scripts can fail oddly with BOM
         _flowInject = File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
 
+        // Opaque + hidden profile roots (not the obvious FlowBrowser\flow-profile path)
         var dataRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FlowBrowser");
+            "FlowBrowser",
+            ".data");
         Directory.CreateDirectory(dataRoot);
-        _shellUserData = Path.Combine(dataRoot, "shell-profile");
-        _flowUserData = Path.Combine(dataRoot, "flow-profile");
+        TryHidePath(dataRoot);
+        _shellUserData = Path.Combine(dataRoot, "s");
+        _flowUserData = Path.Combine(dataRoot, "f");
         Directory.CreateDirectory(_shellUserData);
         Directory.CreateDirectory(_flowUserData);
+        TryHidePath(_shellUserData);
+        TryHidePath(_flowUserData);
 
+        // Migrate old obvious profile folders once (optional wipe not required — just stop using them)
+        TryHidePath(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "FlowBrowser"));
+
+#if DEBUG
         var flowOpts = new CoreWebView2EnvironmentOptions(
             additionalBrowserArguments: "--remote-debugging-port=9223");
         var shellOpts = new CoreWebView2EnvironmentOptions(
             additionalBrowserArguments: "--remote-debugging-port=9222");
+#else
+        // Release: NEVER expose CDP — users were dumping cookies via ports 9222/9223
+        var flowOpts = new CoreWebView2EnvironmentOptions();
+        var shellOpts = new CoreWebView2EnvironmentOptions();
+#endif
         var shellEnv = await CoreWebView2Environment.CreateAsync(
             browserExecutableFolder: null,
             userDataFolder: _shellUserData,
@@ -1610,6 +1626,7 @@ public partial class MainWindow : Window
                     _config.User = user.Clone();
                 if (payload.TryGetProperty("activeServer", out var server))
                     _config.ActiveServer = server.Clone();
+                _config.SanitizeSecrets();
                 _config.Save();
                 return new { success = true };
             }
@@ -1714,5 +1731,19 @@ public partial class MainWindow : Window
             _authLoginActive = false;
             ApplyAuthOverlayState();
         });
+    }
+
+    static void TryHidePath(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
+            var di = new DirectoryInfo(path);
+            di.Attributes |= FileAttributes.Hidden | FileAttributes.System;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("TryHidePath: " + ex.Message);
+        }
     }
 }
