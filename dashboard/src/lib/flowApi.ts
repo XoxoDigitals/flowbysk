@@ -5,7 +5,7 @@ const STORAGE_KEY = 'flowbro_session';
 const CLIENT_API_VERSION_KEY = 'flowbro_client_api_version';
 
 export type FlowRole = 'admin' | 'reseller' | 'user';
-export type ClientApiVersion = 'v2' | 'v3';
+export type ClientApiVersion = 'v2' | 'v3' | 'v4';
 
 export type FlowSession = {
   token: string;
@@ -43,15 +43,18 @@ export function downloadFlowAndroidUrl() {
 }
 
 function normalizeClientApiVersion(value: unknown): ClientApiVersion {
-  return String(value || '').toLowerCase() === 'v3' ? 'v3' : 'v2';
+  const v = String(value || '').toLowerCase();
+  if (v === 'v4') return 'v4';
+  if (v === 'v3') return 'v3';
+  return 'v2';
 }
 
 function readCachedClientApiVersion(): ClientApiVersion {
-  if (typeof window === 'undefined') return 'v2';
+  if (typeof window === 'undefined') return 'v4';
   try {
-    return normalizeClientApiVersion(localStorage.getItem(CLIENT_API_VERSION_KEY));
+    return normalizeClientApiVersion(localStorage.getItem(CLIENT_API_VERSION_KEY) || 'v4');
   } catch {
-    return 'v2';
+    return 'v4';
   }
 }
 
@@ -68,7 +71,6 @@ function writeCachedClientApiVersion(version: ClientApiVersion) {
 export async function resolveClientApiVersion(force = false): Promise<ClientApiVersion> {
   if (!force) {
     const cached = readCachedClientApiVersion();
-    // Still refresh in background-ish: if never fetched this session, hit branding
     if (typeof window !== 'undefined' && (window as unknown as { __flowClientApiResolved?: boolean }).__flowClientApiResolved) {
       return cached;
     }
@@ -87,7 +89,7 @@ export async function resolveClientApiVersion(force = false): Promise<ClientApiV
   }
 }
 
-/** Build `/api/v2/client/...` or `/api/v3/client/...` from a suffix like `/me`. */
+/** Build `/api/v2|v3|v4/client/...` from a suffix like `/me`. */
 export function clientApiPath(suffix = '', version?: ClientApiVersion) {
   const ver = version || readCachedClientApiVersion();
   const path = String(suffix || '');
@@ -103,24 +105,22 @@ export async function flowFetch(path: string, init: RequestInit = {}) {
     headers.set('Content-Type', 'application/json');
   }
 
-  const isClientApi = /^\/api\/v[23]\/client(?:\/|$)/i.test(path);
+  const isClientApi = /^\/api\/v[234]\/client(?:\/|$)/i.test(path);
   let urlPath = path;
   if (isClientApi) {
     await resolveClientApiVersion(false);
-    // Rewrite any hardcoded v2/v3 client path to the active version
-    urlPath = path.replace(/^\/api\/v[23]\/client/i, `/api/${readCachedClientApiVersion()}/client`);
+    urlPath = path.replace(/^\/api\/v[234]\/client/i, `/api/${readCachedClientApiVersion()}/client`);
   }
 
   let res = await fetch(`${FLOW_API}${urlPath}`, { ...init, headers });
 
-  // Mid-session hard cutover: refetch branding and retry once on FORCE_UPDATE
   if (isClientApi && (res.status === 410 || res.status === 403)) {
     try {
       const clone = res.clone();
       const data = await clone.json();
       if (data?.code === 'FORCE_UPDATE') {
         const next = await resolveClientApiVersion(true);
-        const retryPath = path.replace(/^\/api\/v[23]\/client/i, `/api/${next}/client`);
+        const retryPath = path.replace(/^\/api\/v[234]\/client/i, `/api/${next}/client`);
         if (retryPath !== urlPath) {
           res = await fetch(`${FLOW_API}${retryPath}`, { ...init, headers });
         }

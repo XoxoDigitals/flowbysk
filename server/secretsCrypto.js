@@ -6,6 +6,7 @@
 const crypto = require('crypto');
 
 const PREFIX = 'enc:v1:';
+const _decryptFailLogged = new Set();
 
 function masterKeyBytes() {
   const raw =
@@ -53,7 +54,14 @@ function decryptSecret(value) {
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
   } catch (err) {
-    console.warn('[secretsCrypto] decrypt failed:', err.message);
+    const tip = text.slice(0, 24);
+    if (!_decryptFailLogged.has(tip)) {
+      _decryptFailLogged.add(tip);
+      console.warn(
+        '[secretsCrypto] decrypt failed (wrong FLOW_SECRETS_KEY or corrupt ciphertext). Re-save Google password/TOTP in Admin. Once:',
+        err.message
+      );
+    }
     return '';
   }
 }

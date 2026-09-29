@@ -21,7 +21,7 @@ type SiteForm = {
   ticketSystemEnabled: boolean;
   contactPageEnabled: boolean;
   maintenanceMode: boolean;
-  clientApiVersion: 'v2' | 'v3';
+  clientApiVersion: 'v2' | 'v3' | 'v4';
 };
 
 type DownloadPackage = {
@@ -49,7 +49,7 @@ const emptySite: SiteForm = {
   ticketSystemEnabled: true,
   contactPageEnabled: true,
   maintenanceMode: false,
-  clientApiVersion: 'v2',
+  clientApiVersion: 'v4',
 };
 
 function formatBytes(n: number) {
@@ -137,7 +137,10 @@ export default function AdminSettingsPage() {
       ticketSystemEnabled: row.ticketSystemEnabled !== false,
       contactPageEnabled: row.contactPageEnabled !== false,
       maintenanceMode: row.maintenanceMode === true,
-      clientApiVersion: row.clientApiVersion === 'v3' ? 'v3' : 'v2',
+      clientApiVersion:
+        row.clientApiVersion === 'v2' || row.clientApiVersion === 'v3' || row.clientApiVersion === 'v4'
+          ? row.clientApiVersion
+          : 'v4',
     });
     setSocial(row.socialLinks || {});
     if (noticesRes.ok) setNotices(noticesData.notices || []);
@@ -488,19 +491,19 @@ export default function AdminSettingsPage() {
         </div>
         <div
           className="flex items-center justify-between gap-4 rounded-2xl border px-4 py-3"
-          style={{ borderColor: site.clientApiVersion === 'v3' ? 'var(--a1)' : 'var(--line)' }}
+          style={{ borderColor: site.clientApiVersion === 'v4' ? 'var(--a1)' : 'var(--line)' }}
         >
           <div>
-            <div className="text-sm font-medium">Client API v3</div>
+            <div className="text-sm font-medium">Client API v4</div>
             <p className="text-xs text-[var(--ink3)]">
-              Hard cutover: when ON, /api/v2/client stops (FORCE_UPDATE). New Flow Browser + web dashboard auto-use v3. Old EXEs must update.
+              Hard cutover: when ON, /api/v2 and /api/v3 stop (FORCE_UPDATE). Web dashboard + new Flow Browser use /api/v4/client. Old EXEs must update.
             </p>
           </div>
           <Toggle
-            on={site.clientApiVersion === 'v3'}
-            onLabel="v3 ON"
+            on={site.clientApiVersion === 'v4'}
+            onLabel="v4 ON"
             offLabel="v2"
-            onChange={(on) => setSite({ ...site, clientApiVersion: on ? 'v3' : 'v2' })}
+            onChange={(on) => setSite({ ...site, clientApiVersion: on ? 'v4' : 'v2' })}
           />
         </div>
 

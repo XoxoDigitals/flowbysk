@@ -32,25 +32,46 @@ const forceUpdatePayload = {
 async function getClientApiVersion() {
   try {
     const settings = (await db.getSettings()) || {};
-    return String(settings.clientApiVersion || 'v2').toLowerCase() === 'v3' ? 'v3' : 'v2';
+    return normalizeClientApiVersionPublic(settings.clientApiVersion);
   } catch {
-    return 'v2';
+    return 'v4';
   }
 }
 
-/** Hard cutover: when admin enables v3, kill all /api/v2/client traffic. */
+function normalizeClientApiVersionPublic(value) {
+  const v = String(value || '').trim().toLowerCase();
+  if (v === 'v4') return 'v4';
+  if (v === 'v3') return 'v3';
+  return 'v2';
+}
+
+/** Kill older client APIs on hard cutover. */
+function killIfOlderThan(activeVersion, routeVersion) {
+  const order = { v2: 2, v3: 3, v4: 4 };
+  return (order[activeVersion] || 2) > (order[routeVersion] || 2);
+}
+
 app.use('/api/v2/client', async (req, res, next) => {
   try {
-    if ((await getClientApiVersion()) === 'v3') {
+    if (killIfOlderThan(await getClientApiVersion(), 'v2')) {
       return res.status(410).json(forceUpdatePayload);
     }
-  } catch {
-    /* fall through to live v2 */
-  }
+  } catch { /* live */ }
   return next();
 });
 app.use('/api/v2/client', clientRoutes);
+
+app.use('/api/v3/client', async (req, res, next) => {
+  try {
+    if (killIfOlderThan(await getClientApiVersion(), 'v3')) {
+      return res.status(410).json(forceUpdatePayload);
+    }
+  } catch { /* live */ }
+  return next();
+});
 app.use('/api/v3/client', clientRoutes);
+
+app.use('/api/v4/client', clientRoutes);
 app.use('/api/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -82,7 +103,11 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
-        clientApiVersion: String(settings.clientApiVersion || 'v2').toLowerCase() === 'v3' ? 'v3' : 'v2',
+        clientApiVersion: (() => {
+          const v = String(settings.clientApiVersion || 'v4').toLowerCase();
+          if (v === 'v4' || v === 'v3' || v === 'v2') return v;
+          return 'v4';
+        })(),
       },
     });
   } catch (err) {
@@ -156,13 +181,23 @@ app.get('*', (req, res) => {
 });
 
 db.ready()
-  .then(() => {
+  .then(async () => {
+    // Hard cutover to v4 ASAP on boot (admin can still set back to v2/v3 if needed)
+    try {
+      const cur = await db.getSettings();
+      if (normalizeClientApiVersionPublic(cur?.clientApiVersion) !== 'v4') {
+        await db.updateSettings({ clientApiVersion: 'v4' });
+        console.log('[boot] Forced clientApiVersion → v4 (kills /api/v2 and /api/v3)');
+      }
+    } catch (err) {
+      console.warn('[boot] could not force clientApiVersion v4:', err.message);
+    }
     app.listen(PORT, () => {
       console.log(`====================================================`);
       console.log(`Flow Creator Ai API server on port ${PORT}`);
       console.log(`Admin UI:   http://localhost:3100/admin`);
       console.log(`Demo Flow:  http://localhost:${PORT}/demo-flow`);
-      console.log(`Client API: http://localhost:${PORT}/api/v2/client (+ /api/v3/client)`);
+      console.log(`Client API: http://localhost:${PORT}/api/v4/client (v2/v3 killed when cutover=v4)`);
       console.log(`Data store: PostgreSQL (Prisma) — data.json is not live`);
       console.log(`====================================================`);
     });

@@ -1,10 +1,13 @@
 // Flow Browser App Shell Controller
 
-/** Active client API base — resolved from /api/public/branding (v2 or v3). */
-let CLIENT_API = '/api/v2/client';
+/** Active client API base — resolved from /api/public/branding (v2 / v3 / v4). */
+let CLIENT_API = '/api/v4/client';
 
 function normalizeClientApiVersion(value) {
-  return String(value || '').toLowerCase() === 'v3' ? 'v3' : 'v2';
+  const v = String(value || '').toLowerCase();
+  if (v === 'v4') return 'v4';
+  if (v === 'v3') return 'v3';
+  return 'v2';
 }
 
 async function resolveClientApiBase(serverUrl, force = false) {

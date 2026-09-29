@@ -10,7 +10,7 @@
     <RootNamespace>FlowBrowser</RootNamespace>
     <ApplicationTitle>Flow Browser</ApplicationTitle>
     <ApplicationIcon>FlowBrowser.ico</ApplicationIcon>
-    <Version>2.0.30</Version>
+    <Version>2.0.31</Version>
   </PropertyGroup>
 
   <ItemGroup>
