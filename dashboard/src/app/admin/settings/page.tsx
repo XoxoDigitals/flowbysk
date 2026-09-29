@@ -491,19 +491,19 @@ export default function AdminSettingsPage() {
         </div>
         <div
           className="flex items-center justify-between gap-4 rounded-2xl border px-4 py-3"
-          style={{ borderColor: site.clientApiVersion === 'v4' ? 'var(--a1)' : 'var(--line)' }}
+          style={{ borderColor: 'var(--a1)' }}
         >
           <div>
             <div className="text-sm font-medium">Client API v4</div>
             <p className="text-xs text-[var(--ink3)]">
-              Hard cutover: when ON, /api/v2 and /api/v3 stop (FORCE_UPDATE). Web dashboard + new Flow Browser use /api/v4/client. Old EXEs must update.
+              Locked on. /api/v2 and /api/v3 always return 410 FORCE_UPDATE. Only /api/v4/client is live.
             </p>
           </div>
           <Toggle
-            on={site.clientApiVersion === 'v4'}
+            on={true}
             onLabel="v4 ON"
-            offLabel="v2"
-            onChange={(on) => setSite({ ...site, clientApiVersion: on ? 'v4' : 'v2' })}
+            offLabel="v4 ON"
+            onChange={() => setSite({ ...site, clientApiVersion: 'v4' })}
           />
         </div>
 
