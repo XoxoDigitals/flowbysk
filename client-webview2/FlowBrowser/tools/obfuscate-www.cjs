@@ -1,8 +1,8 @@
 /**
- * Copies www → www-packed and obfuscates critical shell/inject scripts.
+ * Copies www → www-packed and obfuscates every .js file.
  * Source www/ stays readable for development.
  *
- * Usage: node obfuscate-www.mjs
+ * Large already-bundled assets use lighter options (speed + less breakage).
  */
 const fs = require('fs');
 const path = require('path');
@@ -12,14 +12,7 @@ const root = path.join(__dirname, '..');
 const srcWww = path.join(root, 'www');
 const outWww = path.join(root, 'www-packed');
 
-/** Critical app logic — obfuscate these. Skip already-minified vendor extension bundles. */
-const OBFUSCATE_REL = [
-  'ui/app-shell.js',
-  'scripts/flow-inject.js',
-  'scripts/shell-bridge.js',
-];
-
-const obfuscatorOptions = {
+const HEAVY_OPTS = {
   compact: true,
   controlFlowFlattening: true,
   controlFlowFlatteningThreshold: 0.5,
@@ -37,6 +30,27 @@ const obfuscatorOptions = {
   target: 'browser',
 };
 
+/** Lighter pass for big Vite/vendor bundles */
+const LIGHT_OPTS = {
+  compact: true,
+  controlFlowFlattening: false,
+  deadCodeInjection: false,
+  debugProtection: false,
+  disableConsoleOutput: false,
+  identifierNamesGenerator: 'hexadecimal',
+  renameGlobals: false,
+  selfDefending: false,
+  stringArray: true,
+  stringArrayEncoding: ['base64'],
+  stringArrayThreshold: 0.5,
+  transformObjectKeys: false,
+  unicodeEscapeSequence: false,
+  target: 'browser',
+};
+
+const LIGHT_BYTES = 200 * 1024; // 200 KB
+const SKIP_BYTES = 2 * 1024 * 1024; // 2 MB — already opaque minified; re-obfuscating OOMs / breaks
+
 function rimraf(dir) {
   if (!fs.existsSync(dir)) return;
   fs.rmSync(dir, { recursive: true, force: true });
@@ -52,6 +66,18 @@ function copyDir(from, to) {
   }
 }
 
+function listJsFiles(dir, base = dir) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...listJsFiles(full, base));
+    else if (entry.name.toLowerCase().endsWith('.js')) {
+      out.push(path.relative(base, full));
+    }
+  }
+  return out;
+}
+
 function obfuscateFile(rel) {
   const full = path.join(outWww, rel);
   if (!fs.existsSync(full)) {
@@ -59,11 +85,18 @@ function obfuscateFile(rel) {
     return;
   }
   const code = fs.readFileSync(full, 'utf8');
-  const result = JavaScriptObfuscator.obfuscate(code, obfuscatorOptions);
-  fs.writeFileSync(full, result.getObfuscatedCode(), 'utf8');
   const before = Buffer.byteLength(code, 'utf8');
-  const after = Buffer.byteLength(result.getObfuscatedCode(), 'utf8');
-  console.log(`[obfuscate] ${rel}  ${before} → ${after} bytes`);
+  if (before >= SKIP_BYTES) {
+    console.log(`[obfuscate] SKIP huge (already minified) ${rel}  ${before} bytes`);
+    return;
+  }
+  const opts = before >= LIGHT_BYTES ? LIGHT_OPTS : HEAVY_OPTS;
+  const mode = before >= LIGHT_BYTES ? 'light' : 'heavy';
+  const result = JavaScriptObfuscator.obfuscate(code, opts);
+  const out = result.getObfuscatedCode();
+  fs.writeFileSync(full, out, 'utf8');
+  const after = Buffer.byteLength(out, 'utf8');
+  console.log(`[obfuscate] ${mode} ${rel}  ${before} → ${after} bytes`);
 }
 
 function main() {
@@ -73,7 +106,9 @@ function main() {
   }
   rimraf(outWww);
   copyDir(srcWww, outWww);
-  for (const rel of OBFUSCATE_REL) obfuscateFile(rel.replace(/\//g, path.sep));
+  const files = listJsFiles(outWww).sort();
+  console.log(`[obfuscate] ${files.length} JS files`);
+  for (const rel of files) obfuscateFile(rel);
   console.log('[obfuscate] packed →', outWww);
 }
 

@@ -60,7 +60,10 @@ static class WwwExtractor
         {
             var prev = File.ReadAllText(marker).Trim();
             if (prev.Equals(hash, StringComparison.OrdinalIgnoreCase))
+            {
+                TryDeleteLegacyUiWww();
                 return root;
+            }
         }
 
         var tmp = root + ".tmp";
@@ -105,6 +108,23 @@ static class WwwExtractor
                 parent.Attributes |= FileAttributes.Hidden | FileAttributes.System;
         }
         catch { /* ignore */ }
+
+        TryDeleteLegacyUiWww();
         return root;
+    }
+
+    /// <summary>Remove old plaintext extract path used before .data/ui.</summary>
+    static void TryDeleteLegacyUiWww()
+    {
+        try
+        {
+            var legacy = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "FlowBrowser",
+                "ui-www");
+            if (Directory.Exists(legacy))
+                Directory.Delete(legacy, recursive: true);
+        }
+        catch { /* ignore in-use / ACL */ }
     }
 }
