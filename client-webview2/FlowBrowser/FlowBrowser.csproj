@@ -10,7 +10,7 @@
     <RootNamespace>FlowBrowser</RootNamespace>
     <ApplicationTitle>Flow Browser</ApplicationTitle>
     <ApplicationIcon>FlowBrowser.ico</ApplicationIcon>
-    <Version>2.0.29</Version>
+    <Version>2.0.30</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,16 +20,23 @@
 
   <ItemGroup>
     <Resource Include="FlowBrowser.ico" />
-    <!-- Dev / folder-portable: copy www next to the binary -->
+    <!-- Dev / folder-portable: copy readable www next to the binary -->
     <None Include="www\**\*" CopyToOutputDirectory="PreserveNewest" LinkBase="www" />
   </ItemGroup>
 
-  <!-- Zip www and embed so a single-file publish needs no sibling www folder -->
+  <!--
+    Release/publish: obfuscate critical JS then zip www-packed into the single-file EXE.
+    Debug: zip plain www (easier to inspect while developing).
+  -->
   <Target Name="ZipWwwForEmbed" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
       <_WwwZip>$(MSBuildProjectDirectory)\www.zip</_WwwZip>
+      <_PackScript>$(MSBuildProjectDirectory)\tools\pack-www.ps1</_PackScript>
     </PropertyGroup>
-    <Exec Command="powershell -NoProfile -Command &quot;if (Test-Path '$(_WwwZip)') { Remove-Item '$(_WwwZip)' -Force }; Compress-Archive -Path '$(MSBuildProjectDirectory)\www\*' -DestinationPath '$(_WwwZip)' -Force&quot;" />
+    <Exec Condition="'$(Configuration)' == 'Release'"
+          Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(_PackScript)&quot;" />
+    <Exec Condition="'$(Configuration)' != 'Release'"
+          Command="powershell -NoProfile -Command &quot;if (Test-Path '$(_WwwZip)') { Remove-Item '$(_WwwZip)' -Force }; Compress-Archive -Path '$(MSBuildProjectDirectory)\www\*' -DestinationPath '$(_WwwZip)' -Force&quot;" />
     <ItemGroup>
       <EmbeddedResource Include="$(_WwwZip)">
         <LogicalName>FlowBrowser.www.zip</LogicalName>
@@ -39,6 +46,7 @@
 
   <Target Name="CleanWwwZip" AfterTargets="Clean">
     <Delete Files="$(MSBuildProjectDirectory)\www.zip" TreatErrorsAsWarnings="true" />
+    <RemoveDir Directories="$(MSBuildProjectDirectory)\www-packed" />
   </Target>
 
 </Project>

@@ -1,0 +1,4 @@
+node_modules/
+www-packed/
+www.zip
+*.log

@@ -1,0 +1,9 @@
+{
+  "name": "flow-browser-www-pack",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Minify/obfuscate Flow Browser www JS for Release embeds",
+  "dependencies": {
+    "javascript-obfuscator": "^4.1.1"
+  }
+}

@@ -57,7 +57,7 @@
       if (msg.event === 'did-navigate' || msg.event === 'did-navigate-in-page' ||
           msg.event === 'did-finish-load' || msg.event === 'dom-ready' ||
           msg.event === 'did-start-loading' || msg.event === 'page-title-updated') {
-        if (msg.url) currentUrl = msg.url;
+        if (msg.url && msg.url !== 'about:blank') currentUrl = msg.url;
       }
       if (msg.event === 'ipc-message') {
         emitFlow('ipc-message', { channel: msg.channel, args: msg.args || [] });
@@ -166,19 +166,60 @@
     })(document.getElementById.bind(document))
   });
 
+  let lastShellMode = '';
+  let lastChromeHeightSent = 0;
+
   function syncChromeMode() {
     const login = document.getElementById('login-screen');
-    const loading = document.getElementById('full-loading-overlay');
     const drawers = [
       document.getElementById('download-drawer'),
       document.getElementById('extension-drawer'),
-      document.getElementById('veo-auto-drawer')
+      document.getElementById('veo-auto-drawer'),
+      document.getElementById('android-settings-sheet'),
+      document.getElementById('app-confirm-modal')
     ];
-    const loginVisible = !!(login && !login.classList.contains('hidden'));
-    const drawerOpen = drawers.some((d) => d && !d.classList.contains('hidden'));
+    // Treat login as visible unless explicitly hidden (display:none or .hidden)
+    let loginVisible = false;
+    if (login) {
+      const hiddenClass = login.classList.contains('hidden');
+      const style = window.getComputedStyle(login);
+      loginVisible = !hiddenClass && style.display !== 'none' && style.visibility !== 'hidden';
+    }
+    document.documentElement.classList.toggle('login-active', !!loginVisible);
+    document.body && document.body.classList.toggle('login-active', !!loginVisible);
+    const drawerOpen = drawers.some((d) => {
+      if (!d || d.classList.contains('hidden')) return false;
+      try {
+        const style = window.getComputedStyle(d);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      } catch (e) {
+        return true;
+      }
+    });
     // Loading overlay must NOT hide Flow WebView2 (collapsing it aborts Google navigation)
     const mode = (loginVisible || drawerOpen) ? 'full' : 'chrome';
-    post({ type: 'cmd', cmd: 'shellMode', mode });
+    if (mode !== lastShellMode) {
+      lastShellMode = mode;
+      post({ type: 'cmd', cmd: 'shellMode', mode });
+    }
+    if (mode === 'chrome') reportChromeHeight();
+  }
+
+  function reportChromeHeight() {
+    try {
+      const toolbar = document.getElementById('top-toolbar');
+      const urlBar = document.getElementById('debug-url-bar');
+      const banner = document.getElementById('google-auth-banner');
+      let h = 0;
+      if (toolbar) h += toolbar.getBoundingClientRect().height;
+      if (urlBar && !urlBar.classList.contains('hidden')) h += urlBar.getBoundingClientRect().height;
+      if (banner && !banner.classList.contains('hidden')) h += banner.getBoundingClientRect().height;
+      if (h < 40) h = 72;
+      const height = Math.ceil(h);
+      if (height === lastChromeHeightSent) return;
+      lastChromeHeightSent = height;
+      post({ type: 'cmd', cmd: 'chromeHeight', height });
+    } catch (e) {}
   }
 
   document.addEventListener('DOMContentLoaded', () => {
@@ -195,6 +236,57 @@
     const obs = new MutationObserver(() => syncChromeMode());
     obs.observe(document.body, { attributes: true, subtree: true, attributeFilter: ['class', 'style'] });
     syncChromeMode();
-    setInterval(syncChromeMode, 500);
+    setInterval(syncChromeMode, 2500);
+    window.addEventListener('resize', reportChromeHeight);
+    setTimeout(reportChromeHeight, 100);
+    setTimeout(reportChromeHeight, 600);
+
+    // Keep focused login fields above the Android keyboard
+    document.addEventListener('focusin', (e) => {
+      const t = e.target;
+      if (!t || !t.closest || !t.closest('#login-screen')) return;
+      if (t.tagName !== 'INPUT' && t.tagName !== 'TEXTAREA' && t.tagName !== 'BUTTON') return;
+      const screen = document.getElementById('login-screen');
+      const box = document.querySelector('#login-screen .auth-box');
+      if (screen) screen.scrollTop = 0;
+      if (box) {
+        box.style.marginTop = '4px';
+        box.style.transform = 'translateY(0)';
+      }
+      setTimeout(() => {
+        try {
+          t.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch (err) {
+          try { t.scrollIntoView(true); } catch (e2) {}
+        }
+        // If keyboard still covers button, nudge the whole card up
+        try {
+          const btn = document.getElementById('btn-login-submit');
+          if (!btn || !window.visualViewport) return;
+          const br = btn.getBoundingClientRect();
+          const vv = window.visualViewport;
+          const overlap = br.bottom - (vv.offsetTop + vv.height) + 16;
+          if (overlap > 0 && box) {
+            box.style.transform = 'translateY(-' + Math.min(overlap + 24, 180) + 'px)';
+          }
+        } catch (e3) {}
+      }, 320);
+    }, true);
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', () => {
+        const login = document.getElementById('login-screen');
+        if (!login || login.classList.contains('hidden')) return;
+        const box = login.querySelector('.auth-box');
+        if (!box) return;
+        const vv = window.visualViewport;
+        const shrink = Math.max(0, window.innerHeight - vv.height);
+        if (shrink > 80) {
+          box.style.transform = 'translateY(-' + Math.min(Math.round(shrink * 0.35), 160) + 'px)';
+        } else {
+          box.style.transform = '';
+        }
+      });
+    }
   });
 })();
