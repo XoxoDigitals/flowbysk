@@ -8,7 +8,7 @@ namespace FlowBrowser;
 /// <summary>
 /// Ensures UI assets are available on disk. Prefers a www folder next to the
 /// binary (dev / folder portable). For single-file builds, extracts the
-/// embedded www.zip into LocalAppData (re-extracts when the zip hash changes).
+/// embedded www.zip into an opaque LocalAppData cache path.
 /// </summary>
 static class WwwExtractor
 {
@@ -47,12 +47,8 @@ static class WwwExtractor
         var hash = Convert.ToHexString(SHA256.HashData(zipBytes));
 
         var version = asm.GetName().Version?.ToString(3) ?? "0.0.0";
-        var root = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FlowBrowser",
-            ".data",
-            "ui",
-            version);
+        DataPaths.EnsureTree();
+        var root = DataPaths.UiRoot(version);
         var marker = Path.Combine(root, ".extracted");
         var shell = Path.Combine(root, "ui", "app-shell.html");
 
@@ -61,7 +57,7 @@ static class WwwExtractor
             var prev = File.ReadAllText(marker).Trim();
             if (prev.Equals(hash, StringComparison.OrdinalIgnoreCase))
             {
-                TryDeleteLegacyUiWww();
+                DataPaths.MigrateFromLegacy();
                 return root;
             }
         }
@@ -101,30 +97,13 @@ static class WwwExtractor
         File.WriteAllText(marker, hash);
         try
         {
-            var di = new DirectoryInfo(root);
-            di.Attributes |= FileAttributes.Hidden | FileAttributes.System;
-            var parent = Directory.GetParent(root)?.Parent; // .data
-            if (parent != null)
-                parent.Attributes |= FileAttributes.Hidden | FileAttributes.System;
+            DataPaths.TryHide(root);
+            DataPaths.TryHide(Path.GetDirectoryName(root)!); // u\
+            DataPaths.TryHide(DataPaths.Root);
         }
         catch { /* ignore */ }
 
-        TryDeleteLegacyUiWww();
+        DataPaths.MigrateFromLegacy();
         return root;
-    }
-
-    /// <summary>Remove old plaintext extract path used before .data/ui.</summary>
-    static void TryDeleteLegacyUiWww()
-    {
-        try
-        {
-            var legacy = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "FlowBrowser",
-                "ui-www");
-            if (Directory.Exists(legacy))
-                Directory.Delete(legacy, recursive: true);
-        }
-        catch { /* ignore in-use / ACL */ }
     }
 }

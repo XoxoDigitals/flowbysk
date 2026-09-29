@@ -25,19 +25,10 @@ public sealed class AppConfig
     [JsonPropertyName("zoomLevel")]
     public double ZoomLevel { get; set; }
 
-    static string LegacyConfigPath =>
-        Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "FlowBrowser",
-            "flow_client_config.json");
-
-    static string SecureDir =>
-        Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FlowBrowser",
-            ".secure");
-
-    static string SecureConfigPath => Path.Combine(SecureDir, "session.bin");
+    static string SecureDir => DataPaths.SecureDir;
+    static string SecureConfigPath => DataPaths.SecureSessionPath;
+    static string LegacyConfigPath => DataPaths.LegacyPlainConfig;
+    static string LegacySecurePath => DataPaths.LegacySecureSession;
 
     static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -50,19 +41,17 @@ public sealed class AppConfig
     {
         try
         {
-            // Prefer DPAPI-encrypted blob
+            DataPaths.MigrateFromLegacy();
+
+            // Prefer DPAPI-encrypted blob (new opaque path)
             if (File.Exists(SecureConfigPath))
+                return LoadFromProtected(SecureConfigPath);
+
+            // Migrate previous Local\FlowBrowser\.secure\session.bin
+            if (File.Exists(LegacySecurePath))
             {
-                var protectedBytes = File.ReadAllBytes(SecureConfigPath);
-                var plain = ProtectedData.Unprotect(protectedBytes, optionalEntropy: null, scope: DataProtectionScope.CurrentUser);
-                var json = Encoding.UTF8.GetString(plain);
-                var cfg = JsonSerializer.Deserialize<AppConfig>(json, JsonOpts) ?? new AppConfig();
-                cfg.SanitizeSecrets();
-                if (NeedsProductionUrl(cfg.ServerUrl))
-                {
-                    cfg.ServerUrl = DefaultServerUrl;
-                    cfg.Save();
-                }
+                var cfg = LoadFromProtected(LegacySecurePath);
+                cfg.Save();
                 return cfg;
             }
 
@@ -84,6 +73,21 @@ public sealed class AppConfig
             Console.Error.WriteLine("Error reading config: " + ex.Message);
         }
         return new AppConfig();
+    }
+
+    static AppConfig LoadFromProtected(string path)
+    {
+        var protectedBytes = File.ReadAllBytes(path);
+        var plain = ProtectedData.Unprotect(protectedBytes, optionalEntropy: null, scope: DataProtectionScope.CurrentUser);
+        var json = Encoding.UTF8.GetString(plain);
+        var cfg = JsonSerializer.Deserialize<AppConfig>(json, JsonOpts) ?? new AppConfig();
+        cfg.SanitizeSecrets();
+        if (NeedsProductionUrl(cfg.ServerUrl))
+        {
+            cfg.ServerUrl = DefaultServerUrl;
+            cfg.Save();
+        }
+        return cfg;
     }
 
     static bool NeedsProductionUrl(string? url)
@@ -133,20 +137,16 @@ public sealed class AppConfig
         try
         {
             SanitizeSecrets();
+            DataPaths.EnsureTree();
             Directory.CreateDirectory(SecureDir);
-            try
-            {
-                var di = new DirectoryInfo(SecureDir);
-                di.Attributes |= FileAttributes.Hidden | FileAttributes.System;
-            }
-            catch { /* ignore */ }
+            DataPaths.TryHide(SecureDir);
 
             var json = JsonSerializer.Serialize(this, JsonOpts);
             var plain = Encoding.UTF8.GetBytes(json);
             var protectedBytes = ProtectedData.Protect(plain, optionalEntropy: null, scope: DataProtectionScope.CurrentUser);
             File.WriteAllBytes(SecureConfigPath, protectedBytes);
+            DataPaths.TryHide(SecureConfigPath);
 
-            // Remove any leftover plaintext config
             try
             {
                 if (File.Exists(LegacyConfigPath))

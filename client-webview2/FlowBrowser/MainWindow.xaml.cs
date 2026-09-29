@@ -97,24 +97,15 @@ public partial class MainWindow : Window
         // Strip UTF-8 BOM — WebView2 document-created scripts can fail oddly with BOM
         _flowInject = File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
 
-        // Opaque + hidden profile roots (not the obvious FlowBrowser\flow-profile path)
-        var dataRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FlowBrowser",
-            ".data");
-        Directory.CreateDirectory(dataRoot);
-        TryHidePath(dataRoot);
-        _shellUserData = Path.Combine(dataRoot, "s");
-        _flowUserData = Path.Combine(dataRoot, "f");
+        // Opaque profiles under Microsoft\Windows\Caches\{guid}\d
+        DataPaths.EnsureTree();
+        DataPaths.MigrateFromLegacy();
+        _shellUserData = DataPaths.ShellProfile;
+        _flowUserData = DataPaths.FlowProfile;
         Directory.CreateDirectory(_shellUserData);
         Directory.CreateDirectory(_flowUserData);
-        TryHidePath(_shellUserData);
-        TryHidePath(_flowUserData);
-
-        // Migrate old obvious profile folders once (optional wipe not required — just stop using them)
-        TryHidePath(Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FlowBrowser"));
+        DataPaths.TryHide(_shellUserData);
+        DataPaths.TryHide(_flowUserData);
 
 #if DEBUG
         var flowOpts = new CoreWebView2EnvironmentOptions(
