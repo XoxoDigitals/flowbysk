@@ -4,6 +4,9 @@ import { useEffect, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { flowFetch } from '@/lib/flowApi';
 import { formatLogDetails } from '@/lib/adminLogFormat';
+import { AdminTablePager } from '@/components/AdminTablePager';
+
+const PAGE_SIZE = 20;
 
 type LogRow = {
   id?: string;
@@ -17,7 +20,14 @@ type LogRow = {
 
 function actionBadgeClass(action?: string) {
   if (action === 'client_login') return 'bg-emerald-500/15 text-emerald-400';
-  if (action === 'suspicious_login' || action === 'ban_user') return 'bg-rose-500/15 text-rose-400';
+  if (
+    action === 'suspicious_login' ||
+    action === 'ban_user' ||
+    action === 'device_ban_match' ||
+    action === 'cascade_ban_device'
+  ) {
+    return 'bg-rose-500/15 text-rose-400';
+  }
   if (action === 'login_failed') return 'bg-amber-500/15 text-amber-400';
   if (action === 'switch_server') return 'bg-sky-500/15 text-sky-400';
   return 'bg-[var(--bg2)] text-[var(--ink2)]';
@@ -25,6 +35,7 @@ function actionBadgeClass(action?: string) {
 
 export default function AdminLogsPage() {
   const [logs, setLogs] = useState<LogRow[]>([]);
+  const [page, setPage] = useState(1);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
 
@@ -36,6 +47,7 @@ export default function AdminLogsPage() {
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Failed to load logs');
       setLogs(data.logs || []);
+      setPage(1);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load logs');
     } finally {
@@ -46,6 +58,8 @@ export default function AdminLogsPage() {
   useEffect(() => {
     load();
   }, []);
+
+  const pageRows = logs.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   return (
     <div className="flex flex-col gap-5">
@@ -76,14 +90,18 @@ export default function AdminLogsPage() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={4} className="px-4 py-8 text-center text-[var(--ink3)]">Loading…</td>
+                <td colSpan={4} className="px-4 py-8 text-center text-[var(--ink3)]">
+                  Loading…
+                </td>
               </tr>
-            ) : logs.length === 0 ? (
+            ) : pageRows.length === 0 ? (
               <tr>
-                <td colSpan={4} className="px-4 py-8 text-center text-[var(--ink3)]">No logs</td>
+                <td colSpan={4} className="px-4 py-8 text-center text-[var(--ink3)]">
+                  No logs
+                </td>
               </tr>
             ) : (
-              logs.map((log, i) => (
+              pageRows.map((log, i) => (
                 <tr key={log.id || i} className="border-t border-[var(--line)] align-top">
                   <td className="px-4 py-3 whitespace-nowrap text-[12px] text-[var(--ink3)]">
                     {log.createdAt || log.timestamp
@@ -110,6 +128,12 @@ export default function AdminLogsPage() {
           </tbody>
         </table>
       </div>
+      <AdminTablePager
+        page={page}
+        pageSize={PAGE_SIZE}
+        total={logs.length}
+        onPageChange={setPage}
+      />
     </div>
   );
 }

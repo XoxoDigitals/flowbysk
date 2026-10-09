@@ -11,7 +11,7 @@ const db = require('../db');
 const { openFromStorage } = require('../secretsCrypto');
 const credChannel = require('../credChannel');
 const { allowExtensionStep } = credChannel;
-const { lookupCountry, clientIpFromReq } = require('../geoIp');
+const { lookupCountry, clientIpFromReq, requestGeo } = require('../geoIp');
 const { requireAppDeviceAttestation } = require('../deviceSecurity');
 
 async function jwtSecret() {
@@ -456,9 +456,11 @@ router.post('/switch-server', requireUserAuth, async (req, res) => {
     return res.status(404).json({ success: false, error: 'No active server nodes available.' });
   }
   await db.updateUser(user.id, { activeServerId: targetServer.id });
+  const geo = await requestGeo(req);
   await db.addLog(user.id, user.username, 'switch_server', {
     serverId: targetServer.id,
     serverName: targetServer.name,
+    ...geo,
   });
   res.json({ success: true, server: publicServerPayload(targetServer) });
 });
@@ -557,11 +559,13 @@ router.post('/extension-start', requireUserAuth, async (req, res) => {
     });
   }
   const attempt = credChannel.createAttempt(user.id, activeServer.id, channelId, req);
+  const geoStart = await requestGeo(req);
   await db.addLog(user.id, user.username, 'extension_login_start', {
     serverId: activeServer.id,
     serverName: activeServer.name,
     attemptId: attempt.attemptId,
     channelId,
+    ...geoStart,
   });
   res.json({
     attemptId: attempt.attemptId,
@@ -635,13 +639,14 @@ router.post('/extension-step', requireUserAuth, async (req, res) => {
       error: `No ${stageKey} configured for the active server account.`,
     });
   }
+  const geoStep = await requestGeo(req);
   await db.addLog(user.id, user.username, 'extension_step', {
     attemptId,
     stage: stageKey,
     serverId: activeServer.id,
     channelId,
     sealed: true,
-    ip: req.ip || null,
+    ...geoStep,
   });
   const sealed = credChannel.sealValue(channel.aesKey, value);
   const payload = {
@@ -656,9 +661,11 @@ router.post('/extension-step', requireUserAuth, async (req, res) => {
 
 router.post('/extension-finish', requireUserAuth, async (req, res) => {
   const { attemptId, outcome } = req.body;
+  const geoFinish = await requestGeo(req);
   await db.addLog(req.user.id, req.user.username, 'extension_login_finish', {
     attemptId: attemptId || 'unknown',
     outcome: outcome || 'unknown',
+    ...geoFinish,
   });
   res.json({ success: true });
 });

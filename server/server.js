@@ -12,8 +12,8 @@ const PORT = process.env.PORT || 8000;
 
 downloads.ensureDirs();
 
-// nginx terminates TLS and forwards — needed so req.ip / X-Forwarded-For are real client IPs
-app.set('trust proxy', 1);
+// nginx / Cloudflare terminate TLS — trust proxy chain so req.ip is the real client
+app.set('trust proxy', true);
 
 app.use(cors());
 app.use(express.json());

@@ -7,6 +7,9 @@ import { ArrowLeft, Trash2 } from 'lucide-react';
 import { flowFetch } from '@/lib/flowApi';
 import { HARDCODED_STD_CREDITS } from '@/lib/plans';
 import { formatLogDetails } from '@/lib/adminLogFormat';
+import { AdminTablePager } from '@/components/AdminTablePager';
+
+const ACTIVITY_PAGE_SIZE = 10;
 
 type FlowUser = {
   id: string;
@@ -79,6 +82,7 @@ export default function AdminUserDetailPage() {
   const [hardStd, setHardStd] = useState<Record<string, number>>(HARDCODED_STD_CREDITS);
   const [creditHistory, setCreditHistory] = useState<CreditRow[]>([]);
   const [activity, setActivity] = useState<ActivityRow[]>([]);
+  const [activityPage, setActivityPage] = useState(1);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
@@ -104,6 +108,7 @@ export default function AdminUserDetailPage() {
     setUser(u);
     setCreditHistory(data.creditHistory || []);
     setActivity(data.activity || []);
+    setActivityPage(1);
     if (data.hardcodedStd) setHardStd(data.hardcodedStd);
     setForm({
       password: '',
@@ -441,28 +446,39 @@ export default function AdminUserDetailPage() {
                       </td>
                     </tr>
                   ) : (
-                    activity.map((a) => (
-                      <tr key={a.id} className="border-t border-[var(--line)] align-top">
-                        <td className="whitespace-nowrap px-4 py-3 text-[12px] text-[var(--ink3)]">
-                          {new Date(a.createdAt).toLocaleString()}
-                        </td>
-                        <td className="px-4 py-3 font-mono text-[12px]">
-                          {a.action}
-                          {a.username ? (
-                            <span className="mt-0.5 block text-[10px] text-[var(--ink3)]">
-                              {a.username}
-                            </span>
-                          ) : null}
-                        </td>
-                        <td className="break-all px-4 py-3 font-mono text-[11px] text-[var(--ink2)]">
-                          {formatLogDetails(a.details || null) || '—'}
-                        </td>
-                      </tr>
-                    ))
+                    activity
+                      .slice(
+                        (activityPage - 1) * ACTIVITY_PAGE_SIZE,
+                        activityPage * ACTIVITY_PAGE_SIZE
+                      )
+                      .map((a) => (
+                        <tr key={a.id} className="border-t border-[var(--line)] align-top">
+                          <td className="whitespace-nowrap px-4 py-3 text-[12px] text-[var(--ink3)]">
+                            {new Date(a.createdAt).toLocaleString()}
+                          </td>
+                          <td className="px-4 py-3 font-mono text-[12px]">
+                            {a.action}
+                            {a.username ? (
+                              <span className="mt-0.5 block text-[10px] text-[var(--ink3)]">
+                                {a.username}
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className="break-all px-4 py-3 font-mono text-[11px] text-[var(--ink2)]">
+                            {formatLogDetails(a.details || null) || '—'}
+                          </td>
+                        </tr>
+                      ))
                   )}
                 </tbody>
               </table>
             </div>
+            <AdminTablePager
+              page={activityPage}
+              pageSize={ACTIVITY_PAGE_SIZE}
+              total={activity.length}
+              onPageChange={setActivityPage}
+            />
           </section>
         </>
       )}
