@@ -327,6 +327,13 @@ router.get('/metrics', requireAdminAuth, async (req, res) => {
     ];
   }
 
+  let period = null;
+  try {
+    period = await db.adminPeriodStats();
+  } catch (err) {
+    period = { error: err.message || 'period_stats_failed' };
+  }
+
   res.json({
     success: true,
     metrics: {
@@ -339,6 +346,7 @@ router.get('/metrics', requireAdminAuth, async (req, res) => {
       resellers: resellers.length,
       systemUsers: (await db.getSystemUsers()).length + 1,
       adminUserCounts,
+      period,
       servers: servers.map((s) => ({
         id: s.id,
         name: s.name,
@@ -580,20 +588,52 @@ router.put('/users/:id/ban', requireAdminAuth, async (req, res) => {
   const owned = await ownedUserOr404(req, res);
   if (!owned) return;
   const banned = !!req.body?.banned;
+  const reason = req.body?.reason || '';
+  const cascade = req.body?.cascadeByDevice !== false; // default on for bans
   const updated = await db.updateUser(req.params.id, {
     banned,
-    banReason: req.body?.reason || '',
+    banReason: reason,
   });
   if (!updated) return res.status(404).json({ success: false, error: 'User not found' });
   // Ban must revoke session + wipe Google so the EXE logs out on next poll / credit call
   if (banned) {
     await db.forceLogoutAndWipe(owned.user.id);
   }
+
+  const cascaded = [];
+  if (banned && cascade) {
+    const deviceIds = [
+      ...(Array.isArray(owned.user.deviceIds) ? owned.user.deviceIds : []),
+      owned.user.lastDeviceId,
+    ].filter(Boolean);
+    const seen = new Set([owned.user.id]);
+    for (const deviceId of [...new Set(deviceIds)]) {
+      const peers = await db.findUsersByDeviceId(deviceId);
+      for (const peer of peers) {
+        if (seen.has(peer.id)) continue;
+        seen.add(peer.id);
+        if (peer.banned) continue;
+        const visible = owned.actor.isSuperAdmin
+          ? true
+          : (await usersVisibleTo(owned.actor)).some((u) => u.id === peer.id);
+        if (!visible) continue;
+        await db.updateUser(peer.id, {
+          banned: true,
+          banReason: reason || `Cascade ban via Device ID ${deviceId}`,
+        });
+        await db.forceLogoutAndWipe(peer.id);
+        cascaded.push({ id: peer.id, username: peer.username, deviceId });
+      }
+    }
+  }
+
   await db.addLog(owned.actor.id, req.admin.username, banned ? 'ban_user' : 'unban_user', {
     targetUserId: updated.id,
     targetUsername: updated.username,
+    cascaded: cascaded.map((c) => c.username),
+    cascadeCount: cascaded.length,
   });
-  res.json({ success: true, user: await publicEndUser(updated) });
+  res.json({ success: true, user: await publicEndUser(updated), cascaded });
 });
 
 router.post('/users/bulk-delete', requireAdminAuth, async (req, res) => {

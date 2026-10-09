@@ -513,10 +513,26 @@ class FlowBrowserApp {
       await resolveClientApiBase(serverUrl);
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
-      const loginBody = { username, password, clientPublicKey };
+      let deviceId = null;
+      let flowClient = 'android/6.0.2';
+      try {
+        if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
+          const dev = await window.electronAPI.getDeviceId();
+          if (dev && dev.deviceId) deviceId = String(dev.deviceId);
+          if (dev && dev.client) flowClient = String(dev.client);
+        }
+      } catch (err) {
+        console.warn('[AppShell] getDeviceId failed', err);
+      }
+      if (!deviceId) throw new Error('Device ID unavailable — update Flow Browser.');
+      const loginBody = { username, password, clientPublicKey, deviceId };
+      const loginHeaders = {
+        'Content-Type': 'application/json',
+        'X-Flow-Client': flowClient
+      };
       const res = await fetch(`${serverUrl}${CLIENT_API}/login`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: loginHeaders,
         body: JSON.stringify(loginBody)
       });
       let data = await res.json();
@@ -526,7 +542,7 @@ class FlowBrowserApp {
         if (switched) {
           const retry = await fetch(`${serverUrl}${CLIENT_API}/login`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: loginHeaders,
             body: JSON.stringify(loginBody)
           });
           data = await retry.json();

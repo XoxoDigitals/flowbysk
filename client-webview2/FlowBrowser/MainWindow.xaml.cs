@@ -1702,9 +1702,28 @@ public partial class MainWindow : Window
             case "credClear":
                 _credChannel.Clear();
                 return new { success = true };
+            case "getDeviceId":
+                return new { deviceId = GetStableDeviceId(), client = "windows-exe/6.0.2" };
             default:
                 throw new InvalidOperationException("Unknown command: " + cmd);
         }
+    }
+
+    static string GetStableDeviceId()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Microsoft\Cryptography");
+            var guid = key?.GetValue("MachineGuid") as string;
+            if (!string.IsNullOrWhiteSpace(guid) && guid.Length >= 16)
+                return "win-" + guid.Trim();
+        }
+        catch { /* fall through */ }
+        var fallback = $"{Environment.MachineName}|{Environment.UserName}|{Environment.OSVersion.VersionString}";
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        var hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(fallback));
+        return "win-" + Convert.ToHexString(hash).ToLowerInvariant()[..32];
     }
 
     async Task ClearFlowSessionAsync()

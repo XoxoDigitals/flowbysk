@@ -122,7 +122,8 @@
       invoke('credEstablish', { channelId, serverPublicKey }),
     credMac: (attemptId, stage) => invoke('credMac', { attemptId, stage }),
     credDecrypt: (ciphertext, nonce) => invoke('credDecrypt', { ciphertext, nonce }),
-    credClear: () => invoke('credClear')
+    credClear: () => invoke('credClear'),
+    getDeviceId: () => invoke('getDeviceId')
   };
 
   const flowProxy = {

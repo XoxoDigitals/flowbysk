@@ -186,7 +186,39 @@ class AdminApp {
       document.getElementById('stat-active-users').textContent = data.metrics.activeUsers;
       document.getElementById('stat-expired-users').textContent = data.metrics.expiredUsers;
       document.getElementById('stat-total-credits').textContent = data.metrics.totalCredits.toLocaleString();
+      const period = data.metrics.period;
+      if (period && !period.error) {
+        const fmt = (iso) => {
+          try {
+            return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }) + ' UTC';
+          } catch {
+            return iso;
+          }
+        };
+        document.getElementById('period-window-label').textContent =
+          `${fmt(period.periodStart)} → ${fmt(period.periodEnd)}`;
+        document.getElementById('stat-period-new').textContent = period.newUsers ?? 0;
+        document.getElementById('stat-period-renewals').textContent = period.renewals ?? 0;
+        document.getElementById('stat-period-total').textContent = period.total ?? 0;
+      }
     }
+  }
+
+  formatLogDetails(details) {
+    if (!details || typeof details !== 'object') return details == null ? '' : String(details);
+    const parts = [];
+    if (details.ip) parts.push(`IP ${details.ip}`);
+    if (details.country) parts.push(details.country);
+    if (details.deviceId) parts.push(`Device ${details.deviceId}`);
+    if (details.client) parts.push(details.client);
+    if (details.code) parts.push(details.code);
+    if (details.reason) parts.push(details.reason);
+    if (details.cascadeCount) parts.push(`cascade:${details.cascadeCount}`);
+    if (Array.isArray(details.cascaded) && details.cascaded.length) {
+      parts.push(`also banned: ${details.cascaded.join(', ')}`);
+    }
+    if (parts.length) return parts.join(' · ');
+    try { return JSON.stringify(details); } catch { return ''; }
   }
 
   async loadUsers() {
@@ -396,15 +428,19 @@ class AdminApp {
       const time = new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + ' ' + new Date(log.timestamp).toLocaleDateString();
       let badge = '<span class="badge badge-neutral">' + log.action + '</span>';
       if (log.action === 'client_login') badge = '<span class="badge badge-success">Client Login</span>';
+      if (log.action === 'suspicious_login') badge = '<span class="badge badge-danger">Suspicious</span>';
+      if (log.action === 'login_failed') badge = '<span class="badge badge-neutral">Login Failed</span>';
+      if (log.action === 'ban_user') badge = '<span class="badge badge-danger">Ban</span>';
       if (log.action === 'switch_server') badge = '<span class="badge badge-info">Switch Server</span>';
       if (log.action === 'use_credit') badge = '<span class="badge badge-neutral">Credit Usage</span>';
+      const detailText = this.formatLogDetails(log.details);
 
       return `
         <tr>
           <td style="color:#64748b;font-family:var(--font-mono);font-size:0.75rem;">${time}</td>
-          <td><strong>${log.username}</strong></td>
+          <td><strong>${log.username || '—'}</strong></td>
           <td>${badge}</td>
-          <td style="font-family:var(--font-mono);font-size:0.75rem;color:#94a3b8;">${JSON.stringify(log.details)}</td>
+          <td style="font-family:var(--font-mono);font-size:0.75rem;color:#94a3b8;">${detailText}</td>
         </tr>
       `;
     }).join('');
@@ -415,9 +451,9 @@ class AdminApp {
       return `
         <tr>
           <td style="color:#64748b;font-size:0.8rem;">${time}</td>
-          <td><strong>${log.username}</strong></td>
+          <td><strong>${log.username || '—'}</strong></td>
           <td><span class="badge badge-neutral">${log.action}</span></td>
-          <td style="font-size:0.8rem;color:#94a3b8;">${JSON.stringify(log.details)}</td>
+          <td style="font-size:0.8rem;color:#94a3b8;">${this.formatLogDetails(log.details)}</td>
         </tr>
       `;
     }).join('');

@@ -146,6 +146,33 @@
           </div>
         </div>
 
+        <div class="content-card" id="period-stats-card" style="margin-bottom:1.25rem;">
+          <div class="card-header">
+            <h3>Billing Period (20th → 20th UTC)</h3>
+            <span class="badge badge-info" id="period-window-label">—</span>
+          </div>
+          <div class="stats-grid" style="margin:0;">
+            <div class="stat-card">
+              <div class="stat-info">
+                <span class="stat-label">New Users</span>
+                <span class="stat-val" id="stat-period-new">-</span>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-info">
+                <span class="stat-label">Renewals</span>
+                <span class="stat-val" id="stat-period-renewals">-</span>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-info">
+                <span class="stat-label">Period Total</span>
+                <span class="stat-val" id="stat-period-total">-</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="content-card">
           <div class="card-header">
             <h3>Recent User Activity</h3>
@@ -292,9 +319,9 @@
               <thead>
                 <tr>
                   <th>Timestamp</th>
-                  <th>User ID / Name</th>
+                  <th>User</th>
                   <th>Action</th>
-                  <th>IP / Payload Details</th>
+                  <th>IP / Country / Device / Client</th>
                 </tr>
               </thead>
               <tbody id="logs-table-body">

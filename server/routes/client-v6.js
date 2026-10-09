@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Flow Browser client API v6 â€” traditional Google credential login (same as former v4).
  * Mounted at /api/v6/client. No cookie-pack auth.
  */
@@ -11,6 +11,8 @@ const db = require('../db');
 const { openFromStorage } = require('../secretsCrypto');
 const credChannel = require('../credChannel');
 const { allowExtensionStep } = credChannel;
+const { lookupCountry, normalizeIp } = require('../geoIp');
+const { requireAppDeviceAttestation } = require('../deviceSecurity');
 
 async function jwtSecret() {
   const admin = await db.getAdmin();
@@ -141,8 +143,38 @@ async function loginClientUser(username, password, ip, req) {
     return { status: 400, body: { success: false, error: 'Please enter both username and password' } };
   }
 
+  const clientIp = normalizeIp(ip || req?.ip || '');
+  const country = await lookupCountry(clientIp);
+  const attestation = requireAppDeviceAttestation(req || { headers: {}, body: {} });
+
+  // App logins without Device ID / X-Flow-Client are blocked (web portal does not use this route for apps).
+  if (!attestation.ok) {
+    await db.addLog(null, username || 'unknown', 'suspicious_login', {
+      ip: clientIp,
+      country,
+      client: attestation.client || req?.headers?.['x-flow-client'] || null,
+      deviceId: attestation.deviceId || null,
+      code: attestation.code,
+      reason: attestation.error,
+    });
+    return {
+      status: 403,
+      body: {
+        success: false,
+        code: attestation.code || 'SUSPICIOUS_CLIENT',
+        error: attestation.error || 'Official app client required.',
+      },
+    };
+  }
+
   const user = await db.getUserByUsername(username);
   if (!user || !bcrypt.compareSync(password, user.passwordHash)) {
+    await db.addLog(user?.id || null, username || 'unknown', 'login_failed', {
+      ip: clientIp,
+      country,
+      client: attestation.client || null,
+      deviceId: attestation.deviceId || null,
+    });
     return { status: 401, body: { success: false, error: 'Invalid username or password' } };
   }
 
@@ -191,12 +223,20 @@ async function loginClientUser(username, password, ip, req) {
     }
   }
 
-  await db.updateUser(user.id, { lastLoginAt: new Date().toISOString() });
+  await db.recordDeviceTouch(user.id, {
+    deviceId: attestation.deviceId || null,
+    ip: clientIp,
+    country,
+    client: attestation.client || null,
+  });
   const sessionVersion = await db.bumpSessionVersion(user.id);
   await db.clearPendingGoogleWipe(user.id);
   let freshUser = await db.getUserById(user.id);
   await db.addLog(user.id, user.username, 'client_login', {
-    ip: ip || '',
+    ip: clientIp,
+    country,
+    deviceId: attestation.deviceId || null,
+    client: attestation.client || null,
     sessionVersion,
     channelId: channel?.channelId || null,
   });

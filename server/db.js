@@ -205,6 +205,11 @@ async function mapCustomer(user, metaMap, ownerLookup) {
     notes: meta.notes || '',
     createdAt: user.createdAt ? new Date(user.createdAt).toISOString() : null,
     lastLoginAt: user.lastSeenAt ? new Date(user.lastSeenAt).toISOString() : null,
+    lastIp: user.lastIp || meta.lastIp || null,
+    lastCountry: meta.lastCountry || null,
+    lastDeviceId: meta.lastDeviceId || null,
+    deviceIds: Array.isArray(meta.deviceIds) ? meta.deviceIds : [],
+    lastClient: meta.lastClient || null,
     activeServerId: meta.activeServerId || null,
     maxParallel,
     sessionVersion: Number(meta.sessionVersion) || 0,
@@ -702,6 +707,9 @@ class Database {
     if (updates.lastLoginAt !== undefined) {
       data.lastSeenAt = updates.lastLoginAt ? new Date(updates.lastLoginAt) : null;
     }
+    if (updates.lastIp !== undefined) {
+      data.lastIp = updates.lastIp ? String(updates.lastIp) : null;
+    }
     if (updates.ownerId !== undefined || updates.ownedByAdminId !== undefined) {
       data.ownedByAdminId = updates.ownedByAdminId || updates.ownerId || null;
     }
@@ -736,6 +744,11 @@ class Database {
     if (updates.maxParallel !== undefined) metaPatch.maxParallel = clampParallel(updates.maxParallel);
     if (updates.displayPrice !== undefined) metaPatch.displayPrice = Number(updates.displayPrice) || 0;
     if (updates.banReason !== undefined) metaPatch.banReason = updates.banReason || '';
+    if (updates.lastCountry !== undefined) metaPatch.lastCountry = updates.lastCountry || '';
+    if (updates.lastDeviceId !== undefined) metaPatch.lastDeviceId = updates.lastDeviceId || '';
+    if (updates.lastClient !== undefined) metaPatch.lastClient = updates.lastClient || '';
+    if (updates.lastIp !== undefined) metaPatch.lastIp = updates.lastIp || '';
+    if (updates.deviceIds !== undefined) metaPatch.deviceIds = Array.isArray(updates.deviceIds) ? updates.deviceIds : [];
     if (Object.keys(metaPatch).length) await patchUserMeta(id, metaPatch);
 
     if (
@@ -1592,6 +1605,111 @@ class Database {
       out[a.id] = await this.countOwnedUsersForAdmin(a.id);
     }
     return out;
+  }
+
+  async findUsersByDeviceId(deviceId) {
+    await this.ready();
+    const needle = String(deviceId || '').trim();
+    if (!needle) return [];
+    try {
+      const users = await prisma.user.findMany({
+        where: {
+          role: 'END_USER',
+          OR: [
+            { meta: { path: ['lastDeviceId'], equals: needle } },
+            { meta: { path: ['deviceIds'], array_contains: needle } },
+          ],
+        },
+      });
+      return users.map(toEndUser);
+    } catch (err) {
+      console.warn('findUsersByDeviceId JSON filter failed, scanning:', err.message);
+      const all = await this.getUsers();
+      return all.filter((u) => {
+        if (u.lastDeviceId === needle) return true;
+        return Array.isArray(u.deviceIds) && u.deviceIds.includes(needle);
+      });
+    }
+  }
+
+  async adminPeriodStats() {
+    await this.ready();
+    const { periodWindow20th } = require('./deviceSecurity');
+    const { from, to } = periodWindow20th(new Date());
+    const createGrants = await prisma.creditLedger.findMany({
+      where: {
+        OR: [
+          { reason: 'admin_create_user' },
+          { reason: 'reseller_create_user' },
+          { reason: 'create_user' },
+        ],
+        createdAt: { gte: from, lt: to },
+      },
+      select: { userId: true },
+    });
+    const createUserIds = new Set(createGrants.map((g) => g.userId).filter(Boolean));
+    // Also count END_USERs created in-window (covers rows without ledger create reason).
+    const createdUsers = await prisma.user.findMany({
+      where: {
+        role: 'END_USER',
+        createdAt: { gte: from, lt: to },
+      },
+      select: { id: true },
+    });
+    for (const u of createdUsers) createUserIds.add(u.id);
+    const createdInPeriod = createUserIds.size;
+
+    // Renewals: admin credit/plan adjustments in-window for users not created this period.
+    const renewRows = await prisma.creditLedger.findMany({
+      where: {
+        createdAt: { gte: from, lt: to },
+        type: 'ADMIN_ADJUSTMENT',
+        AND: [
+          {
+            NOT: {
+              OR: [
+                { reason: 'admin_create_user' },
+                { reason: 'reseller_create_user' },
+                { reason: 'create_user' },
+              ],
+            },
+          },
+          ...(createUserIds.size
+            ? [{ NOT: { userId: { in: [...createUserIds] } } }]
+            : []),
+        ],
+      },
+      select: { userId: true },
+    });
+    const renewalUserIds = new Set(renewRows.map((r) => r.userId).filter(Boolean));
+    const renewals = renewalUserIds.size;
+    return {
+      periodStart: from.toISOString(),
+      periodEnd: to.toISOString(),
+      newUsers: createdInPeriod,
+      renewals,
+      total: createdInPeriod + renewals,
+    };
+  }
+
+  async recordDeviceTouch(userId, { deviceId, ip, country, client } = {}) {
+    await this.ready();
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return null;
+    const meta = { ...(user.meta && typeof user.meta === 'object' ? user.meta : {}) };
+    const deviceIds = Array.isArray(meta.deviceIds) ? [...meta.deviceIds] : [];
+    if (deviceId && !deviceIds.includes(deviceId)) deviceIds.push(deviceId);
+    const patch = {
+      lastLoginAt: new Date().toISOString(),
+    };
+    if (ip) patch.lastIp = ip;
+    if (country) patch.lastCountry = country;
+    if (deviceId) {
+      patch.lastDeviceId = deviceId;
+      patch.deviceIds = deviceIds.slice(-20);
+    }
+    if (client) patch.lastClient = client;
+    return this.updateUser(userId, patch);
   }
 }
 

@@ -473,6 +473,11 @@ class MainActivity : AppCompatActivity() {
                 credChannel.clear()
                 JSONObject().put("success", true)
             }
+            "getDeviceId" -> {
+                JSONObject()
+                    .put("deviceId", getStableDeviceId())
+                    .put("client", "android/6.0.2")
+            }
             "clearPartitionSession" -> {
                 clearFlowSession()
                 JSONObject().put("success", true)
@@ -856,6 +861,25 @@ class MainActivity : AppCompatActivity() {
             .replace("\n", "\\n")
             .replace("\u2028", "\\u2028")
             .replace("\u2029", "\\u2029") + "'"
+    }
+
+    private fun getStableDeviceId(): String {
+        val androidId = try {
+            android.provider.Settings.Secure.getString(
+                contentResolver,
+                android.provider.Settings.Secure.ANDROID_ID
+            )
+        } catch (_: Exception) {
+            null
+        }
+        val raw = when {
+            !androidId.isNullOrBlank() && androidId != "9774d56d682e549c" -> androidId
+            else -> "${android.os.Build.MODEL}|${android.os.Build.FINGERPRINT}|${packageName}"
+        }
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(raw.toByteArray(Charsets.UTF_8))
+        val hex = digest.joinToString("") { b -> "%02x".format(b) }
+        return "and-" + hex.take(32)
     }
 }
 
