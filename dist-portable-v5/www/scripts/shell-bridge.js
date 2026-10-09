@@ -16,6 +16,8 @@
 
   function invoke(cmd, payload) {
     const id = reqId++;
+    // Cookie inject clears + writes many cookies; allow longer than default UI cmds
+    const timeoutMs = cmd === 'injectCookies' || cmd === 'clearPartitionSession' ? 120000 : 30000;
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       post({ type: 'invoke', id, cmd, payload: payload || {} });
@@ -24,7 +26,7 @@
           pending.delete(id);
           reject(new Error('Host invoke timeout: ' + cmd));
         }
-      }, 30000);
+      }, timeoutMs);
     });
   }
 

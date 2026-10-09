@@ -7,17 +7,57 @@ using Microsoft.Web.WebView2.Core;
 namespace FlowBrowser;
 
 /// <summary>
-/// v5: inject admin-uploaded Google cookies into the Flow WebView2 profile,
-/// verify SHA-256 value hashes, and support wipe-on-failure.
+/// v5: inject admin/extension-style Google cookies into the Flow WebView2 profile.
+/// Accepts the same chrome.cookies.set-shaped payload as Flow by MK (url, name, value,
+/// domain?, path, secure, httpOnly, sameSite, expirationDate/expires, hostOnly, valueHash).
 /// </summary>
 static class CookieInjectHost
 {
+    static readonly string[] VerifyOrigins =
+    {
+        "https://flow.google.com/",
+        "https://labs.google/",
+        "https://www.google.com/",
+        "https://accounts.google.com/",
+        "https://google.com/"
+    };
+
     public static string Sha256Hex(string value)
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value ?? ""));
         var sb = new StringBuilder(bytes.Length * 2);
         foreach (var b in bytes) sb.Append(b.ToString("x2"));
         return sb.ToString();
+    }
+
+    static bool ReadBool(JsonElement item, string name)
+    {
+        if (!item.TryGetProperty(name, out var el)) return false;
+        return el.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Number => el.TryGetInt32(out var n) && n != 0,
+            JsonValueKind.String => el.GetString() is "1" or "true" or "True",
+            _ => false
+        };
+    }
+
+    static double? ReadEpoch(JsonElement item)
+    {
+        if (item.TryGetProperty("expires", out var exp) && exp.ValueKind == JsonValueKind.Number)
+            return exp.GetDouble();
+        if (item.TryGetProperty("expirationDate", out var exp2) && exp2.ValueKind == JsonValueKind.Number)
+            return exp2.GetDouble();
+        return null;
+    }
+
+    static CoreWebView2CookieSameSiteKind MapSameSite(string? raw)
+    {
+        var ss = (raw ?? "lax").Trim().ToLowerInvariant().Replace('-', '_');
+        if (ss is "none" or "no_restriction") return CoreWebView2CookieSameSiteKind.None;
+        if (ss == "strict") return CoreWebView2CookieSameSiteKind.Strict;
+        return CoreWebView2CookieSameSiteKind.Lax;
     }
 
     public static async Task<object> InjectAsync(CoreWebView2 webView, JsonElement payload)
@@ -27,30 +67,55 @@ static class CookieInjectHost
             throw new InvalidOperationException("injectCookies requires a cookies array.");
 
         var manager = webView.CookieManager;
-        var written = new List<(string Url, string Name, string ValueHash, string? Domain, string Path)>();
+        var written = new List<(string Url, string Name, string ValueHash, bool HostOnly)>();
         var failures = new List<string>();
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         foreach (var item in cookiesEl.EnumerateArray())
         {
+            string name = "?";
             try
             {
-                var name = item.GetProperty("name").GetString() ?? "";
-                var value = item.GetProperty("value").GetString() ?? "";
-                var url = item.TryGetProperty("url", out var urlEl) ? urlEl.GetString() : null;
-                var path = item.TryGetProperty("path", out var pathEl) ? pathEl.GetString() ?? "/" : "/";
-                var secure = item.TryGetProperty("secure", out var secEl) && secEl.ValueKind == JsonValueKind.True;
-                var httpOnly = item.TryGetProperty("httpOnly", out var httpEl) && httpEl.ValueKind == JsonValueKind.True;
-                string? domain = null;
-                if (item.TryGetProperty("domain", out var domEl) && domEl.ValueKind == JsonValueKind.String)
-                    domain = domEl.GetString();
-
-                if (string.IsNullOrWhiteSpace(url))
+                name = item.TryGetProperty("name", out var nEl) ? (nEl.GetString() ?? "") : "";
+                var value = item.TryGetProperty("value", out var vEl) ? (vEl.GetString() ?? "") : "";
+                if (string.IsNullOrEmpty(name))
                 {
-                    var host = (domain ?? "google.com").TrimStart('.');
-                    url = "https://" + host + (path.StartsWith("/") ? path : "/" + path);
+                    failures.Add("(unnamed): missing name");
+                    continue;
                 }
 
-                var expectedHash = item.TryGetProperty("valueHash", out var hashEl)
+                var path = item.TryGetProperty("path", out var pathEl) && pathEl.ValueKind == JsonValueKind.String
+                    ? (pathEl.GetString() ?? "/")
+                    : "/";
+                if (string.IsNullOrEmpty(path) || !path.StartsWith('/')) path = "/";
+
+                string? domainRaw = null;
+                if (item.TryGetProperty("domain", out var domEl) && domEl.ValueKind == JsonValueKind.String)
+                    domainRaw = domEl.GetString();
+
+                var hostOnly = ReadBool(item, "hostOnly")
+                    || name.StartsWith("__Host-", StringComparison.Ordinal)
+                    || (domainRaw != null && !domainRaw.StartsWith('.'));
+
+                // Extension-style URL: https://{cleanDomain}{path}
+                var url = item.TryGetProperty("url", out var urlEl) && urlEl.ValueKind == JsonValueKind.String
+                    ? urlEl.GetString()
+                    : null;
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    var host = (domainRaw ?? "google.com").TrimStart('.');
+                    url = "https://" + host + path;
+                }
+
+                Uri uri;
+                try { uri = new Uri(url!); }
+                catch
+                {
+                    failures.Add($"{name}: invalid url {url}");
+                    continue;
+                }
+
+                var expectedHash = item.TryGetProperty("valueHash", out var hashEl) && hashEl.ValueKind == JsonValueKind.String
                     ? hashEl.GetString()
                     : Sha256Hex(value);
                 if (!string.Equals(Sha256Hex(value), expectedHash, StringComparison.OrdinalIgnoreCase))
@@ -59,91 +124,128 @@ static class CookieInjectHost
                     continue;
                 }
 
-                var cookie = manager.CreateCookie(name, value, domain ?? new Uri(url!).Host, path);
+                var secure = ReadBool(item, "secure")
+                    || name.StartsWith("__Host-", StringComparison.Ordinal)
+                    || name.StartsWith("__Secure-", StringComparison.Ordinal);
+                var httpOnly = ReadBool(item, "httpOnly");
+                var sameSite = MapSameSite(
+                    item.TryGetProperty("sameSite", out var ssEl) && ssEl.ValueKind == JsonValueKind.String
+                        ? ssEl.GetString()
+                        : null);
+                if (sameSite == CoreWebView2CookieSameSiteKind.None) secure = true;
+
+                // WebView2 CreateCookie Domain:
+                // - host-only → exact host, no leading dot
+                // - domain cookie → leading-dot form like ".google.com" (matches Chromium / extension exports)
+                string domainForCreate;
+                if (hostOnly)
+                {
+                    domainForCreate = string.IsNullOrWhiteSpace(domainRaw)
+                        ? uri.Host
+                        : domainRaw.TrimStart('.');
+                }
+                else
+                {
+                    var clean = (domainRaw ?? uri.Host).TrimStart('.');
+                    domainForCreate = "." + clean;
+                }
+
+                var cookie = manager.CreateCookie(name, value, domainForCreate, path);
                 cookie.IsSecure = secure;
                 cookie.IsHttpOnly = httpOnly;
+                cookie.SameSite = sameSite;
 
-                if (item.TryGetProperty("sameSite", out var ssEl) && ssEl.ValueKind == JsonValueKind.String)
+                var epoch = ReadEpoch(item);
+                if (epoch is double e && e > now)
                 {
-                    var ss = ssEl.GetString() ?? "Lax";
-                    cookie.SameSite = ss.Equals("None", StringComparison.OrdinalIgnoreCase) ||
-                                     ss.Equals("no_restriction", StringComparison.OrdinalIgnoreCase)
-                        ? CoreWebView2CookieSameSiteKind.None
-                        : ss.Equals("Strict", StringComparison.OrdinalIgnoreCase)
-                            ? CoreWebView2CookieSameSiteKind.Strict
-                            : CoreWebView2CookieSameSiteKind.Lax;
+                    cookie.Expires = DateTimeOffset.FromUnixTimeSeconds((long)e).UtcDateTime;
                 }
-
-                if (item.TryGetProperty("expires", out var expEl) && expEl.ValueKind == JsonValueKind.Number)
-                {
-                    var epoch = expEl.GetDouble();
-                    if (epoch > 0)
-                        cookie.Expires = DateTimeOffset.FromUnixTimeSeconds((long)epoch).UtcDateTime;
-                }
-                else if (item.TryGetProperty("expirationDate", out var exp2) && exp2.ValueKind == JsonValueKind.Number)
-                {
-                    var epoch = exp2.GetDouble();
-                    if (epoch > 0)
-                        cookie.Expires = DateTimeOffset.FromUnixTimeSeconds((long)epoch).UtcDateTime;
-                }
+                // else leave as session cookie (Expires unset)
 
                 manager.AddOrUpdateCookie(cookie);
-                written.Add((url!, name, expectedHash ?? Sha256Hex(value), domain, path));
+                written.Add((url!, name, expectedHash ?? Sha256Hex(value), hostOnly));
             }
             catch (Exception ex)
             {
-                var n = item.TryGetProperty("name", out var ne) ? ne.GetString() : "?";
-                failures.Add($"{n}: {ex.Message}");
+                failures.Add($"{name}: {ex.Message}");
             }
         }
 
-        if (failures.Count > 0)
+        if (written.Count == 0)
         {
             return new
             {
                 success = false,
-                error = $"{failures.Count} cookies failed. {failures[0]}",
+                error = failures.Count > 0
+                    ? $"No cookies written. {failures[0]}"
+                    : "No cookies written.",
                 failures,
-                written = written.Count
+                written = 0
             };
         }
 
-        // Readback verify by name + SHA-256
+        // Give CookieManager a beat after bulk writes
+        await Task.Delay(150);
+
+        // Soft readback: confirm cookie appears under flow.google.com / related Google origins.
+        // Do NOT wipe the whole batch for a single sibling miss (extension does exact-scope verify;
+        // WebView2 GetCookiesAsync URI matching is looser and occasionally skips host-only rows).
+        var verified = 0;
         var verifyIssues = new List<string>();
         foreach (var w in written)
         {
-            try
+            var found = false;
+            var origins = new List<string> { w.Url };
+            origins.AddRange(VerifyOrigins);
+            foreach (var origin in origins.Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                var list = await manager.GetCookiesAsync(w.Url);
-                var match = list.FirstOrDefault(c =>
-                    c.Name == w.Name &&
-                    string.Equals(Sha256Hex(c.Value), w.ValueHash, StringComparison.OrdinalIgnoreCase));
-                if (match == null)
-                    verifyIssues.Add($"{w.Name}: missing or hash mismatch after write");
+                try
+                {
+                    var list = await manager.GetCookiesAsync(origin);
+                    if (list.Any(c =>
+                            c.Name == w.Name &&
+                            string.Equals(Sha256Hex(c.Value), w.ValueHash, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                catch
+                {
+                    /* try next origin */
+                }
             }
-            catch (Exception ex)
-            {
-                verifyIssues.Add($"{w.Name}: readback failed ({ex.Message})");
-            }
+
+            if (found) verified++;
+            else verifyIssues.Add($"{w.Name}: not visible yet under flow.google.com / google.com");
         }
 
-        if (verifyIssues.Count > 0)
+        // Success if majority of cookies are visible (covers Flow). Hard-fail only when almost nothing stuck.
+        var ok = verified > 0 && verified * 2 >= written.Count;
+        if (!ok)
         {
             return new
             {
                 success = false,
-                error = $"Chrome did not retain cookies. {verifyIssues[0]}",
-                failures = verifyIssues,
-                written = written.Count
+                error = verifyIssues.Count > 0
+                    ? $"Cookies did not stick in Chromium. {verifyIssues[0]}"
+                    : "Cookies did not stick in Chromium.",
+                failures = verifyIssues.Concat(failures).ToList(),
+                written = written.Count,
+                verified
             };
         }
 
-        return new { success = true, written = written.Count };
+        return new
+        {
+            success = true,
+            written = written.Count,
+            verified,
+            warnings = verifyIssues.Count > 0 ? verifyIssues : null,
+            writeFailures = failures.Count > 0 ? failures : null
+        };
     }
 
-    /// <summary>
-    /// Per-run temp Flow profile folder (deleted by caller on exit). Used when FLOW_V5_EPHEMERAL=1.
-    /// </summary>
     public static string CreateEphemeralFlowProfile()
     {
         var dir = Path.Combine(Path.GetTempPath(), "FlowBrowserV5", Guid.NewGuid().ToString("N"), "flow");

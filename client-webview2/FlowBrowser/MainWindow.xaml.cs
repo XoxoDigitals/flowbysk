@@ -1658,8 +1658,16 @@ public partial class MainWindow : Window
             {
                 if (FlowView.CoreWebView2 == null)
                     throw new InvalidOperationException("Flow WebView is not ready.");
+                // Ensure we are not mid-navigation on a Google login page while writing cookies
+                try
+                {
+                    FlowView.CoreWebView2.Stop();
+                    FlowView.CoreWebView2.Navigate("about:blank");
+                    await Task.Delay(200);
+                }
+                catch { /* best effort */ }
                 var result = await CookieInjectHost.InjectAsync(FlowView.CoreWebView2, payload);
-                // On failure wipe partial session so the profile is not left half-authenticated
+                // Only wipe on hard failure (success=false). Soft warnings keep the session.
                 try
                 {
                     var json = JsonSerializer.Serialize(result);

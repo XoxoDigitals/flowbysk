@@ -388,7 +388,23 @@ router.get('/session-cookies', requireUserAuth, async (req, res) => {
     });
   }
 
-  const webviewCookies = CookieCoreV5.toWebView2Cookies(prepared.prepared);
+  // Same chrome.cookies.set-shaped payload as Flow by MK extension (CookieCore details).
+  const extensionCookies = prepared.prepared.map((item) => ({
+    url: item.details.url,
+    name: item.details.name,
+    value: item.details.value,
+    path: item.details.path,
+    secure: item.details.secure,
+    httpOnly: item.details.httpOnly,
+    ...(item.details.domain ? { domain: item.details.domain } : {}),
+    ...(item.details.sameSite ? { sameSite: item.details.sameSite } : {}),
+    ...(item.details.expirationDate !== undefined
+      ? { expirationDate: item.details.expirationDate, expires: item.details.expirationDate }
+      : { session: true }),
+    ...(item.details.partitionKey ? { partitionKey: item.details.partitionKey } : {}),
+    hostOnly: item.expected.hostOnly,
+    valueHash: CookieCoreV5.sha256HexSync(item.details.value),
+  }));
 
   await db.addLog(user.id, user.username, 'cookie_fetch', {
     serverId: activeServer.id,
@@ -403,10 +419,10 @@ router.get('/session-cookies', requireUserAuth, async (req, res) => {
     success: true,
     serverId: activeServer.id,
     serverName: activeServer.name,
-    targetUrl: activeServer.targetUrl || 'https://flow.google.com',
+    targetUrl: activeServer.targetUrl || 'https://flow.google.com/',
     version: pack.cookieVersion,
     meta: prepared.meta,
-    cookies: webviewCookies,
+    cookies: extensionCookies,
   });
 });
 

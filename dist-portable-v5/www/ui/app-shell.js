@@ -64,23 +64,19 @@ class FlowBrowserApp {
     this.bootstrap();
   }
 
-  /** Wipe Google cookies + RAM pack when the shell closes or logs out. */
+  /**
+   * RAM-only policy: drop in-memory cookie pack on unload.
+   * Do NOT clear Chromium here — pagehide/beforeunload can fire during shell
+   * transitions and would erase a just-injected Flow session. Host Closing +
+   * logout/forceLogout own the real wipe.
+   */
   bindCookieWipeLifecycle() {
-    const wipe = () => {
+    const wipeRam = () => {
       this._ramCookies = null;
       this._cookieInjectedVersion = null;
-      try {
-        window.electronAPI?.clearPartitionSession?.();
-      } catch (_e) {}
-      try {
-        window.chrome?.webview?.postMessage(JSON.stringify({ type: 'cmd', cmd: 'clearPartitionSession' }));
-      } catch (_e) {}
     };
-    window.addEventListener('pagehide', wipe);
-    window.addEventListener('beforeunload', wipe);
-    document.addEventListener('visibilitychange', () => {
-      // no-op: keep session while minimized; wipe only on unload/logout
-    });
+    window.addEventListener('pagehide', wipeRam);
+    window.addEventListener('beforeunload', wipeRam);
   }
 
   wipeRamCookies() {
@@ -96,7 +92,7 @@ class FlowBrowserApp {
     if (!this.config?.authToken) {
       return { ok: false, error: 'Not signed in' };
     }
-    this.showLoadingOverlay('Applying Google session…', 'Fetching cookies (RAM only — wiped on close)');
+    this.showLoadingOverlay('Applying Google session…', 'Injecting cookies into Flow (no manual login)');
     try {
       const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/session-cookies`, {
         headers: {
@@ -120,15 +116,13 @@ class FlowBrowserApp {
         targetUrl: data.targetUrl,
       };
 
-      if (
-        !force &&
-        this._cookieInjectedVersion === data.version &&
-        this.activeServer?.id === data.serverId
-      ) {
-        return { ok: true, meta: data.meta, skipped: true };
-      }
-
+      // Always re-inject when opening Flow so Chromium profile matches the pack
+      // (skipping left stale/empty profiles after wipe).
+      void force;
       await window.electronAPI.clearPartitionSession();
+      // Let ClearBrowsingData finish before writing extension-shaped cookies
+      await new Promise((r) => setTimeout(r, 350));
+
       const inject = await window.electronAPI.injectCookies({
         cookies: data.cookies,
         version: data.version,
@@ -138,6 +132,7 @@ class FlowBrowserApp {
         this.wipeRamCookies();
         const err = inject?.error || 'Cookie injection failed';
         this.notify(err, true);
+        console.error('[AppShell] injectCookies failed', inject);
         return { ok: false, error: err };
       }
 
@@ -145,10 +140,16 @@ class FlowBrowserApp {
       const expiryNote = data.meta?.earliestExpiryIso
         ? `Earliest expiry ${data.meta.earliestExpiryIso}`
         : `${data.meta?.sessionCount || 0} session cookies`;
-      this.notify(`${data.meta?.count || data.cookies.length} cookies applied · ${expiryNote}`);
-      return { ok: true, meta: data.meta, targetUrl: data.targetUrl };
+      const warn = inject.warnings?.length ? ` · ${inject.warnings.length} soft warnings` : '';
+      this.notify(
+        `${inject.verified || data.cookies.length}/${data.cookies.length} cookies on Flow · ${expiryNote}${warn}`
+      );
+      // Always land on Flow app root so .google.com cookies are used immediately
+      const targetUrl = 'https://flow.google.com/';
+      return { ok: true, meta: data.meta, targetUrl, inject };
     } catch (err) {
       this.wipeRamCookies();
+      console.error('[AppShell] fetchAndInjectSessionCookies', err);
       return { ok: false, error: err.message || String(err) };
     }
   }
@@ -1237,15 +1238,20 @@ class FlowBrowserApp {
           });
         }
 
-        const injected = await this.fetchAndInjectSessionCookies({ force: !!resetGoogle });
+        const injected = await this.fetchAndInjectSessionCookies({ force: true });
         if (!injected.ok) {
           this.hideLoadingOverlay();
           this.notify(injected.error || 'Cookie injection failed', true);
           return;
         }
 
-        const targetUrl = (injected.targetUrl || data.server.targetUrl || 'https://flow.google.com').replace(/\/$/, '') + '/';
-        console.log('[AppShell] v5 cookie session →', targetUrl, 'v' + (this._ramCookies?.version || '?'));
+        // Always open Flow app — cookies for .google.com apply here (no AddSession)
+        const targetUrl = 'https://flow.google.com/';
+        console.log('[AppShell] v5 cookie session →', targetUrl, 'v' + (this._ramCookies?.version || '?'), injected.inject);
+        this._pendingFreshLogin = false;
+        this._freshLoginStarted = true;
+        this.hideGoogleAuthBanner();
+        this.postAuthOverlay({ show: false, done: true });
         this.loadTargetInWebview(targetUrl);
         this.hideLoadingOverlay();
       } else {
@@ -1290,24 +1296,10 @@ class FlowBrowserApp {
     }, 400);
   }
 
-  maybeStartFreshLoginAfterFlow(url) {
-    if (!this._pendingFreshLogin) return;
-    const href = String(url || '');
-    if (!href.includes('flow.google.com') && !href.includes('labs.google')) return;
-    // Already bounced to Google once this cycle — never schedule again
-    if (this._freshLoginStarted) return;
-    if (this._freshLoginTimer) clearTimeout(this._freshLoginTimer);
-    this._freshLoginTimer = setTimeout(() => {
-      if (!this._pendingFreshLogin) return;
-      this._pendingFreshLogin = false;
-      this._freshLoginStarted = true;
-      const continueUrl = (this.activeServer?.targetUrl || 'https://flow.google.com').replace(/\/$/, '') + '/';
-      const googleLoginUrl =
-        'https://accounts.google.com/AddSession?hl=en&continue=' +
-        encodeURIComponent(continueUrl);
-      console.log('[AppShell] Fresh Google login in webview for', this.activeServer?.email, '→', googleLoginUrl);
-      this.loadTargetInWebview(googleLoginUrl);
-    }, 700);
+  maybeStartFreshLoginAfterFlow(_url) {
+    // v5 cookies-only: never bounce to Google AddSession / manual login.
+    this._pendingFreshLogin = false;
+    return;
   }
 
   navigateFromSearchBar() {
