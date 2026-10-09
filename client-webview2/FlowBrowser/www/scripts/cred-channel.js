@@ -1,19 +1,9 @@
 /**
- * Phase 2: X25519 ECDH + AES-GCM for sealed Google credentials.
- * Requires a secure context (https:// virtual host) so crypto.subtle exists.
- * Shared with server/credChannel.js (flow-cred-v1).
+ * Phase 2 credential channel (flow-cred-v1).
+ * Prefer host ECDH (NSec) — WebView2 crypto.subtle is often unavailable on virtual hosts.
+ * Falls back to WebCrypto when host bridge is missing (browser debug).
  */
 (function (global) {
-  function subtleApi() {
-    var c = global.crypto || (typeof self !== 'undefined' ? self.crypto : null);
-    if (!c || !c.subtle) {
-      throw new Error(
-        'Secure crypto unavailable. Shell must load over https://flowbrowser.local (not http).'
-      );
-    }
-    return c.subtle;
-  }
-
   function b64urlFromBuf(buf) {
     var bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf;
     var s = '';
@@ -34,8 +24,18 @@
     out.set(b, a.length);
     return out;
   }
+  function hostApi() {
+    return global.electronAPI && typeof global.electronAPI.credGenerateKey === 'function'
+      ? global.electronAPI
+      : null;
+  }
+  function subtleApi() {
+    var c = global.crypto || (typeof self !== 'undefined' ? self.crypto : null);
+    return c && c.subtle ? c.subtle : null;
+  }
 
   var CredChannel = {
+    mode: null, // 'host' | 'subtle'
     keyPair: null,
     aesRaw: null,
     aesCryptoKey: null,
@@ -43,15 +43,36 @@
     channelId: null,
 
     async generateClientPublicKey() {
+      var host = hostApi();
+      if (host) {
+        this.mode = 'host';
+        this.clearLocal();
+        var res = await host.credGenerateKey();
+        if (!res || !res.clientPublicKey) throw new Error('Host ECDH failed');
+        return res.clientPublicKey;
+      }
       var subtle = subtleApi();
+      if (!subtle) {
+        throw new Error('Secure crypto unavailable (no host bridge and no crypto.subtle)');
+      }
+      this.mode = 'subtle';
       this.keyPair = await subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
       var raw = await subtle.exportKey('raw', this.keyPair.publicKey);
       return b64urlFromBuf(raw);
     },
 
     async establish(channelId, serverPublicKeySpkiB64) {
+      if (this.mode === 'host') {
+        var host = hostApi();
+        if (!host) throw new Error('Host bridge missing');
+        await host.credEstablish(channelId, serverPublicKeySpkiB64);
+        this.channelId = channelId;
+        this.aesCryptoKey = true; // truthy sentinel for app-shell readiness checks
+        return true;
+      }
       if (!this.keyPair) throw new Error('Generate client key first');
       var subtle = subtleApi();
+      if (!subtle) throw new Error('crypto.subtle missing');
       var spki = bufFromB64url(serverPublicKeySpkiB64);
       var serverPub = await subtle.importKey('spki', spki, { name: 'X25519' }, false, []);
       var shared = new Uint8Array(
@@ -74,6 +95,11 @@
     },
 
     async mac(attemptId, stage) {
+      if (this.mode === 'host') {
+        var host = hostApi();
+        if (!host) throw new Error('Host bridge missing');
+        return await host.credMac(attemptId, stage);
+      }
       var subtle = subtleApi();
       var ts = Date.now();
       var msg = this.channelId + '|' + attemptId + '|' + stage + '|' + ts;
@@ -84,6 +110,13 @@
     async decryptSealed(payload) {
       if (!payload || !payload.ciphertext || !payload.nonce) {
         throw new Error('Missing sealed payload');
+      }
+      if (this.mode === 'host') {
+        var host = hostApi();
+        if (!host) throw new Error('Host bridge missing');
+        var res = await host.credDecrypt(payload.ciphertext, payload.nonce);
+        if (!res || typeof res.plaintext !== 'string') throw new Error('Host decrypt failed');
+        return res.plaintext;
       }
       var subtle = subtleApi();
       var nonce = bufFromB64url(payload.nonce);
@@ -99,12 +132,21 @@
       return new TextDecoder().decode(plain);
     },
 
-    clear() {
+    clearLocal() {
       this.keyPair = null;
       this.aesRaw = null;
       this.aesCryptoKey = null;
       this.hmacKey = null;
       this.channelId = null;
+    },
+
+    clear() {
+      this.clearLocal();
+      this.mode = null;
+      var host = hostApi();
+      if (host && typeof host.credClear === 'function') {
+        try { host.credClear(); } catch (e) { /* ignore */ }
+      }
     },
   };
 

@@ -10,11 +10,12 @@
     <RootNamespace>FlowBrowser</RootNamespace>
     <ApplicationTitle>Flow Browser</ApplicationTitle>
     <ApplicationIcon>FlowBrowser.ico</ApplicationIcon>
-    <Version>6.0.1</Version>
+    <Version>6.0.2</Version>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
+    <PackageReference Include="NSec.Cryptography" Version="24.4.0" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
@@ -35,10 +36,8 @@
       <_PackScript>$(MSBuildProjectDirectory)\tools\pack-www.ps1</_PackScript>
       <_EncryptScript>$(MSBuildProjectDirectory)\tools\encrypt-www.cjs</_EncryptScript>
     </PropertyGroup>
-    <Exec Condition="'$(Configuration)' == 'Release'"
-          Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(_PackScript)&quot;" />
-    <Exec Condition="'$(Configuration)' != 'Release'"
-          Command="powershell -NoProfile -Command &quot;if (Test-Path '$(_WwwZip)') { Remove-Item '$(_WwwZip)' -Force }; if (Test-Path '$(_WwwVault)') { Remove-Item '$(_WwwVault)' -Force }; Compress-Archive -Path '$(MSBuildProjectDirectory)\www\*' -DestinationPath '$(_WwwZip)' -Force; node '$(_EncryptScript)'&quot;" />
+    <Exec Condition="'$(Configuration)' == 'Release'" Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(_PackScript)&quot;" />
+    <Exec Condition="'$(Configuration)' != 'Release'" Command="powershell -NoProfile -Command &quot;if (Test-Path '$(_WwwZip)') { Remove-Item '$(_WwwZip)' -Force }; if (Test-Path '$(_WwwVault)') { Remove-Item '$(_WwwVault)' -Force }; Compress-Archive -Path '$(MSBuildProjectDirectory)\www\*' -DestinationPath '$(_WwwZip)' -Force; node '$(_EncryptScript)'&quot;" />
     <ItemGroup>
       <EmbeddedResource Include="$(_WwwVault)">
         <LogicalName>FlowBrowser.www.vault</LogicalName>

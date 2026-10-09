@@ -115,7 +115,14 @@
     onDownloadStarted: (cb) => { window.__downloadHandlers['download:started'] = cb; },
     onDownloadProgress: (cb) => { window.__downloadHandlers['download:progress'] = cb; },
     onDownloadCompleted: (cb) => { window.__downloadHandlers['download:completed'] = cb; },
-    onDownloadFailed: (cb) => { window.__downloadHandlers['download:failed'] = cb; }
+    onDownloadFailed: (cb) => { window.__downloadHandlers['download:failed'] = cb; },
+    // Host-side ECDH (avoids WebView2 crypto.subtle gaps)
+    credGenerateKey: () => invoke('credGenerateKey'),
+    credEstablish: (channelId, serverPublicKey) =>
+      invoke('credEstablish', { channelId, serverPublicKey }),
+    credMac: (attemptId, stage) => invoke('credMac', { attemptId, stage }),
+    credDecrypt: (ciphertext, nonce) => invoke('credDecrypt', { ciphertext, nonce }),
+    credClear: () => invoke('credClear')
   };
 
   const flowProxy = {

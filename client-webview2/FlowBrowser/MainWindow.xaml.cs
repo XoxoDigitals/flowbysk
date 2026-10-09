@@ -39,6 +39,7 @@ public partial class MainWindow : Window
     int _authUiMode = -1;
     Window? _authCoverWindow;
     DispatcherTimer? _authCoverPinTimer;
+    readonly CredChannelHost _credChannel = new();
 
     const int AuthUiOff = 0;
     const int AuthUiCover = 1;
@@ -140,8 +141,8 @@ public partial class MainWindow : Window
         _flowReady = true;
 
         SetShellMode("full");
-        // https:// enables crypto.subtle (ECDH login). Production API is HTTPS so no mixed content.
-        ShellView.CoreWebView2.Navigate("https://flowbrowser.local/ui/app-shell.html");
+        // Prefer *.localhost (secure context) + avoid .local DNS delay. Host ECDH does not need subtle.
+        ShellView.CoreWebView2.Navigate("https://app.flowbrowser.localhost/ui/app-shell.html");
     }
 
     void ConfigureShell()
@@ -167,6 +168,11 @@ public partial class MainWindow : Window
             }
         };
         core.WebMessageReceived += Shell_WebMessageReceived;
+        core.SetVirtualHostNameToFolderMapping(
+            "app.flowbrowser.localhost",
+            _wwwRoot,
+            CoreWebView2HostResourceAccessKind.Allow);
+        // Keep legacy mapping for any leftover absolute links during upgrade.
         core.SetVirtualHostNameToFolderMapping(
             "flowbrowser.local",
             _wwwRoot,
@@ -1668,6 +1674,34 @@ public partial class MainWindow : Window
                 try { return JsonSerializer.Deserialize<object>(result); }
                 catch { return result; }
             }
+            case "credGenerateKey":
+                return new { clientPublicKey = _credChannel.GenerateClientPublicKey() };
+            case "credEstablish":
+            {
+                var channelId = payload.TryGetProperty("channelId", out var cid) ? cid.GetString() : null;
+                var serverPublicKey = payload.TryGetProperty("serverPublicKey", out var spk) ? spk.GetString() : null;
+                if (string.IsNullOrWhiteSpace(channelId) || string.IsNullOrWhiteSpace(serverPublicKey))
+                    throw new ArgumentException("channelId and serverPublicKey required");
+                _credChannel.Establish(channelId!, serverPublicKey!);
+                return new { success = true, channelId = _credChannel.ChannelId };
+            }
+            case "credMac":
+            {
+                var attemptId = payload.TryGetProperty("attemptId", out var aid) ? aid.GetString() : "";
+                var stage = payload.TryGetProperty("stage", out var st) ? st.GetString() : "";
+                return _credChannel.Mac(attemptId ?? "", stage ?? "");
+            }
+            case "credDecrypt":
+            {
+                var ct = payload.TryGetProperty("ciphertext", out var ctel) ? ctel.GetString() : null;
+                var nonce = payload.TryGetProperty("nonce", out var nel) ? nel.GetString() : null;
+                if (string.IsNullOrWhiteSpace(ct) || string.IsNullOrWhiteSpace(nonce))
+                    throw new ArgumentException("ciphertext and nonce required");
+                return new { plaintext = _credChannel.DecryptSealed(ct!, nonce!) };
+            }
+            case "credClear":
+                _credChannel.Clear();
+                return new { success = true };
             default:
                 throw new InvalidOperationException("Unknown command: " + cmd);
         }
