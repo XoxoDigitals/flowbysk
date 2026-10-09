@@ -9,7 +9,19 @@ function normalizeIp(ip) {
   let s = String(ip || '').trim();
   if (s.startsWith('::ffff:')) s = s.slice(7);
   if (s === '::1') s = '127.0.0.1';
+  // First hop only if a list was passed
+  if (s.includes(',')) s = s.split(',')[0].trim();
   return s;
+}
+
+/** Prefer X-Forwarded-For / X-Real-IP when behind nginx (requires trust proxy). */
+function clientIpFromReq(req) {
+  const xf = req?.headers?.['x-forwarded-for'];
+  if (typeof xf === 'string' && xf.trim()) return normalizeIp(xf);
+  if (Array.isArray(xf) && xf[0]) return normalizeIp(xf[0]);
+  const xr = req?.headers?.['x-real-ip'];
+  if (typeof xr === 'string' && xr.trim()) return normalizeIp(xr);
+  return normalizeIp(req?.ip || req?.socket?.remoteAddress || '');
 }
 
 function isPrivate(ip) {
@@ -45,4 +57,4 @@ async function lookupCountry(ip) {
   }
 }
 
-module.exports = { lookupCountry, normalizeIp };
+module.exports = { lookupCountry, normalizeIp, clientIpFromReq, isPrivate };

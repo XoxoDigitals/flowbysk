@@ -322,32 +322,6 @@ export default function AdminUserDetailPage() {
                   </table>
                 )}
               </div>
-              {activity.length > 0 && (
-                <div className="mt-4 border-t border-[var(--line)] pt-4">
-                  <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--ink3)]">
-                    Activity
-                  </h4>
-                  <ul className="max-h-40 space-y-2 overflow-auto text-xs text-[var(--ink2)]">
-                    {activity.map((a) => {
-                      const detail = formatLogDetails(a.details || null);
-                      return (
-                        <li key={a.id}>
-                          <span className="text-[var(--ink3)]">
-                            {new Date(a.createdAt).toLocaleString()}
-                          </span>{' '}
-                          · {a.action}
-                          {a.username ? ` by ${a.username}` : ''}
-                          {detail ? (
-                            <span className="mt-0.5 block font-mono text-[10px] text-[var(--ink3)]">
-                              {detail}
-                            </span>
-                          ) : null}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              )}
             </section>
 
             <section className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-5">
@@ -437,6 +411,59 @@ export default function AdminUserDetailPage() {
               </form>
             </section>
           </div>
+
+          <section className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-5">
+            <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold">Activity</h3>
+                <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
+                  Logins, Device ID, IP / country, bans, and credit actions
+                </p>
+              </div>
+              <span className="font-mono text-[11px] text-[var(--ink3)]">
+                {activity.length} event{activity.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            <div className="overflow-hidden rounded-xl border border-[var(--line)]">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-[var(--bg2)] text-[11px] uppercase tracking-wider text-[var(--ink3)]">
+                  <tr>
+                    <th className="px-4 py-3 font-medium">When</th>
+                    <th className="px-4 py-3 font-medium">Action</th>
+                    <th className="px-4 py-3 font-medium">IP / Country / Device / Client</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activity.length === 0 ? (
+                    <tr>
+                      <td colSpan={3} className="px-4 py-8 text-center text-[var(--ink3)]">
+                        No activity yet
+                      </td>
+                    </tr>
+                  ) : (
+                    activity.map((a) => (
+                      <tr key={a.id} className="border-t border-[var(--line)] align-top">
+                        <td className="whitespace-nowrap px-4 py-3 text-[12px] text-[var(--ink3)]">
+                          {new Date(a.createdAt).toLocaleString()}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-[12px]">
+                          {a.action}
+                          {a.username ? (
+                            <span className="mt-0.5 block text-[10px] text-[var(--ink3)]">
+                              {a.username}
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="break-all px-4 py-3 font-mono text-[11px] text-[var(--ink2)]">
+                          {formatLogDetails(a.details || null) || '—'}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
         </>
       )}
     </div>

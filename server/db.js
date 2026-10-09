@@ -1614,7 +1614,7 @@ class Database {
     try {
       const users = await prisma.user.findMany({
         where: {
-          role: 'END_USER',
+          role: 'CUSTOMER',
           OR: [
             { meta: { path: ['lastDeviceId'], equals: needle } },
             { meta: { path: ['deviceIds'], array_contains: needle } },
@@ -1648,10 +1648,10 @@ class Database {
       select: { userId: true },
     });
     const createUserIds = new Set(createGrants.map((g) => g.userId).filter(Boolean));
-    // Also count END_USERs created in-window (covers rows without ledger create reason).
+    // Also count CUSTOMER end-users created in-window (covers rows without ledger create reason).
     const createdUsers = await prisma.user.findMany({
       where: {
-        role: 'END_USER',
+        role: 'CUSTOMER',
         createdAt: { gte: from, lt: to },
       },
       select: { id: true },

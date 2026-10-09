@@ -11,7 +11,7 @@ const db = require('../db');
 const { openFromStorage } = require('../secretsCrypto');
 const credChannel = require('../credChannel');
 const { allowExtensionStep } = credChannel;
-const { lookupCountry, normalizeIp } = require('../geoIp');
+const { lookupCountry, clientIpFromReq } = require('../geoIp');
 const { requireAppDeviceAttestation } = require('../deviceSecurity');
 
 async function jwtSecret() {
@@ -143,7 +143,7 @@ async function loginClientUser(username, password, ip, req) {
     return { status: 400, body: { success: false, error: 'Please enter both username and password' } };
   }
 
-  const clientIp = normalizeIp(ip || req?.ip || '');
+  const clientIp = clientIpFromReq(req) || String(ip || '').trim();
   const country = await lookupCountry(clientIp);
   const attestation = requireAppDeviceAttestation(req || { headers: {}, body: {} });
 
