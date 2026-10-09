@@ -1,6 +1,7 @@
 /**
  * IP → country lookup with in-memory cache.
- * Prefer real client headers when behind nginx / Cloudflare. Fail-open to XX.
+ * Providers: ipinfo.io → ip-api.com → ipwho.is (fail-open to XX).
+ * Prefer real client headers when behind nginx / Cloudflare.
  */
 const cache = new Map(); // ip -> { country, at }
 const TTL_MS = 24 * 60 * 60 * 1000;
@@ -10,7 +11,6 @@ function normalizeIp(ip) {
   if (s.startsWith('::ffff:')) s = s.slice(7);
   if (s === '::1') s = '127.0.0.1';
   if (s.includes(',')) s = s.split(',')[0].trim();
-  // Strip surrounding brackets / ports for IPv6 literals rarely seen in headers
   if (s.startsWith('[') && s.includes(']')) s = s.slice(1, s.indexOf(']'));
   return s;
 }
@@ -43,7 +43,6 @@ function splitIpList(raw) {
     .filter(Boolean);
 }
 
-/** First public IP in a candidate list; else first private; else ''. */
 function pickBestIp(candidates) {
   const list = candidates.map(normalizeIp).filter(Boolean);
   const pub = list.find((ip) => !isPrivate(ip));
@@ -51,10 +50,6 @@ function pickBestIp(candidates) {
   return list[0] || '';
 }
 
-/**
- * Real client IP behind Cloudflare / nginx.
- * Order: CF-Connecting-IP → True-Client-IP → X-Real-IP → public XFF hop → req.ip
- */
 function clientIpFromReq(req) {
   const h = req?.headers || {};
   const candidates = [];
@@ -71,11 +66,74 @@ function clientIpFromReq(req) {
   const xff = headerFirst(h['x-forwarded-for']);
   if (xff) candidates.push(...splitIpList(xff));
 
-  // Express trust-proxy resolved IP (may still be loopback if headers missing)
   if (req?.ip) candidates.push(req.ip);
   if (req?.socket?.remoteAddress) candidates.push(req.socket.remoteAddress);
 
   return pickBestIp(candidates);
+}
+
+function parseCountryCode(raw) {
+  const s = String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z]/g, '');
+  return /^[A-Z]{2}$/.test(s) ? s : null;
+}
+
+async function fetchText(url, headers = {}, ms = 2500) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, headers });
+    const text = await res.text();
+    if (!res.ok) return null;
+    return text;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function fetchJson(url, headers = {}, ms = 2500) {
+  const text = await fetchText(url, { Accept: 'application/json', ...headers }, ms);
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/** ipinfo.io — optional IPINFO_TOKEN for higher limits. */
+async function lookupViaIpinfo(ip) {
+  const token = String(process.env.IPINFO_TOKEN || '').trim();
+  const auth = token ? `?token=${encodeURIComponent(token)}` : '';
+  // Plain country endpoint
+  const plain = await fetchText(`https://ipinfo.io/${encodeURIComponent(ip)}/country${auth}`, {
+    Accept: 'text/plain',
+  });
+  const fromPlain = parseCountryCode(plain);
+  if (fromPlain) return fromPlain;
+
+  const json = await fetchJson(`https://ipinfo.io/${encodeURIComponent(ip)}/json${auth}`);
+  return parseCountryCode(json?.country);
+}
+
+/** ip-api.com free (HTTP) — no key required. */
+async function lookupViaIpApi(ip) {
+  const json = await fetchJson(
+    `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,countryCode`
+  );
+  if (!json || json.status !== 'success') return null;
+  return parseCountryCode(json.countryCode);
+}
+
+/** ipwho.is free HTTPS fallback. */
+async function lookupViaIpWho(ip) {
+  const json = await fetchJson(`https://ipwho.is/${encodeURIComponent(ip)}`);
+  if (!json || json.success === false) return null;
+  return parseCountryCode(json.country_code || json.countryCode);
 }
 
 async function lookupCountry(ip) {
@@ -83,25 +141,33 @@ async function lookupCountry(ip) {
   if (isPrivate(key)) return 'LOCAL';
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.country;
+
+  let country = null;
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 2500);
-    const res = await fetch(`https://ipapi.co/${encodeURIComponent(key)}/country/`, {
-      signal: ctrl.signal,
-      headers: { Accept: 'text/plain' },
-    });
-    clearTimeout(t);
-    const text = (await res.text()).trim().toUpperCase();
-    const country = /^[A-Z]{2}$/.test(text) ? text : 'XX';
-    cache.set(key, { country, at: Date.now() });
-    return country;
+    country = await lookupViaIpinfo(key);
   } catch {
-    cache.set(key, { country: 'XX', at: Date.now() });
-    return 'XX';
+    country = null;
   }
+  if (!country) {
+    try {
+      country = await lookupViaIpApi(key);
+    } catch {
+      country = null;
+    }
+  }
+  if (!country) {
+    try {
+      country = await lookupViaIpWho(key);
+    } catch {
+      country = null;
+    }
+  }
+
+  const out = country || 'XX';
+  cache.set(key, { country: out, at: Date.now() });
+  return out;
 }
 
-/** Attach ip + country for activity logs (fail-open). */
 async function requestGeo(req) {
   const ip = clientIpFromReq(req);
   const country = await lookupCountry(ip);

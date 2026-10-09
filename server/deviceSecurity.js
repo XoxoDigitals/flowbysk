@@ -38,28 +38,31 @@ function requireAppDeviceAttestation(req) {
   return { ok: true, deviceId, client };
 }
 
-function periodWindow20th(now = new Date()) {
+/** Billing window: 10th 00:00 UTC → next month 10th 00:00 UTC. */
+function periodWindow10th(now = new Date()) {
   const y = now.getUTCFullYear();
   const m = now.getUTCMonth(); // 0-11
-  const this20 = new Date(Date.UTC(y, m, 20, 0, 0, 0, 0));
+  const this10 = new Date(Date.UTC(y, m, 10, 0, 0, 0, 0));
   let from;
   let to;
-  if (now >= this20) {
-    // current open window: this month 20th → next month 20th
-    from = this20;
-    to = new Date(Date.UTC(y, m + 1, 20, 0, 0, 0, 0));
+  if (now >= this10) {
+    from = this10;
+    to = new Date(Date.UTC(y, m + 1, 10, 0, 0, 0, 0));
   } else {
-    // before this month's 20th: last month 20th → this month 20th
-    from = new Date(Date.UTC(y, m - 1, 20, 0, 0, 0, 0));
-    to = this20;
+    from = new Date(Date.UTC(y, m - 1, 10, 0, 0, 0, 0));
+    to = this10;
   }
   return { from, to };
 }
+
+/** @deprecated use periodWindow10th */
+const periodWindow20th = periodWindow10th;
 
 module.exports = {
   parseFlowClient,
   isValidDeviceId,
   requireAppDeviceAttestation,
+  periodWindow10th,
   periodWindow20th,
   APP_CLIENT_RE,
 };

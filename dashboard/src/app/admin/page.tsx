@@ -147,7 +147,7 @@ export default function AdminOverviewPage() {
             <div className="flex flex-wrap items-end justify-between gap-2">
               <div>
                 <h2 className="text-[15px] font-semibold tracking-tight">
-                  Billing period (20th → 20th UTC)
+                  Billing period (10th → 10th UTC)
                 </h2>
                 <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
                   New users vs renewals in the current window
@@ -180,7 +180,7 @@ export default function AdminOverviewPage() {
             <div>
               <h2 className="text-[15px] font-semibold tracking-tight">Admins by owned users</h2>
               <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
-                All-time owned users · new / renewals in the current 20th→20th window
+                All-time owned users · new / renewals in the current 10th→10th window
               </p>
             </div>
             <div className="overflow-hidden rounded-2xl border border-[var(--line)]">

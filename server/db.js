@@ -1688,8 +1688,8 @@ class Database {
 
   async adminPeriodStats(adminIds = []) {
     await this.ready();
-    const { periodWindow20th } = require('./deviceSecurity');
-    const { from, to } = periodWindow20th(new Date());
+    const { periodWindow10th } = require('./deviceSecurity');
+    const { from, to } = periodWindow10th(new Date());
     const createGrants = await prisma.creditLedger.findMany({
       where: {
         OR: [
