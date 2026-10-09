@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const adminRoutes = require('./routes/admin');
-const clientRoutes = require('./routes/client');
 const sessionRoutes = require('./routes/session');
 const resellerRoutes = require('./routes/reseller');
 const downloads = require('./downloads');
@@ -29,7 +28,7 @@ const forceUpdatePayload = {
   error: 'Please download the latest Flow Browser.',
 };
 
-/** v2 / v3 are permanently dead — v4 (credential fill) + v5 (cookie inject) are live. */
+/** v2 / v3 / v4 credential-fill APIs are dead — cookie inject lives on /api/v5/client only. */
 const clientV5Routes = require('./routes/client-v5');
 app.use('/api/v2/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
@@ -37,7 +36,9 @@ app.use('/api/v2/client', (req, res) => {
 app.use('/api/v3/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
-app.use('/api/v4/client', clientRoutes);
+app.use('/api/v4/client', (req, res) => {
+  res.status(410).json(forceUpdatePayload);
+});
 app.use('/api/v5/client', clientV5Routes);
 app.use('/api/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
@@ -160,7 +161,7 @@ db.ready()
       console.log(`Flow Creator Ai API server on port ${PORT}`);
       console.log(`Admin UI:   http://localhost:3100/admin`);
       console.log(`Demo Flow:  http://localhost:${PORT}/demo-flow`);
-      console.log(`Client API: /api/v4/client (credentials) + /api/v5/client (cookies); v2/v3 → 410`);
+      console.log(`Client API: /api/v5/client only (cookies); v2/v3/v4 → 410 FORCE_UPDATE`);
       console.log(`Data store: PostgreSQL (Prisma) — data.json is not live`);
       console.log(`====================================================`);
     });

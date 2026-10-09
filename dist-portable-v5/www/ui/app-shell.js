@@ -398,20 +398,19 @@ class FlowBrowserApp {
         this.hideLoadingOverlay();
       }
       this.sendCredentialsToWebview();
-      this.tryGoogleAutoFill(u);
-      this.maybeStartFreshLoginAfterFlow(u);
+      this.recoverFromGoogleLoginPage(u);
+      this.maybeFinishGoogleCheckCookie(u);
     });
 
     this.webview.addEventListener('did-navigate', (e) => {
       this.updateDebugUrl(e.url);
-      this.tryGoogleAutoFill(e.url);
-      this.maybeStartFreshLoginAfterFlow(e.url);
+      this.recoverFromGoogleLoginPage(e.url);
       this.maybeFinishGoogleCheckCookie(e.url);
     });
 
     this.webview.addEventListener('did-navigate-in-page', (e) => {
       this.updateDebugUrl(e.url);
-      this.tryGoogleAutoFill(e.url);
+      this.recoverFromGoogleLoginPage(e.url);
       this.maybeFinishGoogleCheckCookie(e.url);
     });
 
@@ -738,32 +737,28 @@ class FlowBrowserApp {
     await this.forceLogout('');
   }
 
-  /**
-   * Wipe Google / Flow cookies and browsing data for this profile, then
-   * re-launch a fresh Google sign-in for the current assignment.
-   */
   async handleClearCookies() {
     const ok = await this.showConfirmDialog({
-      title: 'Clear cookies & accounts',
-      body: 'Clear all Google cookies in this app?\n\nThis wipes the Flow browser profile and re-injects the admin cookie pack from the server (RAM only).',
-      confirmLabel: 'Clear everything',
+      title: 'Clear cookies',
+      body: 'Clear cookies?',
+      confirmLabel: 'Clear',
       cancelLabel: 'Cancel'
     });
     if (!ok) return;
 
-    this.showLoadingOverlay('Clearing cookies…', 'Wiping Google accounts and browsing data', 12000);
+    this.showLoadingOverlay('Clearing cookies…', 'Opening Flow…', 12000);
     this.hideGoogleAuthBanner();
-    // Always drop sticky auth cover first — wipe must not leave a looping overlay
     this.postAuthOverlay({ show: false, done: true });
     this._captchaActive = false;
     this._pendingFreshLogin = false;
+    this._googleLoginReinjectAt = 0;
     try {
       await window.electronAPI.clearPartitionSession();
       this._lastAutoFillKey = null;
+      this.wipeRamCookies();
 
       const loggedIn = !!(this.currentUser && this.config?.authToken);
       if (!loggedIn) {
-        // Not signed into Flow Creator — wipe only; do not start Google login / overlay
         this.notify('Cookies cleared');
         try {
           if (typeof this.webview.loadURL === 'function') this.webview.loadURL('about:blank');
@@ -771,13 +766,8 @@ class FlowBrowserApp {
         } catch (e) {}
         this.showLoginScreen();
         this.hideLoadingOverlay();
-        this.postAuthOverlay({ show: false, done: true });
         return;
       }
-
-      this._pendingFreshLogin = true;
-      this._pendingFreshLoginAt = Date.now();
-      this.notify('Cookies cleared — signing in fresh…');
 
       if (this.activeServer?.id) {
         await this.launchServerWorkspace(this.activeServer.id, true);
@@ -786,13 +776,9 @@ class FlowBrowserApp {
         if (this.activeServer?.id) {
           await this.launchServerWorkspace(this.activeServer.id, true);
         } else {
+          this.loadTargetInWebview('https://flow.google.com/');
           this.hideLoadingOverlay();
-          this.notify('No Google account assigned — cookies cleared only', true);
-          this.postAuthOverlay({ show: false, done: true });
-          try {
-            if (typeof this.webview.loadURL === 'function') this.webview.loadURL('about:blank');
-            else this.webview.src = 'about:blank';
-          } catch (e) {}
+          this.notify('Cookies cleared', true);
         }
       }
     } catch (err) {
@@ -801,6 +787,64 @@ class FlowBrowserApp {
       this.postAuthOverlay({ show: false, done: true });
       this.hideLoadingOverlay();
       this.syncShellModeFromUi();
+    }
+  }
+
+  /** True for Google account sign-in / chooser pages (not Flow itself). */
+  isGoogleLoginUrl(raw) {
+    const href = String(raw || '');
+    if (!href) return false;
+    try {
+      const u = new URL(href);
+      const host = (u.hostname || '').toLowerCase();
+      const path = (u.pathname || '').toLowerCase();
+      if (host === 'accounts.youtube.com') return true;
+      if (host === 'accounts.google.com' || host.endsWith('.accounts.google.com')) {
+        // Logout/done pages still count — bounce back to Flow with fresh cookies
+        return true;
+      }
+      if (host === 'google.com' || host === 'www.google.com') {
+        return (
+          path.startsWith('/accountchooser') ||
+          path.startsWith('/signin') ||
+          path.startsWith('/servicelogin') ||
+          path.includes('login')
+        );
+      }
+      return false;
+    } catch (_) {
+      return /accounts\.google\.com|accounts\.youtube\.com|\/signin|\/accountchooser/i.test(href);
+    }
+  }
+
+  /**
+   * If Chromium lands on a Google login page, re-inject cookies and return to Flow.
+   * Debounced so navigations during inject do not loop.
+   */
+  async recoverFromGoogleLoginPage(url) {
+    if (!this.isGoogleLoginUrl(url)) return;
+    if (!this.config?.authToken) return;
+    const now = Date.now();
+    if (this._googleLoginReinjectAt && now - this._googleLoginReinjectAt < 8000) return;
+    this._googleLoginReinjectAt = now;
+    console.warn('[AppShell] Google login page detected → re-inject cookies → Flow', url);
+    this.showLoadingOverlay('Restoring session…', 'Returning to Flow…', 20000);
+    this.hideGoogleAuthBanner();
+    this.postAuthOverlay({ show: false, done: true });
+    this._pendingFreshLogin = false;
+    try {
+      const injected = await this.fetchAndInjectSessionCookies({ force: true });
+      if (!injected.ok) {
+        this.notify(injected.error || 'Could not restore session', true);
+        this.hideLoadingOverlay();
+        return;
+      }
+      this.loadTargetInWebview('https://flow.google.com/');
+      this.hideLoadingOverlay();
+    } catch (err) {
+      console.error('[AppShell] recoverFromGoogleLoginPage', err);
+      this.notify(err.message || 'Could not restore session', true);
+      this.hideLoadingOverlay();
     }
   }
 
