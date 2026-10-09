@@ -84,6 +84,12 @@ function obfuscateFile(rel) {
     console.warn('[obfuscate] skip missing', rel);
     return;
   }
+  // Keep WebCrypto ECDH helper readable — heavy string-array passes have broken subtle APIs before.
+  const relNorm = rel.replace(/\\/g, '/').toLowerCase();
+  if (relNorm === 'scripts/cred-channel.js' || relNorm.endsWith('/scripts/cred-channel.js')) {
+    console.log(`[obfuscate] SKIP crypto helper ${rel}`);
+    return;
+  }
   const code = fs.readFileSync(full, 'utf8');
   const before = Buffer.byteLength(code, 'utf8');
   if (before >= SKIP_BYTES) {

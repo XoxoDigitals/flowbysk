@@ -3,7 +3,7 @@
   if (window.chrome && window.chrome.runtime && window.chrome.runtime.id) return;
 
   const EXT_ID = 'flowbrowser-veo-auto-local';
-  const EXT_BASE = 'http://flowbrowser.local/extensions/veo-auto/';
+  const EXT_BASE = 'https://flowbrowser.local/extensions/veo-auto/';
   const listeners = [];
   const portListeners = new Map();
   let portSeq = 1;

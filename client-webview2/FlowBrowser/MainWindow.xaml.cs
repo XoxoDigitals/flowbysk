@@ -140,8 +140,8 @@ public partial class MainWindow : Window
         _flowReady = true;
 
         SetShellMode("full");
-        // http:// virtual host avoids mixed-content blocks when calling http://localhost API
-        ShellView.CoreWebView2.Navigate("http://flowbrowser.local/ui/app-shell.html");
+        // https:// enables crypto.subtle (ECDH login). Production API is HTTPS so no mixed content.
+        ShellView.CoreWebView2.Navigate("https://flowbrowser.local/ui/app-shell.html");
     }
 
     void ConfigureShell()
