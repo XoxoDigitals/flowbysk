@@ -123,6 +123,7 @@ static class WwwExtractor
             }
 
             File.WriteAllText(marker, hash);
+            HardenTree(root);
             DataPaths.TryHide(root);
             DataPaths.TryHide(Path.GetDirectoryName(root)!);
             lock (Gate) _tempWwwRoot = root;
@@ -133,6 +134,26 @@ static class WwwExtractor
             try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { /* ignore */ }
             throw;
         }
+    }
+
+    static void HardenTree(string root)
+    {
+        try
+        {
+            foreach (var path in Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    var attrs = File.GetAttributes(path);
+                    attrs |= FileAttributes.Hidden | FileAttributes.System | FileAttributes.NotContentIndexed;
+                    if ((attrs & FileAttributes.Directory) == 0)
+                        attrs |= FileAttributes.Temporary;
+                    File.SetAttributes(path, attrs);
+                }
+                catch { /* ignore */ }
+            }
+        }
+        catch { /* ignore */ }
     }
 
     public static void WipeTempWww()

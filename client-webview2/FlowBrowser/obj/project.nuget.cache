@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "dgSpecHash": "kZLI1cWeyds=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\Saboo\\Downloads\\flowbysk-Browser-push\\client-webview2\\FlowBrowser\\FlowBrowser.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\Saboo\\.nuget\\packages\\microsoft.net.illink.tasks\\8.0.31\\microsoft.net.illink.tasks.8.0.31.nupkg.sha512",
+    "C:\\Users\\Saboo\\.nuget\\packages\\microsoft.web.webview2\\1.0.4191.47\\microsoft.web.webview2.1.0.4191.47.nupkg.sha512",
+    "C:\\Users\\Saboo\\.nuget\\packages\\system.security.cryptography.protecteddata\\8.0.0\\system.security.cryptography.protecteddata.8.0.0.nupkg.sha512",
+    "C:\\Users\\Saboo\\.nuget\\packages\\microsoft.netcore.app.runtime.win-x64\\8.0.31\\microsoft.netcore.app.runtime.win-x64.8.0.31.nupkg.sha512",
+    "C:\\Users\\Saboo\\.nuget\\packages\\microsoft.windowsdesktop.app.runtime.win-x64\\8.0.31\\microsoft.windowsdesktop.app.runtime.win-x64.8.0.31.nupkg.sha512",
+    "C:\\Users\\Saboo\\.nuget\\packages\\microsoft.aspnetcore.app.runtime.win-x64\\8.0.31\\microsoft.aspnetcore.app.runtime.win-x64.8.0.31.nupkg.sha512"
+  ],
+  "logs": []
+}

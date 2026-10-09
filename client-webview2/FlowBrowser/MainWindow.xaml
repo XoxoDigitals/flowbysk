@@ -14,10 +14,69 @@
   <Grid x:Name="RootGrid">
     <wv2:WebView2 x:Name="FlowView"
                   DefaultBackgroundColor="#07090E"
-                  Margin="0,80,0,0" />
+                  Margin="0,88,0,0"
+                  Panel.ZIndex="1" />
+
+    <!-- Exe-level full-page cover over Flow during Google auto-login -->
+    <Grid x:Name="AuthOverlay"
+          Margin="0,88,0,0"
+          Panel.ZIndex="5"
+          Visibility="Collapsed"
+          IsHitTestVisible="True"
+          Background="#020617">
+      <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="420">
+        <Border Width="52" Height="52" CornerRadius="26"
+                BorderBrush="#40CBD5E1" BorderThickness="3"
+                HorizontalAlignment="Center" Margin="0,0,0,18">
+          <Border.RenderTransform>
+            <RotateTransform x:Name="AuthSpinTransform" Angle="0" CenterX="26" CenterY="26"/>
+          </Border.RenderTransform>
+          <Border.Triggers>
+            <EventTrigger RoutedEvent="Loaded">
+              <BeginStoryboard>
+                <Storyboard RepeatBehavior="Forever">
+                  <DoubleAnimation Storyboard.TargetName="AuthSpinTransform"
+                                   Storyboard.TargetProperty="Angle"
+                                   From="0" To="360" Duration="0:0:0.75"/>
+                </Storyboard>
+              </BeginStoryboard>
+            </EventTrigger>
+          </Border.Triggers>
+          <Ellipse Width="10" Height="10" Fill="#38bdf8"
+                   HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,2,2,0"/>
+        </Border>
+        <TextBlock Text="Signing you in…"
+                   FontSize="22" FontWeight="Bold" Foreground="#F8FAFC"
+                   HorizontalAlignment="Center" Margin="0,0,0,8"/>
+        <TextBlock Text="Automatic Google login is running. Please wait."
+                   FontSize="14" Foreground="#94A3B8" TextWrapping="Wrap"
+                   TextAlignment="Center" HorizontalAlignment="Center"/>
+      </StackPanel>
+    </Grid>
+
+    <!-- Shown when captcha requires user interaction (overlay hidden) -->
+    <Border x:Name="CaptchaBanner"
+            Margin="0,88,0,0"
+            VerticalAlignment="Top"
+            Panel.ZIndex="6"
+            Visibility="Collapsed"
+            Background="#FF0F766E"
+            Padding="14,12"
+            IsHitTestVisible="False">
+      <StackPanel>
+        <TextBlock Text="Please solve the captcha"
+                   FontSize="15" FontWeight="SemiBold" Foreground="#ECFDF5"
+                   HorizontalAlignment="Center"/>
+        <TextBlock Text="Complete the challenge below — we will continue signing you in automatically"
+                   FontSize="12" Foreground="#CCFBF1" HorizontalAlignment="Center" Margin="0,4,0,0"
+                   TextWrapping="Wrap" TextAlignment="Center"/>
+      </StackPanel>
+    </Border>
+
     <wv2:WebView2 x:Name="ShellView"
                   DefaultBackgroundColor="#FF07090E"
-                  Height="80"
-                  VerticalAlignment="Top" />
+                  Height="88"
+                  VerticalAlignment="Top"
+                  Panel.ZIndex="10" />
   </Grid>
 </Window>

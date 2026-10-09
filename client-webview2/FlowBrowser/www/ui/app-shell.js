@@ -503,10 +503,13 @@ class FlowBrowserApp {
 
     try {
       await resolveClientApiBase(serverUrl);
+      if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
+      const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
+      const loginBody = { username, password, clientPublicKey };
       const res = await fetch(`${serverUrl}${CLIENT_API}/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify(loginBody)
       });
       let data = await res.json();
 
@@ -516,26 +519,34 @@ class FlowBrowserApp {
           const retry = await fetch(`${serverUrl}${CLIENT_API}/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password })
+            body: JSON.stringify(loginBody)
           });
           data = await retry.json();
         }
       }
 
       if (data && data.success) {
-        // Snapshot BEFORE overwriting â€” used to detect removed Google assignments
+        if (!data.channel?.channelId || !data.channel?.serverPublicKey) {
+          throw new Error('Server did not open a secure credential channel. Update the API.');
+        }
+        await window.FlowCredChannel.establish(data.channel.channelId, data.channel.serverPublicKey);
+        this._credAttemptId = null;
+
+        // Snapshot BEFORE overwriting — used to detect removed Google assignments
         const prevAssignment = this.config?.activeServer || this.activeServer;
 
         this.currentUser = data.user;
         this.currentServers = data.servers;
         this.settings = data.settings;
         this.activeServer = sanitizeServerForStorage(data.activeServer);
+        this._flowLoginPassword = password; // memory only — seals session.bin (Phase 4)
 
-        // Save session â€” never persist Google password
+        // Save session — never persist Google password
         await window.electronAPI.saveSession({
           token: data.token,
           user: data.user,
-          activeServer: sanitizeServerForStorage(data.activeServer)
+          activeServer: sanitizeServerForStorage(data.activeServer),
+          vaultPassword: password
         });
         this.config.authToken = data.token;
         this.config.activeServer = sanitizeServerForStorage(data.activeServer);
@@ -1335,7 +1346,7 @@ class FlowBrowserApp {
           } catch (e) {}
         }
 
-        if (!this.activeServer?.email) return;
+        if (!this.activeServer?.id) return;
         // Selection / sk must run even if a sticky _totpFilling flag was left on
         if (/challenge\/(selection|skotp|sk|iap|dp|ootp)/i.test(live) && !/challenge\/totp/i.test(live)) {
           this._totpFilling = false;
@@ -1350,12 +1361,11 @@ class FlowBrowserApp {
         }
         // Do not re-fill email/password while OTP autofill is in progress
         if (this._totpFilling) return;
-        this.resolveGooglePasswordForFill().then((password) => {
-          this.fillGoogleLoginFields({
-            email: this.activeServer.email,
-            password: password || ''
-          }).catch(() => {});
-        }).catch(() => {});
+        Promise.all([this.resolveGoogleEmailForFill(), this.resolveGooglePasswordForFill()])
+          .then(([email, password]) => {
+            this.fillGoogleLoginFields({ email: email || '', password: password || '' }).catch(() => {});
+          })
+          .catch(() => {});
         this.tryGoogleAutoFill(live);
       } catch (e) {}
     }, 900);
@@ -1445,17 +1455,18 @@ class FlowBrowserApp {
   }
 
   async sendCredentialsToWebview(forceReset = false) {
-    if (this.activeServer && this.activeServer.email) {
+    if (this.activeServer && this.activeServer.id) {
+      const email = await this.resolveGoogleEmailForFill();
       const password = await this.resolveGooglePasswordForFill();
       const payload = {
-        email: this.activeServer.email,
+        email: email || '',
         password: password || '',
         targetUrl: this.activeServer.targetUrl || 'https://flow.google.com',
         forceReset: !!forceReset
       };
       this._captchaActive = false;
       try {
-        console.log('[AppShell] Sending credentials to webview for:', this.activeServer.email, forceReset ? '(forceReset)' : '');
+        console.log('[AppShell] Sending credentials to webview (sealed)', forceReset ? '(forceReset)' : '');
         window.chrome?.webview?.postMessage(JSON.stringify({
           type: 'cmd',
           cmd: 'setFlowCreds',
@@ -1608,7 +1619,7 @@ class FlowBrowserApp {
    * Email/password fill uses fillGoogleLoginFields (proven via CDP).
    */
   async tryGoogleAutoFill(url) {
-    if (!url || !this.activeServer || !this.activeServer.email) return;
+    if (!url || !this.activeServer || !this.activeServer.id) return;
     const href = String(url);
     if (DEBUG_DISABLE_AUTH_OVERLAY) {
       // Keep Google UI visible while debugging
@@ -1741,38 +1752,102 @@ class FlowBrowserApp {
     }
     if (!this._lastDirectFillAt || now - this._lastDirectFillAt > gap) {
       this._lastDirectFillAt = now;
-      this.resolveGooglePasswordForFill().then((password) => {
-        this.fillGoogleLoginFields({
-          email: this.activeServer.email,
-          password: password || ''
-        }).catch(() => {});
-      }).catch(() => {});
+      Promise.all([this.resolveGoogleEmailForFill(), this.resolveGooglePasswordForFill()])
+        .then(([email, password]) => {
+          this.fillGoogleLoginFields({ email: email || '', password: password || '' }).catch(() => {});
+        })
+        .catch(() => {});
     }
+  }
+
+  async ensureCredChannel() {
+    if (!window.FlowCredChannel) throw new Error('FlowCredChannel missing');
+    if (window.FlowCredChannel.channelId && window.FlowCredChannel.aesCryptoKey) return;
+    if (!this.config?.authToken || !this.config?.serverUrl) throw new Error('Not logged in');
+    const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
+    const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/channel-open`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.config.authToken}`
+      },
+      body: JSON.stringify({ clientPublicKey })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!data?.success || !data.channel) {
+      throw new Error((data && data.error) || 'channel-open failed');
+    }
+    await window.FlowCredChannel.establish(data.channel.channelId, data.channel.serverPublicKey);
+    this._credAttemptId = null;
+  }
+
+  async ensureCredAttempt() {
+    await this.ensureCredChannel();
+    if (this._credAttemptId) return this._credAttemptId;
+    const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/extension-start`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.config.authToken}`
+      },
+      body: JSON.stringify({ channelId: window.FlowCredChannel.channelId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!data?.attemptId) throw new Error((data && data.error) || 'extension-start failed');
+    this._credAttemptId = data.attemptId;
+    this._credUsedStages = new Set();
+    return this._credAttemptId;
   }
 
   async fetchGoogleCredential(stage) {
     if (!this.config?.authToken || !this.config?.serverUrl) return '';
     try {
+      if (this._credUsedStages?.has(stage)) {
+        this._credAttemptId = null;
+      }
+      const attemptId = await this.ensureCredAttempt();
+      const { ts, mac } = await window.FlowCredChannel.mac(attemptId, stage);
       const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/extension-step`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.config.authToken}`
         },
-        body: JSON.stringify({ attemptId: 'shell_' + Date.now(), stage })
+        body: JSON.stringify({
+          attemptId,
+          stage,
+          channelId: window.FlowCredChannel.channelId,
+          ts,
+          mac
+        })
       });
       const data = await res.json().catch(() => ({}));
-      if (data && data.value) return String(data.value);
+      if (this._credUsedStages) this._credUsedStages.add(stage);
+      if (data && data.sealed && data.ciphertext) {
+        const plain = await window.FlowCredChannel.decryptSealed(data);
+        return String(plain || '');
+      }
+      // Legacy plaintext must never be accepted
+      if (data && data.value) {
+        console.warn('[AppShell] Rejected plaintext credential response');
+      }
       console.warn('[AppShell] credential not available:', stage, (data && data.error) || res.status);
     } catch (err) {
       console.warn('[AppShell] credential fetch failed:', stage, err.message);
+      this._credAttemptId = null;
     }
     return '';
   }
 
+  async resolveGoogleEmailForFill() {
+    if (this._googleEmailMem) return this._googleEmailMem;
+    const email = await this.fetchGoogleCredential('email');
+    if (email) this._googleEmailMem = email;
+    return email || '';
+  }
+
   /** Fetch Google password from API into memory only (never from activeServer JSON). */
   async resolveGooglePasswordForFill() {
-    // Prefer JIT API â€” do not trust any leftover password field
     const fromApi = await this.fetchGoogleCredential('password');
     if (fromApi) return fromApi;
     return '';
@@ -1783,26 +1858,9 @@ class FlowBrowserApp {
     if (this._otpPushAt && now - this._otpPushAt < 2500) return;
     this._otpPushAt = now;
     this._totpFilling = true;
-    // Keep cover while auto-OTP runs â€” do not lift overlay
     this.postAuthOverlay({ show: true, captcha: false });
     if (!this.config?.authToken) return;
-    let otp = '';
-    try {
-      const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/extension-step`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.config.authToken}`
-        },
-        body: JSON.stringify({ attemptId: 'shell_' + Date.now(), stage: 'otp' })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (data && data.value) otp = String(data.value);
-      else console.warn('[AppShell] OTP not available:', (data && data.error) || res.status);
-    } catch (err) {
-      console.warn('[AppShell] OTP fetch skipped:', err.message);
-      return;
-    }
+    const otp = await this.fetchGoogleCredential('otp');
     if (!otp) return;
     console.log('[AppShell] Pushing backend TOTP, len', otp.length);
     try { this.webview.send('apply-otp', { otp }); } catch (err) {}

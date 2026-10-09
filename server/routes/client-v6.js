@@ -9,21 +9,8 @@ const jwt = require('jsonwebtoken');
 const { authenticator } = require('otplib');
 const db = require('../db');
 const { openFromStorage } = require('../secretsCrypto');
-
-/** Simple per-user rate limit for credential JIT fetches */
-const extensionStepHits = new Map();
-function allowExtensionStep(userId, stage) {
-  const key = `${userId}:${stage}`;
-  const now = Date.now();
-  let bucket = extensionStepHits.get(key);
-  if (!bucket || now - bucket.windowStart > 60_000) {
-    bucket = { windowStart: now, count: 0 };
-  }
-  bucket.count += 1;
-  extensionStepHits.set(key, bucket);
-  const max = stage === 'otp' ? 12 : stage === 'password' ? 6 : 20;
-  return bucket.count <= max;
-}
+const credChannel = require('../credChannel');
+const { allowExtensionStep } = credChannel;
 
 async function jwtSecret() {
   const admin = await db.getAdmin();
@@ -117,12 +104,12 @@ async function resolveActiveServer(user) {
 
 function publicServerPayload(server) {
   if (!server) return null;
-  // NEVER send Google password or TOTP secret to the EXE / web client
+  // Never send Google password/TOTP or full email — email only via sealed extension-step
   return {
     id: server.id,
     name: server.name,
     targetUrl: server.targetUrl,
-    email: server.email || '',
+    emailMasked: credChannel.maskEmail(server.email || ''),
     hasTotp: !!(server.totpSecret && String(server.totpSecret).trim()),
   };
 }
@@ -149,7 +136,7 @@ function generateTotpCode(secret) {
   return { value: code, expiresAt, expiresInSeconds: remaining };
 }
 
-async function loginClientUser(username, password, ip) {
+async function loginClientUser(username, password, ip, req) {
   if (!username || !password) {
     return { status: 400, body: { success: false, error: 'Please enter both username and password' } };
   }
@@ -187,16 +174,42 @@ async function loginClientUser(username, password, ip) {
     };
   }
 
+  // EXE must send clientPublicKey; web dashboard login may omit (no Google secret access).
+  let channel = null;
+  if (req?.body?.clientPublicKey) {
+    try {
+      channel = credChannel.createChannel(user.id, req.body.clientPublicKey, req || { headers: {}, ip });
+    } catch (err) {
+      return {
+        status: err.status || 400,
+        body: {
+          success: false,
+          code: 'CHANNEL_REQUIRED',
+          error: err.message || 'Invalid clientPublicKey.',
+        },
+      };
+    }
+  }
+
   await db.updateUser(user.id, { lastLoginAt: new Date().toISOString() });
   const sessionVersion = await db.bumpSessionVersion(user.id);
   await db.clearPendingGoogleWipe(user.id);
   let freshUser = await db.getUserById(user.id);
-  await db.addLog(user.id, user.username, 'client_login', { ip: ip || '', sessionVersion });
+  await db.addLog(user.id, user.username, 'client_login', {
+    ip: ip || '',
+    sessionVersion,
+    channelId: channel?.channelId || null,
+  });
 
   const token = jwt.sign(
-    { userId: user.id, username: user.username, sv: sessionVersion },
+    {
+      userId: user.id,
+      username: user.username,
+      sv: sessionVersion,
+      ...(channel ? { ch: channel.channelId } : {}),
+    },
     await jwtSecret(),
-    { expiresIn: '30d' }
+    { expiresIn: '12h' }
   );
 
   const availableServers = await getUserServers(freshUser || user);
@@ -216,13 +229,39 @@ async function loginClientUser(username, password, ip) {
       servers: availableServers.map((s) => ({ id: s.id, name: s.name })),
       activeServer: publicServerPayload(activeServer),
       settings: await clientSettingsPayload(),
+      ...(channel
+        ? {
+            channel: {
+              channelId: channel.channelId,
+              serverPublicKey: channel.serverPublicKey,
+              expiresInSeconds: channel.expiresInSeconds,
+            },
+          }
+        : {}),
     },
   };
 }
 
 router.post('/login', async (req, res) => {
-  const result = await loginClientUser(req.body?.username, req.body?.password, req.ip);
+  const result = await loginClientUser(req.body?.username, req.body?.password, req.ip, req);
   return res.status(result.status).json(result.body);
+});
+
+/** Re-key secure channel for an existing session (after EXE restart with saved JWT). */
+router.post('/channel-open', requireUserAuth, async (req, res) => {
+  try {
+    const channel = credChannel.createChannel(req.user.id, req.body?.clientPublicKey, req);
+    res.json({
+      success: true,
+      channel: {
+        channelId: channel.channelId,
+        serverPublicKey: channel.serverPublicKey,
+        expiresInSeconds: channel.expiresInSeconds,
+      },
+    });
+  } catch (err) {
+    res.status(err.status || 400).json({ success: false, error: err.message });
+  }
 });
 
 router.post('/verify-session', requireUserAuth, async (req, res) => {
@@ -260,7 +299,7 @@ router.post('/verify-session', requireUserAuth, async (req, res) => {
       id: s.id,
       name: s.name,
       targetUrl: s.targetUrl,
-      email: s.email,
+      emailMasked: credChannel.maskEmail(s.email),
       hasTotp: !!(s.totpSecret && String(s.totpSecret).trim()),
     })),
     activeServer: publicServerPayload(activeServer),
@@ -352,16 +391,29 @@ router.get('/extension-status', requireUserAuth, async (req, res) => {
     },
     assignedAccount: activeServer
       ? {
-          email: activeServer.email || '',
+          emailMasked: credChannel.maskEmail(activeServer.email || ''),
           hasTotp: !!(activeServer.totpSecret && String(activeServer.totpSecret).trim()),
         }
       : null,
-    servers: availableServers.map((s) => ({ id: s.id, name: s.name, email: s.email || '' })),
+    servers: availableServers.map((s) => ({
+      id: s.id,
+      name: s.name,
+      emailMasked: credChannel.maskEmail(s.email || ''),
+    })),
   });
 });
 
 router.post('/extension-start', requireUserAuth, async (req, res) => {
   const user = req.user;
+  const channelId = String(req.body?.channelId || '').trim();
+  const channel = credChannel.getChannel(channelId, user.id, req);
+  if (!channel) {
+    return res.status(401).json({
+      success: false,
+      code: 'CHANNEL_REQUIRED',
+      error: 'Open a secure channel first (login or /channel-open).',
+    });
+  }
   const activeServer = await resolveActiveServer(user);
   if (!activeServer || !activeServer.email) {
     return res.status(400).json({
@@ -370,50 +422,69 @@ router.post('/extension-start', requireUserAuth, async (req, res) => {
         'No Google account is assigned. Ask the administrator to configure a server with Google credentials.',
     });
   }
-  const attemptId = 'atm_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const attempt = credChannel.createAttempt(user.id, activeServer.id, channelId, req);
   await db.addLog(user.id, user.username, 'extension_login_start', {
     serverId: activeServer.id,
     serverName: activeServer.name,
-    attemptId,
+    attemptId: attempt.attemptId,
+    channelId,
   });
   res.json({
-    attemptId,
-    expiresAt,
+    attemptId: attempt.attemptId,
+    expiresAt: attempt.expiresAt,
     assignedAccount: {
-      email: activeServer.email,
+      emailMasked: credChannel.maskEmail(activeServer.email),
       hasTotp: !!(activeServer.totpSecret && String(activeServer.totpSecret).trim()),
     },
   });
 });
 
 router.post('/extension-step', requireUserAuth, async (req, res) => {
-  const { attemptId, stage } = req.body;
+  const { attemptId, stage, channelId, ts, mac } = req.body || {};
   const user = req.user;
-  if (!allowExtensionStep(user.id, String(stage || ''))) {
+  const stageKey = String(stage || '');
+  if (!allowExtensionStep(user.id, stageKey)) {
     return res.status(429).json({ success: false, error: 'Too many credential requests. Try again shortly.' });
   }
-  const activeServer = await resolveActiveServer(user);
-  if (!activeServer) {
-    return res.status(400).json({ success: false, error: 'No server account assigned.' });
-  }
-  if (!['email', 'password', 'otp'].includes(stage)) {
+  if (!['email', 'password', 'otp'].includes(stageKey)) {
     return res.status(400).json({
       success: false,
       error:
-        stage === 'backup_code'
+        stageKey === 'backup_code'
           ? 'Backup codes are not supported. Configure TOTP on this account in Admin.'
           : 'Invalid credential stage.',
     });
   }
-  // Secrets opened from DB (AES-GCM or legacy plaintext) â€” never cached on client
+  const channel = credChannel.getChannel(String(channelId || ''), user.id, req);
+  if (!channel) {
+    return res.status(401).json({
+      success: false,
+      code: 'CHANNEL_REQUIRED',
+      error: 'Valid secure channel required.',
+    });
+  }
+  if (!credChannel.verifyRequestMac(channel.aesKey, { channelId, attemptId, stage: stageKey, ts, mac })) {
+    return res.status(403).json({
+      success: false,
+      code: 'BAD_MAC',
+      error: 'Request signature invalid or expired.',
+    });
+  }
+  const taken = credChannel.takeAttemptStage(String(attemptId || ''), user.id, stageKey, String(channelId || ''));
+  if (!taken.ok) {
+    return res.status(400).json({ success: false, error: taken.error });
+  }
+  const activeServer = await resolveActiveServer(user);
+  if (!activeServer || activeServer.id !== taken.attempt.serverId) {
+    return res.status(400).json({ success: false, error: 'No server account assigned.' });
+  }
   const googlePassword = openFromStorage(activeServer.password);
   const totpSecret = openFromStorage(activeServer.totpSecret);
   let value = '';
   let expiresAt = null;
-  if (stage === 'email') value = activeServer.email || '';
-  else if (stage === 'password') value = googlePassword || '';
-  else if (stage === 'otp') {
+  if (stageKey === 'email') value = activeServer.email || '';
+  else if (stageKey === 'password') value = googlePassword || '';
+  else if (stageKey === 'otp') {
     const totp = generateTotpCode(totpSecret);
     if (!totp) {
       return res.status(400).json({
@@ -427,16 +498,24 @@ router.post('/extension-step', requireUserAuth, async (req, res) => {
   if (!value) {
     return res.status(400).json({
       success: false,
-      error: `No ${stage} configured for the active server account.`,
+      error: `No ${stageKey} configured for the active server account.`,
     });
   }
   await db.addLog(user.id, user.username, 'extension_step', {
-    attemptId: attemptId || 'unknown',
-    stage,
+    attemptId,
+    stage: stageKey,
     serverId: activeServer.id,
+    channelId,
+    sealed: true,
     ip: req.ip || null,
   });
-  const payload = { value };
+  const sealed = credChannel.sealValue(channel.aesKey, value);
+  const payload = {
+    sealed: true,
+    alg: sealed.alg,
+    nonce: sealed.nonce,
+    ciphertext: sealed.ciphertext,
+  };
   if (expiresAt) payload.expiresAt = expiresAt;
   res.json(payload);
 });
@@ -455,7 +534,7 @@ async function userProfile(user) {
   return {
     ...publicUser(user),
     activeServerName: activeServer ? activeServer.name : null,
-    activeServerEmail: activeServer ? activeServer.email || '' : '',
+    activeServerEmailMasked: activeServer ? credChannel.maskEmail(activeServer.email || '') : '',
   };
 }
 

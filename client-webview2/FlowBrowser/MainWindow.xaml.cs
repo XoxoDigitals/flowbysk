@@ -1621,8 +1621,11 @@ public partial class MainWindow : Window
                     _config.User = user.Clone();
                 if (payload.TryGetProperty("activeServer", out var server))
                     _config.ActiveServer = server.Clone();
+                string? vaultPassword = null;
+                if (payload.TryGetProperty("vaultPassword", out var vp) && vp.ValueKind == JsonValueKind.String)
+                    vaultPassword = vp.GetString();
                 _config.SanitizeSecrets();
-                _config.Save();
+                _config.Save(vaultPassword);
                 return new { success = true };
             }
             case "clearSession":
