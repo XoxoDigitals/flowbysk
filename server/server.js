@@ -29,7 +29,8 @@ const forceUpdatePayload = {
   error: 'Please download the latest Flow Browser.',
 };
 
-/** v2 / v3 are permanently dead — only /api/v4/client is live. */
+/** v2 / v3 are permanently dead — v4 (credential fill) + v5 (cookie inject) are live. */
+const clientV5Routes = require('./routes/client-v5');
 app.use('/api/v2/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -37,6 +38,7 @@ app.use('/api/v3/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
 app.use('/api/v4/client', clientRoutes);
+app.use('/api/v5/client', clientV5Routes);
 app.use('/api/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -158,7 +160,7 @@ db.ready()
       console.log(`Flow Creator Ai API server on port ${PORT}`);
       console.log(`Admin UI:   http://localhost:3100/admin`);
       console.log(`Demo Flow:  http://localhost:${PORT}/demo-flow`);
-      console.log(`Client API: http://localhost:${PORT}/api/v4/client only (v2/v3 → 410 FORCE_UPDATE)`);
+      console.log(`Client API: /api/v4/client (credentials) + /api/v5/client (cookies); v2/v3 → 410`);
       console.log(`Data store: PostgreSQL (Prisma) — data.json is not live`);
       console.log(`====================================================`);
     });

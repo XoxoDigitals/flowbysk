@@ -41,12 +41,17 @@ function currentTotp(secret) {
 
 function sanitizeServerForAdmin(server, assignedUserCount = 0) {
   if (!server) return server;
-  const { totpSecret, ...rest } = server;
+  const { totpSecret, cookieExportEnc, password, ...rest } = server;
   return {
     ...rest,
+    // Keep password available in edit form for v4 accounts; never expose sealed cookie blob
+    password: password || '',
     hasTotp: !!(totpSecret && String(totpSecret).trim()),
     totpSecret: totpSecret || '',
     ...currentTotp(totpSecret),
+    hasCookies: !!server.hasCookies,
+    cookieVersion: Number(server.cookieVersion) || 0,
+    cookieMeta: server.cookieMeta || null,
     assignedUserCount,
   };
 }
@@ -751,6 +756,91 @@ router.delete('/servers/:id', requireAdminAuth, async (req, res) => {
     serverName: srv?.name,
   });
   res.json({ success: true, message: 'Server deleted' });
+});
+
+// ── v5 cookie export management (additive; v4 credential login unchanged) ──
+const CookieCoreV5 = require('../../shared/cookie-core-v5');
+const { sealForStorage } = require('../secretsCrypto');
+
+router.put('/servers/:id/cookies', requireAdminAuth, async (req, res) => {
+  try {
+    const server = await db.getServerById(req.params.id);
+    if (!server) return res.status(404).json({ success: false, error: 'Server not found' });
+
+    const raw = req.body?.cookies !== undefined ? req.body.cookies : req.body;
+    const prepared = CookieCoreV5.prepareFromInput(
+      typeof raw === 'string' ? raw : JSON.stringify(raw)
+    );
+    const nextVersion = (Number(server.cookieVersion) || 0) + 1;
+    const sealed = sealForStorage(JSON.stringify(prepared.cookies.map((c) => {
+      const { valueHash, expected, ...details } = c;
+      return {
+        name: details.name,
+        value: details.value,
+        domain: details.domain || (expected?.hostOnly ? expected.domain : `.${expected.domain}`),
+        path: details.path,
+        secure: details.secure,
+        httpOnly: details.httpOnly,
+        sameSite: details.sameSite,
+        expirationDate: details.expirationDate,
+        hostOnly: expected?.hostOnly,
+        session: details.expirationDate === undefined,
+        partitionKey: details.partitionKey,
+      };
+    })));
+
+    const updated = await db.setServerCookies(req.params.id, {
+      cookieExportEnc: sealed,
+      cookieMeta: prepared.meta,
+      cookieVersion: nextVersion,
+    });
+    if (!updated) return res.status(500).json({ success: false, error: 'Could not store cookies' });
+
+    await db.addLog('admin', 'admin', 'upload_server_cookies', {
+      serverId: req.params.id,
+      serverName: server.name,
+      cookieVersion: nextVersion,
+      count: prepared.meta.count,
+      earliestExpiry: prepared.meta.earliestExpiry,
+      skippedExpired: prepared.meta.skippedExpired,
+    });
+
+    res.json({
+      success: true,
+      server: sanitizeServerForAdmin(updated),
+      meta: prepared.meta,
+      message: `${prepared.meta.count} cookies stored (v${nextVersion}).`,
+    });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message || 'Invalid cookie export' });
+  }
+});
+
+router.get('/servers/:id/cookies/meta', requireAdminAuth, async (req, res) => {
+  const server = await db.getServerById(req.params.id);
+  if (!server) return res.status(404).json({ success: false, error: 'Server not found' });
+  res.json({
+    success: true,
+    serverId: server.id,
+    hasCookies: !!server.hasCookies,
+    cookieVersion: Number(server.cookieVersion) || 0,
+    meta: server.cookieMeta || null,
+  });
+});
+
+router.delete('/servers/:id/cookies', requireAdminAuth, async (req, res) => {
+  const server = await db.getServerById(req.params.id);
+  if (!server) return res.status(404).json({ success: false, error: 'Server not found' });
+  const updated = await db.clearServerCookies(req.params.id);
+  await db.addLog('admin', 'admin', 'clear_server_cookies', {
+    serverId: req.params.id,
+    serverName: server.name,
+  });
+  res.json({
+    success: true,
+    server: sanitizeServerForAdmin(updated || server),
+    message: 'Cookie export cleared',
+  });
 });
 
 router.get('/settings', requireAdminAuth, async (req, res) => {

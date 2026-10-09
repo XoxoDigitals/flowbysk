@@ -290,6 +290,12 @@ class AdminApp {
       const totpBadge = hasTotp
         ? '<span class="badge badge-success">TOTP Ready</span>'
         : '<span class="badge badge-danger">TOTP Missing</span>';
+      const cookieBadge = s.hasCookies
+        ? `<span class="badge badge-success">Cookies v${s.cookieVersion || 1}</span>`
+        : '<span class="badge badge-danger">No cookies (v5)</span>';
+      const earliest = s.cookieMeta?.earliestExpiryIso
+        ? s.cookieMeta.earliestExpiryIso
+        : (s.cookieMeta?.sessionCount ? `${s.cookieMeta.sessionCount} session` : '—');
       return `
         <div class="server-node-card">
           <div class="server-card-header">
@@ -311,6 +317,10 @@ class AdminApp {
           <div class="server-meta-item">
             <span class="server-meta-label">Authenticator:</span>
             <span class="server-meta-val">${totpBadge}</span>
+          </div>
+          <div class="server-meta-item">
+            <span class="server-meta-label">v5 Cookies:</span>
+            <span class="server-meta-val">${cookieBadge} · ${earliest}</span>
           </div>
           <div class="server-card-actions">
             <button class="btn btn-sm btn-secondary" onclick="app.openEditServerModal('${s.id}')">Edit Account</button>

@@ -1,24 +1,25 @@
+/**
+ * Client API v5 — cookie-only Google session (no extension-step credentials).
+ * Mounted at /api/v5/client. v4 remains at /api/v4/client.
+ */
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { authenticator } = require('otplib');
 const db = require('../db');
-const { openFromStorage } = require('../secretsCrypto');
+const CookieCoreV5 = require('../../shared/cookie-core-v5');
 
-/** Simple per-user rate limit for credential JIT fetches */
-const extensionStepHits = new Map();
-function allowExtensionStep(userId, stage) {
-  const key = `${userId}:${stage}`;
+const cookieFetchHits = new Map();
+function allowCookieFetch(userId) {
+  const key = String(userId);
   const now = Date.now();
-  let bucket = extensionStepHits.get(key);
+  let bucket = cookieFetchHits.get(key);
   if (!bucket || now - bucket.windowStart > 60_000) {
     bucket = { windowStart: now, count: 0 };
   }
   bucket.count += 1;
-  extensionStepHits.set(key, bucket);
-  const max = stage === 'otp' ? 20 : stage === 'password' ? 30 : 40;
-  return bucket.count <= max;
+  cookieFetchHits.set(key, bucket);
+  return bucket.count <= 30;
 }
 
 async function jwtSecret() {
@@ -62,13 +63,19 @@ async function requireUserAuth(req, res, next) {
       return res.status(403).json({
         success: false,
         code: 'PLAN_EXPIRED',
-        error: 'Your subscription plan expired on ' + expiry.toLocaleDateString() + '. Please renew your plan.',
+        error:
+          'Your subscription plan expired on ' +
+          expiry.toLocaleDateString() +
+          '. Please renew your plan.',
       });
     }
     req.user = user;
     next();
   } catch (err) {
-    return res.status(401).json({ success: false, error: 'Session expired or invalid. Please log in again.' });
+    return res.status(401).json({
+      success: false,
+      error: 'Session expired or invalid. Please log in again.',
+    });
   }
 }
 
@@ -108,17 +115,24 @@ async function resolveActiveServer(user) {
     const selected = availableServers.find((s) => s.id === user.activeServerId);
     if (selected) return selected;
   }
-  return db.pickLeastLoadedServer(availableServers);
+  // Prefer servers that already have a v5 cookie pack
+  const withCookies = availableServers.filter((s) => s.hasCookies);
+  return db.pickLeastLoadedServer(withCookies.length ? withCookies : availableServers);
 }
 
 function publicServerPayload(server) {
   if (!server) return null;
-  // NEVER send Google email/password/TOTP to the client — secrets only via extension-step
+  const meta = server.cookieMeta || null;
   return {
     id: server.id,
     name: server.name,
     targetUrl: server.targetUrl,
-    hasTotp: !!(server.totpSecret && String(server.totpSecret).trim()),
+    hasCookies: !!server.hasCookies,
+    cookieVersion: Number(server.cookieVersion) || 0,
+    earliestExpiry: meta?.earliestExpiry ?? null,
+    earliestExpiryIso: meta?.earliestExpiryIso ?? null,
+    cookieCount: meta?.count ?? 0,
+    sessionCookieCount: meta?.sessionCount ?? 0,
   };
 }
 
@@ -130,16 +144,9 @@ async function clientSettingsPayload() {
     modelRenames: settings.modelRenames ? settings.modelRenames.filter((m) => m.enabled) : [],
     cssSelectorsToHide: settings.cssSelectorsToHide || [],
     customCss: settings.customCss || '',
+    clientApiVersion: 'v5',
+    authMode: 'cookies',
   };
-}
-
-function generateTotpCode(secret) {
-  const normalized = String(secret || '').replace(/\s+/g, '').toUpperCase();
-  if (!normalized) return null;
-  const code = authenticator.generate(normalized);
-  const remaining = authenticator.timeRemaining();
-  const expiresAt = new Date(Date.now() + remaining * 1000).toISOString();
-  return { value: code, expiresAt, expiresInSeconds: remaining };
 }
 
 async function loginClientUser(username, password, ip) {
@@ -153,7 +160,10 @@ async function loginClientUser(username, password, ip) {
   }
 
   if (!user.isActive || user.banned) {
-    return { status: 403, body: { success: false, error: 'Your account is deactivated. Contact administrator.' } };
+    return {
+      status: 403,
+      body: { success: false, error: 'Your account is deactivated. Contact administrator.' },
+    };
   }
 
   const now = new Date();
@@ -184,10 +194,10 @@ async function loginClientUser(username, password, ip) {
   const sessionVersion = await db.bumpSessionVersion(user.id);
   await db.clearPendingGoogleWipe(user.id);
   let freshUser = await db.getUserById(user.id);
-  await db.addLog(user.id, user.username, 'client_login', { ip: ip || '', sessionVersion });
+  await db.addLog(user.id, user.username, 'client_login_v5', { ip: ip || '', sessionVersion });
 
   const token = jwt.sign(
-    { userId: user.id, username: user.username, sv: sessionVersion },
+    { userId: user.id, username: user.username, sv: sessionVersion, api: 'v5' },
     await jwtSecret(),
     { expiresIn: '30d' }
   );
@@ -206,7 +216,12 @@ async function loginClientUser(username, password, ip) {
       success: true,
       token,
       user: publicUser(freshUser || user),
-      servers: availableServers.map((s) => ({ id: s.id, name: s.name })),
+      servers: availableServers.map((s) => ({
+        id: s.id,
+        name: s.name,
+        hasCookies: !!s.hasCookies,
+        cookieVersion: Number(s.cookieVersion) || 0,
+      })),
       activeServer: publicServerPayload(activeServer),
       settings: await clientSettingsPayload(),
     },
@@ -253,7 +268,8 @@ router.post('/verify-session', requireUserAuth, async (req, res) => {
       id: s.id,
       name: s.name,
       targetUrl: s.targetUrl,
-      hasTotp: !!(s.totpSecret && String(s.totpSecret).trim()),
+      hasCookies: !!s.hasCookies,
+      cookieVersion: Number(s.cookieVersion) || 0,
     })),
     activeServer: publicServerPayload(activeServer),
     settings: await clientSettingsPayload(),
@@ -275,7 +291,7 @@ router.post('/switch-server', requireUserAuth, async (req, res) => {
     return res.status(404).json({ success: false, error: 'No active server nodes available.' });
   }
   await db.updateUser(user.id, { activeServerId: targetServer.id });
-  await db.addLog(user.id, user.username, 'switch_server', {
+  await db.addLog(user.id, user.username, 'switch_server_v5', {
     serverId: targetServer.id,
     serverName: targetServer.name,
   });
@@ -288,14 +304,16 @@ router.post('/request-server-change', requireUserAuth, async (req, res) => {
   if (!availableServers.length) {
     return res.status(404).json({ success: false, error: 'No active server nodes available.' });
   }
-  const targetServer = await db.pickLeastLoadedServer(availableServers, user.id);
+  const withCookies = availableServers.filter((s) => s.hasCookies);
+  const pool = withCookies.length ? withCookies : availableServers;
+  const targetServer = await db.pickLeastLoadedServer(pool, user.id);
   if (!targetServer) {
     return res.status(404).json({ success: false, error: 'No active server nodes available.' });
   }
   const current = await resolveActiveServer(user);
   if (!current || current.id !== targetServer.id) {
     await db.updateUser(user.id, { activeServerId: targetServer.id });
-    await db.addLog(user.id, user.username, 'request_server_change', {
+    await db.addLog(user.id, user.username, 'request_server_change_v5', {
       serverId: targetServer.id,
       serverName: targetServer.name,
       loadBalanced: true,
@@ -306,7 +324,7 @@ router.post('/request-server-change', requireUserAuth, async (req, res) => {
     id: s.id,
     name: s.name,
     users: users.filter((u) => u.activeServerId === s.id).length,
-    hasTotp: !!(s.totpSecret && String(s.totpSecret).trim()),
+    hasCookies: !!s.hasCookies,
   }));
   res.json({ success: true, server: publicServerPayload(targetServer), load });
 });
@@ -325,119 +343,71 @@ router.post('/use-credit', requireUserAuth, async (req, res) => {
   res.json(body);
 });
 
-router.get('/extension-status', requireUserAuth, async (req, res) => {
+/**
+ * Fetch prepared Google cookies for the assigned shared account.
+ * Client MUST keep plaintext only in RAM and wipe Chromium on close.
+ */
+router.get('/session-cookies', requireUserAuth, async (req, res) => {
   const user = req.user;
-  const availableServers = await getUserServers(user);
-  const activeServer = await resolveActiveServer(user);
-  const now = Date.now();
-  const expiry = new Date(user.planExpiry).getTime();
-  const daysRemaining = Math.max(0, Math.ceil((expiry - now) / (1000 * 60 * 60 * 24)));
-  res.json({
-    connected: true,
-    user: {
-      name: user.username,
-      username: user.username,
-      plan: daysRemaining > 0 ? 'Active' : 'Expired',
-      planExpiresAt: user.planExpiry,
-      daysRemaining,
-      credits: effectiveCredits(user),
-    },
-    assignedAccount: activeServer
-      ? {
-          hasTotp: !!(activeServer.totpSecret && String(activeServer.totpSecret).trim()),
-        }
-      : null,
-    servers: availableServers.map((s) => ({ id: s.id, name: s.name })),
-  });
-});
-
-router.post('/extension-start', requireUserAuth, async (req, res) => {
-  const user = req.user;
-  const activeServer = await resolveActiveServer(user);
-  if (!activeServer || !activeServer.email) {
-    return res.status(400).json({
+  if (!allowCookieFetch(user.id)) {
+    return res.status(429).json({
       success: false,
-      error:
-        'No Google account is assigned. Ask the administrator to configure a server with Google credentials.',
+      error: 'Too many cookie requests. Try again shortly.',
     });
   }
-  const attemptId = 'atm_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-  await db.addLog(user.id, user.username, 'extension_login_start', {
-    serverId: activeServer.id,
-    serverName: activeServer.name,
-    attemptId,
-  });
-  res.json({
-    attemptId,
-    expiresAt,
-    assignedAccount: {
-      hasTotp: !!(activeServer.totpSecret && String(activeServer.totpSecret).trim()),
-    },
-  });
-});
 
-router.post('/extension-step', requireUserAuth, async (req, res) => {
-  const { attemptId, stage } = req.body;
-  const user = req.user;
-  if (!allowExtensionStep(user.id, String(stage || ''))) {
-    return res.status(429).json({ success: false, error: 'Too many credential requests. Try again shortly.' });
-  }
   const activeServer = await resolveActiveServer(user);
   if (!activeServer) {
-    return res.status(400).json({ success: false, error: 'No server account assigned.' });
-  }
-  if (!['email', 'password', 'otp'].includes(stage)) {
     return res.status(400).json({
       success: false,
-      error:
-        stage === 'backup_code'
-          ? 'Backup codes are not supported. Configure TOTP on this account in Admin.'
-          : 'Invalid credential stage.',
+      error: 'No Google account is assigned. Ask the administrator to configure a server.',
     });
   }
-  // Secrets opened from DB (AES-GCM or legacy plaintext) — never cached on client
-  const googlePassword = openFromStorage(activeServer.password);
-  const totpSecret = openFromStorage(activeServer.totpSecret);
-  let value = '';
-  let expiresAt = null;
-  if (stage === 'email') value = activeServer.email || '';
-  else if (stage === 'password') value = googlePassword || '';
-  else if (stage === 'otp') {
-    const totp = generateTotpCode(totpSecret);
-    if (!totp) {
-      return res.status(400).json({
-        success: false,
-        error: 'TOTP is not configured for this Google account. Add the authenticator secret in Admin.',
-      });
-    }
-    value = totp.value;
-    expiresAt = totp.expiresAt;
-  }
-  if (!value) {
+  if (!activeServer.hasCookies) {
     return res.status(400).json({
       success: false,
-      error: `No ${stage} configured for the active server account.`,
+      error: 'Admin must upload cookies for this account before v5 clients can connect.',
     });
   }
-  await db.addLog(user.id, user.username, 'extension_step', {
-    attemptId: attemptId || 'unknown',
-    stage,
+
+  const pack = await db.getServerCookieExportPlain(activeServer.id);
+  if (!pack?.cookiesJson) {
+    return res.status(400).json({
+      success: false,
+      error: 'Admin must upload cookies for this account before v5 clients can connect.',
+    });
+  }
+
+  let prepared;
+  try {
+    prepared = CookieCoreV5.prepareFromInput(pack.cookiesJson);
+  } catch (err) {
+    return res.status(400).json({
+      success: false,
+      error: err.message || 'Stored cookie export is invalid or expired.',
+    });
+  }
+
+  const webviewCookies = CookieCoreV5.toWebView2Cookies(prepared.prepared);
+
+  await db.addLog(user.id, user.username, 'cookie_fetch', {
     serverId: activeServer.id,
+    serverName: activeServer.name,
+    cookieVersion: pack.cookieVersion,
+    count: prepared.meta.count,
+    earliestExpiry: prepared.meta.earliestExpiry,
     ip: req.ip || null,
   });
-  const payload = { value };
-  if (expiresAt) payload.expiresAt = expiresAt;
-  res.json(payload);
-});
 
-router.post('/extension-finish', requireUserAuth, async (req, res) => {
-  const { attemptId, outcome } = req.body;
-  await db.addLog(req.user.id, req.user.username, 'extension_login_finish', {
-    attemptId: attemptId || 'unknown',
-    outcome: outcome || 'unknown',
+  res.json({
+    success: true,
+    serverId: activeServer.id,
+    serverName: activeServer.name,
+    targetUrl: activeServer.targetUrl || 'https://flow.google.com',
+    version: pack.cookieVersion,
+    meta: prepared.meta,
+    cookies: webviewCookies,
   });
-  res.json({ success: true });
 });
 
 async function userProfile(user) {
@@ -471,6 +441,29 @@ router.put('/profile', requireUserAuth, async (req, res) => {
 router.get('/activity', requireUserAuth, async (req, res) => {
   const logs = (await db.getLogs(500)).filter((log) => log.userId === req.user.id).slice(0, 80);
   res.json({ success: true, logs });
+});
+
+// Explicitly refuse credential JIT endpoints on v5
+router.post('/extension-start', (_req, res) => {
+  res.status(410).json({
+    success: false,
+    code: 'USE_COOKIES',
+    error: 'v5 uses cookie injection only. Update Flow Browser.',
+  });
+});
+router.post('/extension-step', (_req, res) => {
+  res.status(410).json({
+    success: false,
+    code: 'USE_COOKIES',
+    error: 'v5 uses cookie injection only. Update Flow Browser.',
+  });
+});
+router.post('/extension-finish', (_req, res) => {
+  res.status(410).json({
+    success: false,
+    code: 'USE_COOKIES',
+    error: 'v5 uses cookie injection only. Update Flow Browser.',
+  });
 });
 
 module.exports = router;

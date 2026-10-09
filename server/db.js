@@ -56,10 +56,9 @@ async function setJsonSetting(key, value) {
 }
 
 function normalizeClientApiVersion(value) {
-  const v = String(value || '').trim().toLowerCase();
-  if (v === 'v4') return 'v4';
-  if (v === 'v3') return 'v3';
-  return 'v2';
+  // v2/v3 permanently retired — always v4
+  void value;
+  return 'v4';
 }
 
 async function getRuntime() {
@@ -877,6 +876,9 @@ class Database {
             })
             .catch((err) => console.warn('[db] secret migrate failed', s.id, err.message));
         }
+        const cookieMeta = s.cookieMeta && typeof s.cookieMeta === 'object' ? s.cookieMeta : null;
+        const cookieVersion = Number(s.cookieVersion) || 0;
+        const hasCookies = !!(s.cookieExportEnc && String(s.cookieExportEnc).trim()) && cookieVersion > 0;
         return {
           id: s.id,
           name: s.name,
@@ -886,6 +888,11 @@ class Database {
           totpSecret: totpNorm,
           isActive: s.isActive !== false,
           createdAt: s.createdAt.toISOString(),
+          hasCookies,
+          cookieVersion,
+          cookieMeta,
+          // sealed blob only for internal helpers — stripped by sanitizeServerForAdmin
+          cookieExportEnc: s.cookieExportEnc || null,
         };
       });
     } catch (err) {
@@ -900,6 +907,50 @@ class Database {
   async getServerById(id) {
     const rows = await this.getServers();
     return rows.find((s) => s.id === id) || null;
+  }
+
+  /** v5: store sealed cookie export + public meta (no plaintext in meta). */
+  async setServerCookies(id, { cookieExportEnc, cookieMeta, cookieVersion }) {
+    await this.ready();
+    try {
+      await prisma.sharedGoogleAccount.update({
+        where: { id },
+        data: {
+          cookieExportEnc: cookieExportEnc || null,
+          cookieMeta: cookieMeta || null,
+          cookieVersion: Number(cookieVersion) || 0,
+        },
+      });
+    } catch {
+      return null;
+    }
+    return this.getServerById(id);
+  }
+
+  async clearServerCookies(id) {
+    return this.setServerCookies(id, {
+      cookieExportEnc: null,
+      cookieMeta: null,
+      cookieVersion: 0,
+    });
+  }
+
+  /** Opens sealed cookie JSON for v5 client inject — never log the return value. */
+  async getServerCookieExportPlain(id) {
+    await this.ready();
+    try {
+      const row = await prisma.sharedGoogleAccount.findUnique({ where: { id } });
+      if (!row?.cookieExportEnc) return null;
+      const plain = openFromStorage(row.cookieExportEnc);
+      if (!plain) return null;
+      return {
+        cookiesJson: plain,
+        cookieVersion: Number(row.cookieVersion) || 0,
+        cookieMeta: row.cookieMeta && typeof row.cookieMeta === 'object' ? row.cookieMeta : null,
+      };
+    } catch {
+      return null;
+    }
   }
 
   async createServer(serverData) {

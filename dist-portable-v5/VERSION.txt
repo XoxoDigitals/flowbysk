@@ -1,0 +1,6 @@
+5.0.0
+Cookie-only Google session injection
+Client API: /api/v5/client
+Built: 2026-10-09 02:55:44
+EXE: Flow Browser.exe (self-contained win-x64)
+Launcher: Launch Flow Browser v5.bat (sets FLOW_V5_EPHEMERAL=1)

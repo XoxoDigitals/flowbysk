@@ -16,3 +16,14 @@ _recover/
 # Build artifact from single-file embed
 **/www.zip
 
+
+# v5 portable sources (EXE still ignored via **/*.exe)
+dist-portable-v5/**/*.exe
+dist-portable-v5/**/*.zip
+dist-portable-v5/**/*.pdb
+!dist-portable-v5/
+!dist-portable-v5/www/
+!dist-portable-v5/www/**
+!dist-portable-v5/VERSION.txt
+!dist-portable-v5/*.bat
+

@@ -400,8 +400,38 @@
           </div>
         </div>
         <small class="helper-text" style="display:block; margin-top:-0.5rem; margin-bottom:1rem; color:#94a3b8;">
-          Email, password, and TOTP are used by Flow Browser auto-login (no cookie injection).
+          Email, password, and TOTP are used by Flow Browser <strong>v4</strong> auto-login.
+          <strong>v5</strong> portable clients use cookie injection only (section below).
         </small>
+
+        <!-- v5 cookie pack (additive) -->
+        <div class="form-group" id="server-cookies-v5-panel" style="margin-top:1rem; padding-top:1rem; border-top:1px solid rgba(148,163,184,0.25);">
+          <label>v5 Cookie Export (JSON)</label>
+          <small class="helper-text" id="server-cookies-version" style="display:block; margin-bottom:0.5rem;">Save account first, then upload cookies</small>
+          <textarea id="server-form-cookies-json" rows="6" spellcheck="false" placeholder='Paste EditThisCookie / browser export JSON array…' style="font-family:ui-monospace,monospace; font-size:0.8rem; width:100%;"></textarea>
+          <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-top:0.75rem;">
+            <button type="button" class="btn btn-primary" id="btn-upload-server-cookies">Upload / replace cookies</button>
+            <button type="button" class="btn btn-secondary" id="btn-refresh-server-cookies-meta">Refresh sorted list</button>
+            <button type="button" class="btn btn-secondary" id="btn-clear-server-cookies">Clear cookies</button>
+          </div>
+          <p id="server-cookies-summary" class="helper-text" style="margin-top:0.75rem;"></p>
+          <div style="max-height:220px; overflow:auto; margin-top:0.5rem;">
+            <table class="data-table" style="width:100%; font-size:0.8rem;">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Domain / path</th>
+                  <th>Expires</th>
+                  <th>SHA-256</th>
+                </tr>
+              </thead>
+              <tbody id="server-cookies-tbody">
+                <tr><td colspan="4" class="text-center py-2">No cookies uploaded yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <div class="form-group checkbox-group">
           <label>
             <input type="checkbox" id="server-form-active" checked>
@@ -420,5 +450,6 @@
   <div id="toast-container"></div>
 
   <script src="app.js"></script>
+  <script src="admin-servers-cookies-v5.js"></script>
 </body>
 </html>

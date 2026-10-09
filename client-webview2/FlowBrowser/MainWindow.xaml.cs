@@ -25,6 +25,8 @@ public partial class MainWindow : Window
     string _flowInject = "";
     bool _shellReady;
     bool _flowReady;
+    /// <summary>When FLOW_V5_EPHEMERAL=1, Flow profile is a temp folder deleted on close.</summary>
+    bool _ephemeralFlowProfile;
     string _shellMode = "full";
     string? _flowCredEmail;
     string? _flowCredPassword;
@@ -89,6 +91,23 @@ public partial class MainWindow : Window
                 ApplyAuthOverlayState();
         };
         Loaded += async (_, _) => await InitAsync();
+        Closing += (_, _) =>
+        {
+            try
+            {
+                // Best-effort wipe of Google session when the window closes (v5 RAM policy)
+                if (FlowView?.CoreWebView2 != null)
+                {
+                    _ = ClearFlowSessionAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("Closing wipe: " + ex.Message);
+            }
+            if (_ephemeralFlowProfile)
+                CookieInjectHost.TryDeleteDirectory(_flowUserData);
+        };
     }
 
     async Task InitAsync()
@@ -101,11 +120,16 @@ public partial class MainWindow : Window
         DataPaths.EnsureTree();
         DataPaths.MigrateFromLegacy();
         _shellUserData = DataPaths.ShellProfile;
-        _flowUserData = DataPaths.FlowProfile;
+        _ephemeralFlowProfile =
+            string.Equals(Environment.GetEnvironmentVariable("FLOW_V5_EPHEMERAL"), "1", StringComparison.Ordinal) ||
+            string.Equals(Environment.GetEnvironmentVariable("FLOW_V5_EPHEMERAL"), "true", StringComparison.OrdinalIgnoreCase);
+        _flowUserData = _ephemeralFlowProfile
+            ? CookieInjectHost.CreateEphemeralFlowProfile()
+            : DataPaths.FlowProfile;
         Directory.CreateDirectory(_shellUserData);
         Directory.CreateDirectory(_flowUserData);
         DataPaths.TryHide(_shellUserData);
-        DataPaths.TryHide(_flowUserData);
+        if (!_ephemeralFlowProfile) DataPaths.TryHide(_flowUserData);
 
 #if DEBUG
         var flowOpts = new CoreWebView2EnvironmentOptions(
@@ -1630,6 +1654,25 @@ public partial class MainWindow : Window
             case "clearPartitionSession":
                 await ClearFlowSessionAsync();
                 return new { success = true };
+            case "injectCookies":
+            {
+                if (FlowView.CoreWebView2 == null)
+                    throw new InvalidOperationException("Flow WebView is not ready.");
+                var result = await CookieInjectHost.InjectAsync(FlowView.CoreWebView2, payload);
+                // On failure wipe partial session so the profile is not left half-authenticated
+                try
+                {
+                    var json = JsonSerializer.Serialize(result);
+                    using var doc = JsonDocument.Parse(json);
+                    if (doc.RootElement.TryGetProperty("success", out var ok) &&
+                        ok.ValueKind == JsonValueKind.False)
+                    {
+                        await ClearFlowSessionAsync();
+                    }
+                }
+                catch { /* result shape still returned to shell */ }
+                return result;
+            }
             case "minimize":
                 WindowState = WindowState.Minimized;
                 return new { success = true };
