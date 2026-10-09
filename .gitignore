@@ -20,3 +20,9 @@ _recover/
 **/www.vault
 **/www.zip
 
+
+client-webview2/**/bin/
+client-webview2/**/obj/
+client-webview2/**/www-packed/
+client-webview2/**/tools/node_modules/
+

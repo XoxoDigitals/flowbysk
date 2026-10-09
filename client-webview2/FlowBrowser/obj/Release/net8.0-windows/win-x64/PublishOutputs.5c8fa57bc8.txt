@@ -1,5 +1,0 @@
-c:\Users\Saboo\Downloads\Flow bro\dist-portable-v6\FlowBrowser-6.0.1-publish\Flow Browser.pdb
-c:\Users\Saboo\Downloads\Flow bro\dist-portable-v6\FlowBrowser-6.0.1-publish\Microsoft.Web.WebView2.Core.xml
-c:\Users\Saboo\Downloads\Flow bro\dist-portable-v6\FlowBrowser-6.0.1-publish\Microsoft.Web.WebView2.WinForms.xml
-c:\Users\Saboo\Downloads\Flow bro\dist-portable-v6\FlowBrowser-6.0.1-publish\Microsoft.Web.WebView2.Wpf.xml
-c:\Users\Saboo\Downloads\Flow bro\dist-portable-v6\FlowBrowser-6.0.1-publish\Flow Browser.exe
