@@ -1,13 +1,11 @@
-// Flow Browser App Shell Controller
+﻿// Flow Browser App Shell Controller
 
-/** Active client API base — resolved from /api/public/branding (v2 / v3 / v4). */
-let CLIENT_API = '/api/v4/client';
+/** Active client API base — v6 traditional login only. */
+let CLIENT_API = '/api/v6/client';
 
 function normalizeClientApiVersion(value) {
-  const v = String(value || '').toLowerCase();
-  if (v === 'v4') return 'v4';
-  if (v === 'v3') return 'v3';
-  return 'v2';
+  void value;
+  return 'v6';
 }
 
 async function resolveClientApiBase(serverUrl, force = false) {
@@ -110,7 +108,7 @@ class FlowBrowserApp {
     this.inputPassword = document.getElementById('client-password');
     this.btnLoginSubmit = document.getElementById('btn-login-submit');
 
-    // Server Config (hidden from users — URL comes from AppConfig)
+    // Server Config (hidden from users â€” URL comes from AppConfig)
     this.btnToggleConfig = document.getElementById('btn-toggle-server-config');
     this.serverConfigBox = document.getElementById('server-config-box');
     this.inputServerUrl = document.getElementById('input-server-url');
@@ -279,11 +277,11 @@ class FlowBrowserApp {
         this.pushTotpFromBackend();
       } else if (event.channel === 'auth:stuck-pwd') {
         if (document.documentElement.classList.contains('platform-android')) {
-          console.warn('[AppShell] stuck-pwd on Android — skip cache reload');
+          console.warn('[AppShell] stuck-pwd on Android â€” skip cache reload');
           return;
         }
         // Google SPA stuck: URL is /challenge/pwd but email UI still showing
-        console.warn('[AppShell] Stuck password UI — reloadIgnoringCache');
+        console.warn('[AppShell] Stuck password UI â€” reloadIgnoringCache');
         try {
           if (typeof this.webview.reloadIgnoringCache === 'function') this.webview.reloadIgnoringCache();
           else this.webview.reload();
@@ -340,7 +338,7 @@ class FlowBrowserApp {
 
     this.webview.addEventListener('did-fail-load', (e) => {
       console.error('[Webview] did-fail-load:', e.errorCode, e.errorDescription, e.validatedURL);
-      // -3 aborted / ConnectionAborted — ignore (URL switches, shell mode)
+      // -3 aborted / ConnectionAborted â€” ignore (URL switches, shell mode)
       const desc = String(e.errorDescription || '');
       if (e.errorCode === -3 || /abort|cancel/i.test(desc)) return;
       this.updateDebugUrl(e.validatedURL || this.webview.src || '');
@@ -405,7 +403,7 @@ class FlowBrowserApp {
         this.inputUsername.value = 'user1';
       }
 
-      // Prefer saved session (v2/v3 verify) — only show login if token missing / rejected
+      // Prefer saved session (v2/v3 verify) â€” only show login if token missing / rejected
       this.hideLoadingOverlay();
       if (!DEBUG_ALWAYS_ASK_LOGIN && this.config.authToken) {
         const ok = await this.verifyExistingSession();
@@ -525,7 +523,7 @@ class FlowBrowserApp {
       }
 
       if (data && data.success) {
-        // Snapshot BEFORE overwriting — used to detect removed Google assignments
+        // Snapshot BEFORE overwriting â€” used to detect removed Google assignments
         const prevAssignment = this.config?.activeServer || this.activeServer;
 
         this.currentUser = data.user;
@@ -533,7 +531,7 @@ class FlowBrowserApp {
         this.settings = data.settings;
         this.activeServer = sanitizeServerForStorage(data.activeServer);
 
-        // Save session — never persist Google password
+        // Save session â€” never persist Google password
         await window.electronAPI.saveSession({
           token: data.token,
           user: data.user,
@@ -621,7 +619,7 @@ class FlowBrowserApp {
     })();
     const drawerOpen = [this.downloadDrawer, this.extensionDrawer, this.veoAutoDrawer]
       .some((d) => d && !d.classList.contains('hidden'));
-    // Do not treat loading overlay as full — collapsing Flow aborts navigations
+    // Do not treat loading overlay as full â€” collapsing Flow aborts navigations
     window.electronAPI.setShellMode?.(
       loginVisible || drawerOpen || settingsOpen || confirmOpen ? 'full' : 'chrome'
     );
@@ -667,9 +665,9 @@ class FlowBrowserApp {
     });
     if (!ok) return;
 
-    this.showLoadingOverlay('Clearing cookies…', 'Wiping Google accounts and browsing data', 12000);
+    this.showLoadingOverlay('Clearing cookiesâ€¦', 'Wiping Google accounts and browsing data', 12000);
     this.hideGoogleAuthBanner();
-    // Always drop sticky auth cover first — wipe must not leave a looping overlay
+    // Always drop sticky auth cover first â€” wipe must not leave a looping overlay
     this.postAuthOverlay({ show: false, done: true });
     this._captchaActive = false;
     this._pendingFreshLogin = false;
@@ -679,7 +677,7 @@ class FlowBrowserApp {
 
       const loggedIn = !!(this.currentUser && this.config?.authToken);
       if (!loggedIn) {
-        // Not signed into Flow Creator — wipe only; do not start Google login / overlay
+        // Not signed into Flow Creator â€” wipe only; do not start Google login / overlay
         this.notify('Cookies cleared');
         try {
           if (typeof this.webview.loadURL === 'function') this.webview.loadURL('about:blank');
@@ -693,7 +691,7 @@ class FlowBrowserApp {
 
       this._pendingFreshLogin = true;
       this._pendingFreshLoginAt = Date.now();
-      this.notify('Cookies cleared — signing in fresh…');
+      this.notify('Cookies cleared â€” signing in freshâ€¦');
 
       if (this.activeServer?.id) {
         await this.launchServerWorkspace(this.activeServer.id, true);
@@ -703,7 +701,7 @@ class FlowBrowserApp {
           await this.launchServerWorkspace(this.activeServer.id, true);
         } else {
           this.hideLoadingOverlay();
-          this.notify('No Google account assigned — cookies cleared only', true);
+          this.notify('No Google account assigned â€” cookies cleared only', true);
           this.postAuthOverlay({ show: false, done: true });
           try {
             if (typeof this.webview.loadURL === 'function') this.webview.loadURL('about:blank');
@@ -784,7 +782,7 @@ class FlowBrowserApp {
     const prevIdMissing = !!(prevId && !list.some((s) => s.id === prevId));
     const reassigned = !!(prevId && nextId && prevId !== nextId);
     const emailChanged = !!(prevEmail && nextEmail && prevEmail !== nextEmail);
-    // Do NOT wipe solely because there was no prior assignment — that forced
+    // Do NOT wipe solely because there was no prior assignment â€” that forced
     // AddSession on every cold login and fought OAuth return (Google login loop).
 
     const mustWipe = prevIdMissing || reassigned || emailChanged;
@@ -795,8 +793,8 @@ class FlowBrowserApp {
     });
     this.notify(
       prevIdMissing
-        ? 'Old Google account removed from server — clearing browser…'
-        : 'Refreshing Google session for your assigned account…',
+        ? 'Old Google account removed from server â€” clearing browserâ€¦'
+        : 'Refreshing Google session for your assigned accountâ€¦',
       true
     );
     try {
@@ -827,7 +825,7 @@ class FlowBrowserApp {
 
     if (prevId && !prevStillListed) {
       console.warn('[AppShell] Assigned Google account removed:', prevId);
-      this.notify('Shared Google account was removed — switching…', true);
+      this.notify('Shared Google account was removed â€” switchingâ€¦', true);
       try {
         await window.electronAPI.clearPartitionSession();
       } catch (e) {}
@@ -885,7 +883,7 @@ class FlowBrowserApp {
           await this.forceLogout((data && data.error) || 'Please download the latest Flow Browser.');
           return;
         }
-        // Only explicit session codes — bare 401/403 during blips must not clear Google cookies
+        // Only explicit session codes â€” bare 401/403 during blips must not clear Google cookies
         if (
           code === 'SESSION_REPLACED' ||
           code === 'NO_CREDITS' ||
@@ -954,7 +952,7 @@ class FlowBrowserApp {
 
   updateToolbarUserInfo() {
     if (!this.currentUser) return;
-    // Negative credits allowed server-side — UI shows/gates as 0
+    // Negative credits allowed server-side â€” UI shows/gates as 0
     const raw = Number(this.currentUser.credits);
     const shown = Number.isFinite(raw) ? Math.max(0, raw) : 0;
     this.creditsVal.textContent = shown.toLocaleString();
@@ -1049,7 +1047,7 @@ class FlowBrowserApp {
           this.handleClearCookies();
           break;
         case 'downloads':
-          // Keep shell full while opening downloads — closing settings first
+          // Keep shell full while opening downloads â€” closing settings first
           // collapsed the shell strip and hid the drawer under Flow.
           this.downloadDrawer?.classList.remove('hidden');
           this.androidSettingsSheet.classList.add('hidden');
@@ -1083,7 +1081,7 @@ class FlowBrowserApp {
     const btn = this.btnRequestServerChange;
     if (fromButton && btn) {
       btn.disabled = true;
-      btn.textContent = 'Checking…';
+      btn.textContent = 'Checkingâ€¦';
     }
     try {
       const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/request-server-change`, {
@@ -1195,7 +1193,7 @@ class FlowBrowserApp {
       const cont = new URL(href).searchParams.get('continue');
       if (cont && /^https:\/\//i.test(cont)) dest = cont;
     } catch (e) {}
-    console.warn('[AppShell] CheckCookie/LoginDone →', dest);
+    console.warn('[AppShell] CheckCookie/LoginDone â†’', dest);
     this._totpFilling = false;
     this._pendingFreshLogin = false;
     this._freshLoginStarted = true;
@@ -1212,7 +1210,7 @@ class FlowBrowserApp {
     if (!this._pendingFreshLogin) return;
     const href = String(url || '');
     if (!href.includes('flow.google.com') && !href.includes('labs.google')) return;
-    // Already bounced to Google once this cycle — never schedule again
+    // Already bounced to Google once this cycle â€” never schedule again
     if (this._freshLoginStarted) return;
     if (this._freshLoginTimer) clearTimeout(this._freshLoginTimer);
     this._freshLoginTimer = setTimeout(() => {
@@ -1223,13 +1221,13 @@ class FlowBrowserApp {
       const googleLoginUrl =
         'https://accounts.google.com/AddSession?hl=en&continue=' +
         encodeURIComponent(continueUrl);
-      console.log('[AppShell] Fresh Google login in webview for', this.activeServer?.email, '→', googleLoginUrl);
+      console.log('[AppShell] Fresh Google login in webview for', this.activeServer?.email, 'â†’', googleLoginUrl);
       this.loadTargetInWebview(googleLoginUrl);
     }, 700);
   }
 
   navigateFromSearchBar() {
-    // URL bar is display-only — never navigate from it
+    // URL bar is display-only â€” never navigate from it
     return;
   }
 
@@ -1306,7 +1304,7 @@ class FlowBrowserApp {
           return;
         }
 
-        // Recaptcha challenge — no fills, no overlays, keep cover lifted
+        // Recaptcha challenge â€” no fills, no overlays, keep cover lifted
         if (/challenge\/recaptcha|\/recaptcha/i.test(live)) {
           this._captchaActive = true;
           this.showGoogleAuthBanner('Please solve the captcha below', true);
@@ -1325,7 +1323,7 @@ class FlowBrowserApp {
 
         // Keep Google loading overlay visible (except captcha)
         if (!this._captchaActive) {
-          this.showGoogleAuthBanner('Signing you in automatically…', false);
+          this.showGoogleAuthBanner('Signing you in automaticallyâ€¦', false);
           try {
             this.webview.executeJavaScript(`(() => {
               try {
@@ -1368,7 +1366,7 @@ class FlowBrowserApp {
     if (!url || url.includes('demo-flow') || url.startsWith('file:')) {
       url = 'https://flow.google.com/';
     }
-    // Never yank the tab to Flow while Google TOTP / sign-in is still open —
+    // Never yank the tab to Flow while Google TOTP / sign-in is still open â€”
     // EXCEPT CheckCookie/LoginDone (login finished; continue= must reach Flow).
     try {
       const live = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || '');
@@ -1380,7 +1378,7 @@ class FlowBrowserApp {
         return;
       }
     } catch (e) {}
-    // Only Flow workspace + Google login — block mail/drive/myaccount/etc.
+    // Only Flow workspace + Google login â€” block mail/drive/myaccount/etc.
     if (!this.isAllowedFlowUrl(url)) {
       console.warn('[AppShell] Blocked navigation to', url);
       // Mid-auth: do not rewrite blocked handoff hosts to Flow
@@ -1401,7 +1399,7 @@ class FlowBrowserApp {
     this.updateDebugUrl(url);
     this.startDebugUrlPolling();
 
-    // Do NOT navigate to about:blank first — that aborts the real load on many PCs
+    // Do NOT navigate to about:blank first â€” that aborts the real load on many PCs
     setTimeout(() => {
       try {
         if (typeof this.webview.loadURL === 'function') this.webview.loadURL(url);
@@ -1437,7 +1435,7 @@ class FlowBrowserApp {
 
     // Send Google auto-login credentials into the webview preload (single owner of fill)
     this.sendCredentialsToWebview();
-    // OTP-only backup — never re-fill email/password (that caused the password loop)
+    // OTP-only backup â€” never re-fill email/password (that caused the password loop)
     this.tryGoogleAutoFill(this.webview.src);
 
     // Hide full overlay after short grace period to allow DOM mutations to finish cleanly
@@ -1561,7 +1559,7 @@ class FlowBrowserApp {
         return { ok:true, step: skipAutoNext ? 'password-filled-manual-next' : 'password', valLen:(pwd.value||'').length };
       }
 
-      // SPA lag: URL already /challenge/pwd but password input not mounted yet — do not re-submit email
+      // SPA lag: URL already /challenge/pwd but password input not mounted yet â€” do not re-submit email
       if (path.indexOf('/challenge/pwd') >= 0) return { ok:false, reason:'awaiting-password', path };
 
       const emailEl = Array.from(document.querySelectorAll(
@@ -1619,7 +1617,7 @@ class FlowBrowserApp {
     if (href.includes('flow.google.com') || href.includes('labs.google')) {
       this.hideGoogleAuthBanner();
       this._totpFilling = false;
-      // Do not end overlay during Flow→Google bounce (fresh login) — that flickers the cover.
+      // Do not end overlay during Flowâ†’Google bounce (fresh login) â€” that flickers the cover.
       // Host clears overlay on auth:auto-login done from workspace, or when shell posts done after settle.
       if (!this._pendingFreshLogin) {
         this.postAuthOverlay({ show: false, done: true });
@@ -1635,7 +1633,7 @@ class FlowBrowserApp {
       if (!DEBUG_DISABLE_AUTH_OVERLAY) this.postAuthOverlay({ show: false, captcha: true });
       return;
     }
-    // TOTP / authenticator — keep cover on (auto-fill). Do not clear captcha flag
+    // TOTP / authenticator â€” keep cover on (auto-fill). Do not clear captcha flag
     // just because SPA URL still says /identifier or /pwd (that caused overlay flicker).
     const onTotpPath = /challenge\/totp/i.test(href);
     if (onTotpPath) this._totpFilling = true;
@@ -1645,7 +1643,7 @@ class FlowBrowserApp {
 
     if (!DEBUG_DISABLE_AUTH_OVERLAY) {
       if (!this.googleAuthBanner || this.googleAuthBanner.classList.contains('hidden')) {
-        this.showGoogleAuthBanner('Signing you in automatically…', false);
+        this.showGoogleAuthBanner('Signing you in automaticallyâ€¦', false);
       }
       if (!this._captchaActive || this._totpFilling) {
         this.postAuthOverlay({ show: true, captcha: false });
@@ -1653,7 +1651,7 @@ class FlowBrowserApp {
     }
 
     const now = Date.now();
-    // 2FA method chooser / security-key — MUST run before _totpFilling early-return
+    // 2FA method chooser / security-key â€” MUST run before _totpFilling early-return
     // (otherwise challenge/selection stays stuck forever)
     const on2faNav = !DEBUG_SKIP_GOOGLE_NEXT &&
       /challenge\/(selection|skotp|sk|iap|dp|ootp)(?:\/|$|\?)/i.test(href) &&
@@ -1728,8 +1726,8 @@ class FlowBrowserApp {
       return;
     }
 
-    // Fill email/password — fire-and-forget so 2FA helpers never block the next pwd tick
-    // Skip entirely while OTP UI is active — re-submitting password bounces the flow
+    // Fill email/password â€” fire-and-forget so 2FA helpers never block the next pwd tick
+    // Skip entirely while OTP UI is active â€” re-submitting password bounces the flow
     if (this._totpFilling || onTotpPath) {
       this.pushTotpFromBackend();
       return;
@@ -1774,7 +1772,7 @@ class FlowBrowserApp {
 
   /** Fetch Google password from API into memory only (never from activeServer JSON). */
   async resolveGooglePasswordForFill() {
-    // Prefer JIT API — do not trust any leftover password field
+    // Prefer JIT API â€” do not trust any leftover password field
     const fromApi = await this.fetchGoogleCredential('password');
     if (fromApi) return fromApi;
     return '';
@@ -1785,7 +1783,7 @@ class FlowBrowserApp {
     if (this._otpPushAt && now - this._otpPushAt < 2500) return;
     this._otpPushAt = now;
     this._totpFilling = true;
-    // Keep cover while auto-OTP runs — do not lift overlay
+    // Keep cover while auto-OTP runs â€” do not lift overlay
     this.postAuthOverlay({ show: true, captcha: false });
     if (!this.config?.authToken) return;
     let otp = '';
@@ -1822,7 +1820,7 @@ class FlowBrowserApp {
   showWebviewError(message, url) {
     this.showLoadingOverlay(
       'Workspace failed to load',
-      `${message}${url ? ` — ${url}` : ''}. Use Reload or switch server.`,
+      `${message}${url ? ` â€” ${url}` : ''}. Use Reload or switch server.`,
       8000
     );
   }
@@ -1889,7 +1887,7 @@ class FlowBrowserApp {
       } else if (data && (data.code === 'NO_CREDITS' || data.code === 'BANNED' || data.code === 'SESSION_REPLACED' || data.code === 'PLAN_EXPIRED')) {
         await this.forceLogout(data.error || 'Please sign in again.');
       } else if (!data?.success && (res.status === 401 || res.status === 403)) {
-        // Ban/disable during generation — logout immediately even if code missing
+        // Ban/disable during generation â€” logout immediately even if code missing
         await this.forceLogout((data && data.error) || 'Your account is no longer active. Please sign in again.');
       }
     } catch (err) {
@@ -2049,7 +2047,7 @@ class FlowBrowserApp {
       this.showGoogleAuthBanner('Please solve the captcha below', true);
       this.postAuthOverlay({ show: false, captcha: true });
     } else {
-      this.showGoogleAuthBanner('Captcha done — continuing sign-in…', false);
+      this.showGoogleAuthBanner('Captcha done â€” continuing sign-inâ€¦', false);
       this.postAuthOverlay({ show: true, captcha: false });
       setTimeout(() => this.sendCredentialsToWebview(false), 400);
     }
@@ -2076,12 +2074,12 @@ class FlowBrowserApp {
     }
     if (data.overlay) {
       this._captchaActive = false;
-      this.showGoogleAuthBanner('Signing you in automatically…', false);
+      this.showGoogleAuthBanner('Signing you in automaticallyâ€¦', false);
       this.postAuthOverlay({ show: true, captcha: false });
       return;
     }
     if (data.watching) {
-      this.showGoogleAuthBanner('Watching Google sign-in — automation still running', false);
+      this.showGoogleAuthBanner('Watching Google sign-in â€” automation still running', false);
       this.postAuthOverlay({ show: true, captcha: false });
     }
   }

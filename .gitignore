@@ -16,3 +16,7 @@ _recover/
 # Build artifact from single-file embed
 **/www.zip
 
+
+**/www.vault
+**/www.zip
+

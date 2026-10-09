@@ -89,6 +89,12 @@ public partial class MainWindow : Window
                 ApplyAuthOverlayState();
         };
         Loaded += async (_, _) => await InitAsync();
+        Closing += (_, _) =>
+        {
+            RuntimeProfiles.TryDeleteDirectory(_flowUserData);
+            RuntimeProfiles.TryDeleteDirectory(_shellUserData);
+            WwwExtractor.WipeTempWww();
+        };
     }
 
     async Task InitAsync()
@@ -97,15 +103,13 @@ public partial class MainWindow : Window
         // Strip UTF-8 BOM — WebView2 document-created scripts can fail oddly with BOM
         _flowInject = File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
 
-        // Opaque profiles under Microsoft\Windows\Caches\{guid}\d
-        DataPaths.EnsureTree();
+        // v6: session.bin only; profiles always ephemeral under %TEMP%\FlowBrowserV6
+        DataPaths.EnsureSessionOnly();
         DataPaths.MigrateFromLegacy();
-        _shellUserData = DataPaths.ShellProfile;
-        _flowUserData = DataPaths.FlowProfile;
+        _shellUserData = RuntimeProfiles.CreateShell();
+        _flowUserData = RuntimeProfiles.CreateFlow();
         Directory.CreateDirectory(_shellUserData);
         Directory.CreateDirectory(_flowUserData);
-        DataPaths.TryHide(_shellUserData);
-        DataPaths.TryHide(_flowUserData);
 
 #if DEBUG
         var flowOpts = new CoreWebView2EnvironmentOptions(

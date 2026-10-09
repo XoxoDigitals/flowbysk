@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const adminRoutes = require('./routes/admin');
-const clientRoutes = require('./routes/client');
 const sessionRoutes = require('./routes/session');
 const resellerRoutes = require('./routes/reseller');
 const downloads = require('./downloads');
@@ -29,14 +28,21 @@ const forceUpdatePayload = {
   error: 'Please download the latest Flow Browser.',
 };
 
-/** v2 / v3 are permanently dead — only /api/v4/client is live. */
+/** Only /api/v6/client is live (traditional login). v2–v5 → FORCE_UPDATE. */
+const clientV6Routes = require('./routes/client-v6');
 app.use('/api/v2/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
 app.use('/api/v3/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
-app.use('/api/v4/client', clientRoutes);
+app.use('/api/v4/client', (req, res) => {
+  res.status(410).json(forceUpdatePayload);
+});
+app.use('/api/v5/client', (req, res) => {
+  res.status(410).json(forceUpdatePayload);
+});
+app.use('/api/v6/client', clientV6Routes);
 app.use('/api/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -68,7 +74,7 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
-        clientApiVersion: 'v4',
+        clientApiVersion: 'v6',
       },
     });
   } catch (err) {
@@ -143,22 +149,22 @@ app.get('*', (req, res) => {
 
 db.ready()
   .then(async () => {
-    // Permanently lock client API to v4 (v2/v3 routes always return 410)
+    // Permanently lock client API to v6 (v2–v5 always return 410)
     try {
       const cur = await db.getSettings();
-      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v4') {
-        await db.updateSettings({ clientApiVersion: 'v4' });
-        console.log('[boot] Locked clientApiVersion → v4 (v2/v3 permanently stopped)');
+      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v6') {
+        await db.updateSettings({ clientApiVersion: 'v6' });
+        console.log('[boot] Locked clientApiVersion → v6 (v2–v5 permanently stopped)');
       }
     } catch (err) {
-      console.warn('[boot] could not lock clientApiVersion v4:', err.message);
+      console.warn('[boot] could not lock clientApiVersion v6:', err.message);
     }
     app.listen(PORT, () => {
       console.log(`====================================================`);
       console.log(`Flow Creator Ai API server on port ${PORT}`);
       console.log(`Admin UI:   http://localhost:3100/admin`);
       console.log(`Demo Flow:  http://localhost:${PORT}/demo-flow`);
-      console.log(`Client API: http://localhost:${PORT}/api/v4/client only (v2/v3 → 410 FORCE_UPDATE)`);
+      console.log(`Client API: /api/v6/client only (traditional login); v2–v5 → 410 FORCE_UPDATE`);
       console.log(`Data store: PostgreSQL (Prisma) — data.json is not live`);
       console.log(`====================================================`);
     });

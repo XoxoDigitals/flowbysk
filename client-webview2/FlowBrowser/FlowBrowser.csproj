@@ -10,7 +10,7 @@
     <RootNamespace>FlowBrowser</RootNamespace>
     <ApplicationTitle>Flow Browser</ApplicationTitle>
     <ApplicationIcon>FlowBrowser.ico</ApplicationIcon>
-    <Version>2.0.33</Version>
+    <Version>6.0.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,32 +20,34 @@
 
   <ItemGroup>
     <Resource Include="FlowBrowser.ico" />
-    <!-- Dev / folder-portable: copy readable www next to the binary -->
-    <None Include="www\**\*" CopyToOutputDirectory="PreserveNewest" LinkBase="www" />
+    <!-- Debug only: readable www next to binary. Release uses encrypted www.vault embed. -->
+    <None Include="www\**\*" CopyToOutputDirectory="PreserveNewest" LinkBase="www" Condition="'$(Configuration)' == 'Debug'" />
   </ItemGroup>
 
   <!--
-    Release/publish: obfuscate critical JS then zip www-packed into the single-file EXE.
-    Debug: zip plain www (easier to inspect while developing).
+    Release/publish: obfuscate JS → zip → AES-GCM www.vault embedded in EXE.
+    Debug: encrypt plain www the same way (no loose plaintext in single-file).
   -->
   <Target Name="ZipWwwForEmbed" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
       <_WwwZip>$(MSBuildProjectDirectory)\www.zip</_WwwZip>
+      <_WwwVault>$(MSBuildProjectDirectory)\www.vault</_WwwVault>
       <_PackScript>$(MSBuildProjectDirectory)\tools\pack-www.ps1</_PackScript>
+      <_EncryptScript>$(MSBuildProjectDirectory)\tools\encrypt-www.cjs</_EncryptScript>
     </PropertyGroup>
     <Exec Condition="'$(Configuration)' == 'Release'"
           Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(_PackScript)&quot;" />
     <Exec Condition="'$(Configuration)' != 'Release'"
-          Command="powershell -NoProfile -Command &quot;if (Test-Path '$(_WwwZip)') { Remove-Item '$(_WwwZip)' -Force }; Compress-Archive -Path '$(MSBuildProjectDirectory)\www\*' -DestinationPath '$(_WwwZip)' -Force&quot;" />
+          Command="powershell -NoProfile -Command &quot;if (Test-Path '$(_WwwZip)') { Remove-Item '$(_WwwZip)' -Force }; if (Test-Path '$(_WwwVault)') { Remove-Item '$(_WwwVault)' -Force }; Compress-Archive -Path '$(MSBuildProjectDirectory)\www\*' -DestinationPath '$(_WwwZip)' -Force; node '$(_EncryptScript)'&quot;" />
     <ItemGroup>
-      <EmbeddedResource Include="$(_WwwZip)">
-        <LogicalName>FlowBrowser.www.zip</LogicalName>
+      <EmbeddedResource Include="$(_WwwVault)">
+        <LogicalName>FlowBrowser.www.vault</LogicalName>
       </EmbeddedResource>
     </ItemGroup>
   </Target>
 
   <Target Name="CleanWwwZip" AfterTargets="Clean">
-    <Delete Files="$(MSBuildProjectDirectory)\www.zip" TreatErrorsAsWarnings="true" />
+    <Delete Files="$(MSBuildProjectDirectory)\www.zip;$(MSBuildProjectDirectory)\www.vault" TreatErrorsAsWarnings="true" />
     <RemoveDir Directories="$(MSBuildProjectDirectory)\www-packed" />
   </Target>
 
