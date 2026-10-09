@@ -1638,6 +1638,43 @@ class Database {
     }
   }
 
+  /**
+   * Ban every CUSTOMER sharing this Device ID (skip already banned).
+   * Returns list of newly banned users.
+   */
+  async cascadeBanByDeviceId(deviceId, { reason = '', sourceUserId = null, sourceUsername = null } = {}) {
+    const needle = String(deviceId || '').trim();
+    if (!needle) return [];
+    const peers = await this.findUsersByDeviceId(needle);
+    const cascaded = [];
+    for (const peer of peers) {
+      if (peer.banned) continue;
+      await this.updateUser(peer.id, {
+        banned: true,
+        banReason: reason || `Cascade ban via Device ID ${needle}`,
+      });
+      await this.forceLogoutAndWipe(peer.id);
+      cascaded.push({ id: peer.id, username: peer.username, deviceId: needle });
+      await this.addLog(peer.id, peer.username, 'cascade_ban_device', {
+        ip: null,
+        deviceId: needle,
+        reason: reason || `Cascade ban via Device ID ${needle}`,
+        sourceUserId,
+        sourceUsername,
+        targetUserId: peer.id,
+        targetUsername: peer.username,
+        autoBanned: true,
+      });
+    }
+    return cascaded;
+  }
+
+  /** True if any other banned CUSTOMER already used this Device ID. */
+  async isDeviceLinkedToBannedAccount(deviceId, exceptUserId = null) {
+    const peers = await this.findUsersByDeviceId(deviceId);
+    return peers.some((p) => p.banned && p.id !== exceptUserId);
+  }
+
   async adminPeriodStats() {
     await this.ready();
     const { periodWindow20th } = require('./deviceSecurity');

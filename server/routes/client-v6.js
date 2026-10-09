@@ -194,8 +194,86 @@ async function loginClientUser(username, password, ip, req) {
     return { status: 401, body: { success: false, error: 'Invalid username or password' } };
   }
 
-  if (!user.isActive || user.banned) {
+  const deviceId = attestation.deviceId || null;
+
+  // Banned account still reports Device ID → cascade-ban every other account on that device.
+  if (user.banned) {
+    if (deviceId) {
+      await db.recordDeviceTouch(user.id, {
+        deviceId,
+        ip: clientIp,
+        country,
+        client: attestation.client || null,
+      });
+      const cascaded = await db.cascadeBanByDeviceId(deviceId, {
+        reason: `Device ID linked to banned account ${user.username}`,
+        sourceUserId: user.id,
+        sourceUsername: user.username,
+      });
+      if (cascaded.length) {
+        await db.addLog(user.id, user.username, 'banned_login_cascade', {
+          ip: clientIp,
+          country,
+          deviceId,
+          client: attestation.client || null,
+          cascadeCount: cascaded.length,
+          cascaded: cascaded.map((c) => c.username),
+        });
+      }
+    }
+    return {
+      status: 403,
+      body: {
+        success: false,
+        code: 'BANNED',
+        error: 'Your account has been banned by administrator.',
+      },
+    };
+  }
+
+  if (!user.isActive) {
     return { status: 403, body: { success: false, error: 'Your account is deactivated. Contact administrator.' } };
+  }
+
+  // Official app login on a Device ID already tied to a banned account → ban this account too.
+  if (deviceId && (await db.isDeviceLinkedToBannedAccount(deviceId, user.id))) {
+    await db.updateUser(user.id, {
+      banned: true,
+      banReason: `Device ID matches a banned account (${deviceId})`,
+    });
+    await db.forceLogoutAndWipe(user.id);
+    await db.recordDeviceTouch(user.id, {
+      deviceId,
+      ip: clientIp,
+      country,
+      client: attestation.client || null,
+    });
+    const cascaded = await db.cascadeBanByDeviceId(deviceId, {
+      reason: `Device ID matches a banned account (${deviceId})`,
+      sourceUserId: user.id,
+      sourceUsername: user.username,
+    });
+    await db.addLog(user.id, user.username, 'device_ban_match', {
+      ip: clientIp,
+      country,
+      deviceId,
+      client: attestation.client || null,
+      autoBanned: true,
+      cascadeCount: cascaded.length,
+      cascaded: cascaded.map((c) => c.username),
+      targetUserId: user.id,
+      targetUsername: user.username,
+      reason: `Device ID matches a banned account (${deviceId})`,
+    });
+    return {
+      status: 403,
+      body: {
+        success: false,
+        code: 'BANNED',
+        error: 'This device is linked to a banned account. Your account has been banned.',
+        autoBanned: true,
+      },
+    };
   }
 
   const now = new Date();
@@ -240,7 +318,7 @@ async function loginClientUser(username, password, ip, req) {
   }
 
   await db.recordDeviceTouch(user.id, {
-    deviceId: attestation.deviceId || null,
+    deviceId,
     ip: clientIp,
     country,
     client: attestation.client || null,
@@ -251,7 +329,7 @@ async function loginClientUser(username, password, ip, req) {
   await db.addLog(user.id, user.username, 'client_login', {
     ip: clientIp,
     country,
-    deviceId: attestation.deviceId || null,
+    deviceId,
     client: attestation.client || null,
     sessionVersion,
     channelId: channel?.channelId || null,

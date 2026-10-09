@@ -42,6 +42,9 @@ export function formatLogDetails(details?: Record<string, unknown> | null): stri
   if (typeof cascadeCount === 'number' && cascadeCount > 0) {
     parts.push(`cascade:${cascadeCount}`);
   }
+  if (typeof details.sourceUsername === 'string' && details.sourceUsername) {
+    parts.push(`via ${details.sourceUsername}`);
+  }
   if (Array.isArray(cascaded) && cascaded.length) {
     parts.push(`also banned: ${cascaded.map(String).join(', ')}`);
   }
