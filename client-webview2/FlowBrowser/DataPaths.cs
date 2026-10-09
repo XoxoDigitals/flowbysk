@@ -80,18 +80,18 @@ static class DataPaths
         return new Guid(bytes).ToString("D");
     }
 
-    public static void EnsureTree()
+    /// <summary>v6: only the session vault folder — no durable WebView profiles under LocalAppData.</summary>
+    public static void EnsureSessionOnly()
     {
         Directory.CreateDirectory(SecureDir);
-        Directory.CreateDirectory(DataRoot);
-        Directory.CreateDirectory(ShellProfile);
-        Directory.CreateDirectory(FlowProfile);
         TryHide(Root);
         TryHide(SecureDir);
-        TryHide(DataRoot);
-        TryHide(ShellProfile);
-        TryHide(FlowProfile);
+        // Remove leftover durable profile trees from older builds
+        TryDeleteTree(DataRoot);
+        TryDeleteTree(Path.Combine(Root, "u"));
     }
+
+    public static void EnsureTree() => EnsureSessionOnly();
 
     /// <summary>Move session + profiles from old FlowBrowser paths, then delete brand folder.</summary>
     public static void MigrateFromLegacy()

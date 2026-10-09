@@ -25,8 +25,8 @@ public partial class MainWindow : Window
     string _flowInject = "";
     bool _shellReady;
     bool _flowReady;
-    /// <summary>When FLOW_V5_EPHEMERAL=1, Flow profile is a temp folder deleted on close.</summary>
-    bool _ephemeralFlowProfile;
+    /// <summary>v6: WebView profiles are always ephemeral under %TEMP%\FlowBrowserV6.</summary>
+    bool _ephemeralFlowProfile = true;
     string _shellMode = "full";
     string? _flowCredEmail;
     string? _flowCredPassword;
@@ -95,18 +95,16 @@ public partial class MainWindow : Window
         {
             try
             {
-                // Best-effort wipe of Google session when the window closes (v5 RAM policy)
                 if (FlowView?.CoreWebView2 != null)
-                {
                     _ = ClearFlowSessionAsync();
-                }
             }
             catch (Exception ex)
             {
                 Debug.WriteLine("Closing wipe: " + ex.Message);
             }
-            if (_ephemeralFlowProfile)
-                CookieInjectHost.TryDeleteDirectory(_flowUserData);
+            CookieInjectHost.TryDeleteDirectory(_flowUserData);
+            CookieInjectHost.TryDeleteDirectory(_shellUserData);
+            WwwExtractor.WipeTempWww();
         };
     }
 
@@ -116,20 +114,14 @@ public partial class MainWindow : Window
         // Strip UTF-8 BOM — WebView2 document-created scripts can fail oddly with BOM
         _flowInject = File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
 
-        // Opaque profiles under Microsoft\Windows\Caches\{guid}\d
-        DataPaths.EnsureTree();
+        // v6: session.bin only under opaque path; profiles always temp + wiped on close
+        DataPaths.EnsureSessionOnly();
         DataPaths.MigrateFromLegacy();
-        _shellUserData = DataPaths.ShellProfile;
-        _ephemeralFlowProfile =
-            string.Equals(Environment.GetEnvironmentVariable("FLOW_V5_EPHEMERAL"), "1", StringComparison.Ordinal) ||
-            string.Equals(Environment.GetEnvironmentVariable("FLOW_V5_EPHEMERAL"), "true", StringComparison.OrdinalIgnoreCase);
-        _flowUserData = _ephemeralFlowProfile
-            ? CookieInjectHost.CreateEphemeralFlowProfile()
-            : DataPaths.FlowProfile;
+        _ephemeralFlowProfile = true;
+        _shellUserData = CookieInjectHost.CreateEphemeralShellProfile();
+        _flowUserData = CookieInjectHost.CreateEphemeralFlowProfile();
         Directory.CreateDirectory(_shellUserData);
         Directory.CreateDirectory(_flowUserData);
-        DataPaths.TryHide(_shellUserData);
-        if (!_ephemeralFlowProfile) DataPaths.TryHide(_flowUserData);
 
 #if DEBUG
         var flowOpts = new CoreWebView2EnvironmentOptions(

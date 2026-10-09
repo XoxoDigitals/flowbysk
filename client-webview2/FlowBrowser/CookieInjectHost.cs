@@ -246,12 +246,24 @@ static class CookieInjectHost
         };
     }
 
-    public static string CreateEphemeralFlowProfile()
+    public static string CreateEphemeralProfile(string leaf)
     {
-        var dir = Path.Combine(Path.GetTempPath(), "FlowBrowserV5", Guid.NewGuid().ToString("N"), "flow");
+        var dir = Path.Combine(Path.GetTempPath(), "FlowBrowserV6", Guid.NewGuid().ToString("N"), leaf);
         Directory.CreateDirectory(dir);
+        DataPaths.TryHide(dir);
+        try
+        {
+            var parent = Path.GetDirectoryName(dir);
+            if (parent != null) DataPaths.TryHide(parent);
+            DataPaths.TryHide(Path.Combine(Path.GetTempPath(), "FlowBrowserV6"));
+        }
+        catch { /* ignore */ }
         return dir;
     }
+
+    public static string CreateEphemeralFlowProfile() => CreateEphemeralProfile("flow");
+
+    public static string CreateEphemeralShellProfile() => CreateEphemeralProfile("shell");
 
     public static void TryDeleteDirectory(string? path)
     {

@@ -43,11 +43,9 @@ public sealed class AppConfig
         {
             DataPaths.MigrateFromLegacy();
 
-            // Prefer DPAPI-encrypted blob (new opaque path)
             if (File.Exists(SecureConfigPath))
                 return LoadFromProtected(SecureConfigPath);
 
-            // Migrate previous Local\FlowBrowser\.secure\session.bin
             if (File.Exists(LegacySecurePath))
             {
                 var cfg = LoadFromProtected(LegacySecurePath);
@@ -55,7 +53,6 @@ public sealed class AppConfig
                 return cfg;
             }
 
-            // Migrate legacy plaintext JSON → encrypted, then delete plaintext
             if (File.Exists(LegacyConfigPath))
             {
                 var json = File.ReadAllText(LegacyConfigPath);
@@ -77,8 +74,17 @@ public sealed class AppConfig
 
     static AppConfig LoadFromProtected(string path)
     {
-        var protectedBytes = File.ReadAllBytes(path);
-        var plain = ProtectedData.Unprotect(protectedBytes, optionalEntropy: null, scope: DataProtectionScope.CurrentUser);
+        var sealedBytes = File.ReadAllBytes(path);
+        byte[] plain;
+        try
+        {
+            plain = VaultCrypto.OpenSession(sealedBytes);
+        }
+        catch (CryptographicException)
+        {
+            // Last resort: classic DPAPI-only blob
+            plain = ProtectedData.Unprotect(sealedBytes, optionalEntropy: null, DataProtectionScope.CurrentUser);
+        }
         var json = Encoding.UTF8.GetString(plain);
         var cfg = JsonSerializer.Deserialize<AppConfig>(json, JsonOpts) ?? new AppConfig();
         cfg.SanitizeSecrets();
@@ -137,14 +143,14 @@ public sealed class AppConfig
         try
         {
             SanitizeSecrets();
-            DataPaths.EnsureTree();
+            DataPaths.EnsureSessionOnly();
             Directory.CreateDirectory(SecureDir);
             DataPaths.TryHide(SecureDir);
 
             var json = JsonSerializer.Serialize(this, JsonOpts);
             var plain = Encoding.UTF8.GetBytes(json);
-            var protectedBytes = ProtectedData.Protect(plain, optionalEntropy: null, scope: DataProtectionScope.CurrentUser);
-            File.WriteAllBytes(SecureConfigPath, protectedBytes);
+            var sealedBytes = VaultCrypto.SealSession(plain);
+            File.WriteAllBytes(SecureConfigPath, sealedBytes);
             DataPaths.TryHide(SecureConfigPath);
 
             try

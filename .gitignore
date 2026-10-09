@@ -27,3 +27,12 @@ dist-portable-v5/**/*.pdb
 !dist-portable-v5/VERSION.txt
 !dist-portable-v5/*.bat
 
+
+**/www.vault
+dist-portable-v6/**/*.exe
+dist-portable-v6/**/*.pdb
+!dist-portable-v6/
+!dist-portable-v6/www/
+!dist-portable-v6/www/**
+!dist-portable-v6/VERSION.txt
+

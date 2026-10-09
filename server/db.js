@@ -56,9 +56,9 @@ async function setJsonSetting(key, value) {
 }
 
 function normalizeClientApiVersion(value) {
-  // v2/v3 permanently retired — always v4
+  // Only v6 is live (traditional login + vault EXE). Older clients FORCE_UPDATE.
   void value;
-  return 'v4';
+  return 'v6';
 }
 
 async function getRuntime() {
@@ -70,7 +70,7 @@ async function getRuntime() {
     cssSelectorsToHide: [],
     customCss: '',
     downloads: { windows: null, android: null },
-    clientApiVersion: 'v4',
+    clientApiVersion: 'v6',
     jwtSecret: process.env.JWT_SECRET || 'flow_super_secret_jwt_key_2026',
   };
   const stored = (await getJsonSetting(RUNTIME_KEY, {})) || {};
