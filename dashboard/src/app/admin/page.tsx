@@ -33,7 +33,15 @@ type Metrics = {
   activeServers: number;
   resellers: number;
   systemUsers: number;
-  adminUserCounts?: { id: string; username: string; displayName?: string; userCount: number }[];
+  adminUserCounts?: {
+    id: string;
+    username: string;
+    displayName?: string;
+    userCount: number;
+    periodNew?: number;
+    periodRenewals?: number;
+    periodTotal?: number;
+  }[];
   period?: PeriodStats | null;
   servers: ServerMetric[];
 };
@@ -172,7 +180,7 @@ export default function AdminOverviewPage() {
             <div>
               <h2 className="text-[15px] font-semibold tracking-tight">Admins by owned users</h2>
               <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
-                Direct users + users under their resellers
+                All-time owned users · new / renewals in the current 20th→20th window
               </p>
             </div>
             <div className="overflow-hidden rounded-2xl border border-[var(--line)]">
@@ -181,6 +189,9 @@ export default function AdminOverviewPage() {
                   <tr>
                     <th className="px-4 py-3 font-medium">Admin</th>
                     <th className="px-4 py-3 font-medium">Users</th>
+                    <th className="px-4 py-3 font-medium">Period new</th>
+                    <th className="px-4 py-3 font-medium">Period renew</th>
+                    <th className="px-4 py-3 font-medium">Period total</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -195,11 +206,14 @@ export default function AdminOverviewPage() {
                         ) : null}
                       </td>
                       <td className="px-4 py-3 font-mono">{a.userCount}</td>
+                      <td className="px-4 py-3 font-mono">{a.periodNew ?? 0}</td>
+                      <td className="px-4 py-3 font-mono">{a.periodRenewals ?? 0}</td>
+                      <td className="px-4 py-3 font-mono">{a.periodTotal ?? 0}</td>
                     </tr>
                   ))}
                   {!(metrics.adminUserCounts || []).length && (
                     <tr>
-                      <td colSpan={2} className="px-4 py-6 text-center text-[var(--ink3)]">
+                      <td colSpan={5} className="px-4 py-6 text-center text-[var(--ink3)]">
                         No admin counts
                       </td>
                     </tr>

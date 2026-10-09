@@ -1577,27 +1577,38 @@ class Database {
   /**
    * Users owned by an admin: directly added + users added by their resellers.
    */
-  async countOwnedUsersForAdmin(adminId) {
-    await this.ready();
-    if (!adminId) return 0;
+  async ownedCustomerWhereForAdmin(adminId) {
     const resellerProfiles = await prisma.resellerProfile.findMany({
       where: { parentAdminId: adminId },
       select: { id: true, userId: true },
     });
     const resellerUserIds = resellerProfiles.map((r) => r.userId);
-    const count = await prisma.user.count({
-      where: {
-        role: 'CUSTOMER',
-        OR: [
-          { ownedByAdminId: adminId },
-          { createdByAdminId: adminId },
-          ...(resellerUserIds.length
-            ? [{ createdByResellerId: { in: resellerUserIds } }]
-            : []),
-        ],
-      },
+    return {
+      role: 'CUSTOMER',
+      OR: [
+        { ownedByAdminId: adminId },
+        { createdByAdminId: adminId },
+        ...(resellerUserIds.length
+          ? [{ createdByResellerId: { in: resellerUserIds } }]
+          : []),
+      ],
+    };
+  }
+
+  async countOwnedUsersForAdmin(adminId) {
+    await this.ready();
+    if (!adminId) return 0;
+    return prisma.user.count({ where: await this.ownedCustomerWhereForAdmin(adminId) });
+  }
+
+  async ownedCustomerIdsForAdmin(adminId) {
+    await this.ready();
+    if (!adminId) return [];
+    const rows = await prisma.user.findMany({
+      where: await this.ownedCustomerWhereForAdmin(adminId),
+      select: { id: true },
     });
-    return count;
+    return rows.map((r) => r.id);
   }
 
   async ownedUserCountsByAdmin() {
@@ -1675,7 +1686,7 @@ class Database {
     return peers.some((p) => p.banned && p.id !== exceptUserId);
   }
 
-  async adminPeriodStats() {
+  async adminPeriodStats(adminIds = []) {
     await this.ready();
     const { periodWindow20th } = require('./deviceSecurity');
     const { from, to } = periodWindow20th(new Date());
@@ -1726,12 +1737,31 @@ class Database {
     });
     const renewalUserIds = new Set(renewRows.map((r) => r.userId).filter(Boolean));
     const renewals = renewalUserIds.size;
+
+    const byAdmin = [];
+    for (const adminId of adminIds || []) {
+      if (!adminId) continue;
+      const ownedIds = await this.ownedCustomerIdsForAdmin(adminId);
+      const ownedSet = new Set(ownedIds);
+      let newUsers = 0;
+      for (const id of createUserIds) if (ownedSet.has(id)) newUsers += 1;
+      let renewCount = 0;
+      for (const id of renewalUserIds) if (ownedSet.has(id)) renewCount += 1;
+      byAdmin.push({
+        id: adminId,
+        newUsers,
+        renewals: renewCount,
+        total: newUsers + renewCount,
+      });
+    }
+
     return {
       periodStart: from.toISOString(),
       periodEnd: to.toISOString(),
       newUsers: createdInPeriod,
       renewals,
       total: createdInPeriod + renewals,
+      byAdmin,
     };
   }
 

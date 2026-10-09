@@ -329,7 +329,17 @@ router.get('/metrics', requireAdminAuth, async (req, res) => {
 
   let period = null;
   try {
-    period = await db.adminPeriodStats();
+    period = await db.adminPeriodStats(adminUserCounts.map((a) => a.id));
+    const byAdminMap = Object.fromEntries((period.byAdmin || []).map((r) => [r.id, r]));
+    adminUserCounts = adminUserCounts.map((a) => {
+      const p = byAdminMap[a.id] || {};
+      return {
+        ...a,
+        periodNew: p.newUsers ?? 0,
+        periodRenewals: p.renewals ?? 0,
+        periodTotal: p.total ?? 0,
+      };
+    });
   } catch (err) {
     period = { error: err.message || 'period_stats_failed' };
   }

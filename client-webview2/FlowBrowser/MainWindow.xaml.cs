@@ -1228,13 +1228,27 @@ public partial class MainWindow : Window
     el.dispatchEvent(new Event('change', {{ bubbles:true }}));
     return (el.value || '') === val || (el.value || '').toLowerCase() === String(val).toLowerCase();
   }};
-  const clickNext = () => {{
+  const clickNext = (input) => {{
     const next = document.querySelector('#identifierNext button, #identifierNext, #passwordNext button, #passwordNext, #totpNext button, #totpNext') ||
-      Array.from(document.querySelectorAll('button')).find(b => /^\\s*next\\s*$/i.test((b.innerText || b.textContent || '')));
-    if (!next || !visible(next)) return false;
-    try {{ next.removeAttribute('disabled'); next.setAttribute('aria-disabled','false'); }} catch (e) {{}}
-    try {{ next.click(); }} catch (e) {{}}
-    return true;
+      Array.from(document.querySelectorAll('button, div[role=""button""]')).find(b => /^\\s*next\\s*$/i.test((b.innerText || b.textContent || '')) && visible(b));
+    if (next && visible(next)) {{
+      try {{ next.removeAttribute('disabled'); next.setAttribute('aria-disabled','false'); }} catch (e) {{}}
+      try {{ next.focus(); }} catch (e) {{}}
+      try {{ next.click(); }} catch (e) {{}}
+      return true;
+    }}
+    if (input && input.isConnected) {{
+      try {{
+        input.focus();
+        const opts = {{ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }};
+        input.dispatchEvent(new KeyboardEvent('keydown', opts));
+        input.dispatchEvent(new KeyboardEvent('keypress', opts));
+        input.dispatchEvent(new KeyboardEvent('keyup', opts));
+        if (input.form) {{ try {{ input.form.requestSubmit(); }} catch (e) {{}} }}
+        return true;
+      }} catch (e) {{}}
+    }}
+    return false;
   }};
 
   try {{
@@ -1255,14 +1269,14 @@ public partial class MainWindow : Window
     if (st[pwdKey] === 'submitted') return {{ ok:true, step:'password-done' }};
     const already = (pwd.value || '') === password;
     const ok = already || fill(pwd, password);
-    if (ok && st[pwdKey] !== 'filled') {{
-      st[pwdKey] = 'filled';
-      setTimeout(() => {{
-        if (st[pwdKey] === 'submitted') return;
-        if (clickNext()) st[pwdKey] = 'submitted';
-      }}, 1500);
+    if (!ok) return {{ ok:false, step:'password-fill-fail' }};
+    st[pwdKey] = st[pwdKey] || 'filled';
+    // Retry Next on every host kick until click sticks (one-shot timeout caused stuck /challenge/pwd)
+    if (clickNext(pwd)) {{
+      st[pwdKey] = 'submitted';
+      return {{ ok:true, step:'password-submitted' }};
     }}
-    return {{ ok, step:'password', already }};
+    return {{ ok:true, step:'password-waiting-next', already }};
   }}
 
   const em = document.querySelector('input#identifierId, input[type=""email""], input[name=""identifier""], input[autocomplete=""username""]');
