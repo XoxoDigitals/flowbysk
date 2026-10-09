@@ -50,6 +50,9 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var shellView: WebView
     private lateinit var flowView: WebView
+    private lateinit var flowPane: FrameLayout
+    private lateinit var authCover: View
+    private lateinit var captchaBanner: View
     private lateinit var root: FrameLayout
     private lateinit var config: AppConfig
     private lateinit var wwwServer: WwwServer
@@ -65,6 +68,10 @@ class MainActivity : AppCompatActivity() {
     private var flowInjectScript: String = ""
     private var shellReady = false
     private var flowReady = false
+    private var authLoginActive = false
+    private var onGoogleAuth = false
+    private var captchaActive = false
+    private var authUiMode = 0 // 0 off, 1 cover, 2 captcha
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -74,7 +81,10 @@ class MainActivity : AppCompatActivity() {
 
         root = findViewById(R.id.root)
         shellView = findViewById(R.id.shellView)
+        flowPane = findViewById(R.id.flowPane)
         flowView = findViewById(R.id.flowView)
+        authCover = findViewById(R.id.authCover)
+        captchaBanner = findViewById(R.id.captchaBanner)
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -107,7 +117,7 @@ class MainActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when {
-                    flowView.visibility == View.VISIBLE && flowView.canGoBack() -> flowView.goBack()
+                    flowPane.visibility == View.VISIBLE && flowView.canGoBack() -> flowView.goBack()
                     shellView.canGoBack() -> shellView.goBack()
                     else -> moveTaskToBack(true)
                 }
@@ -188,11 +198,13 @@ class MainActivity : AppCompatActivity() {
                 if (flowInjectScript.isNotBlank()) {
                     flowView.evaluateJavascript(flowInjectScript, null)
                 }
+                val u = url ?: ""
+                updateAuthOverlayFromUrl(u)
                 postToShell(
                     JSONObject()
                         .put("type", "flow-event")
                         .put("event", "did-start-loading")
-                        .put("url", url ?: "")
+                        .put("url", u)
                 )
             }
 
@@ -202,9 +214,18 @@ class MainActivity : AppCompatActivity() {
                     flowView.evaluateJavascript(flowInjectScript, null)
                 }
                 val u = url ?: view?.url ?: ""
+                updateAuthOverlayFromUrl(u)
                 postToShell(JSONObject().put("type", "flow-event").put("event", "did-navigate").put("url", u))
                 postToShell(JSONObject().put("type", "flow-event").put("event", "did-finish-load").put("url", u))
                 postToShell(JSONObject().put("type", "flow-event").put("event", "dom-ready").put("url", u))
+                tryHostGoogleAutofill(u)
+            }
+
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                val u = (url ?: flowView.url ?: "").trim()
+                if (u.isEmpty()) return
+                updateAuthOverlayFromUrl(u)
+                postToShell(JSONObject().put("type", "flow-event").put("event", "did-navigate-in-page").put("url", u))
                 tryHostGoogleAutofill(u)
             }
 
@@ -273,20 +294,21 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             val chromePx = (CHROME_HEIGHT_DP * resources.displayMetrics.density).roundToInt()
             val shellLp = shellView.layoutParams as FrameLayout.LayoutParams
-            val flowLp = flowView.layoutParams as FrameLayout.LayoutParams
+            val flowLp = flowPane.layoutParams as FrameLayout.LayoutParams
             if (m == "full") {
-                flowView.visibility = View.GONE
+                flowPane.visibility = View.GONE
                 shellLp.height = ViewGroup.LayoutParams.MATCH_PARENT
                 shellLp.topMargin = 0
                 flowLp.topMargin = 0
             } else {
-                flowView.visibility = View.VISIBLE
+                flowPane.visibility = View.VISIBLE
                 shellLp.height = chromePx
                 shellLp.topMargin = 0
                 flowLp.topMargin = chromePx
             }
             shellView.layoutParams = shellLp
-            flowView.layoutParams = flowLp
+            flowPane.layoutParams = flowLp
+            applyAuthOverlayState()
         }
     }
 
@@ -362,7 +384,16 @@ class MainActivity : AppCompatActivity() {
                 if (url.isBlank() || url.contains("demo-flow") || url.startsWith("file:", true)) {
                     url = "https://flow.google.com/"
                 }
+                setShellMode("chrome")
                 flowView.loadUrl(url)
+                updateAuthOverlayFromUrl(url)
+            }
+            "authOverlay" -> {
+                handleAuthOverlayCommand(
+                    show = root.optBoolean("show", false),
+                    captcha = root.optBoolean("captcha", false),
+                    done = root.optBoolean("done", false)
+                )
             }
             "reload" -> {
                 val ignore = root.optBoolean("ignoreCache", false)
@@ -701,9 +732,139 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun handleAuthOverlayCommand(show: Boolean, captcha: Boolean, done: Boolean) {
+        if (done) {
+            val cur = flowView.url ?: ""
+            if (isFlowWorkspaceUrl(cur)) {
+                clearAuthCoverSession()
+                return
+            }
+            if (isGoogleAuthRelatedUrl(cur)) {
+                authLoginActive = true
+                onGoogleAuth = true
+                if (isGoogleRecaptchaChallengeUrl(cur)) captchaActive = true
+                applyAuthOverlayState()
+                return
+            }
+            clearAuthCoverSession()
+            return
+        }
+        if (captcha) {
+            captchaActive = true
+            onGoogleAuth = true
+            authLoginActive = true
+            applyAuthOverlayState()
+            return
+        }
+        if (show) {
+            captchaActive = false
+            onGoogleAuth = true
+            authLoginActive = true
+            applyAuthOverlayState()
+        }
+    }
+
+    private fun clearAuthCoverSession() {
+        captchaActive = false
+        onGoogleAuth = false
+        authLoginActive = false
+        applyAuthOverlayState()
+    }
+
+    private fun updateAuthOverlayFromUrl(url: String?) {
+        if (isGoogleRecaptchaChallengeUrl(url)) {
+            authLoginActive = true
+            onGoogleAuth = true
+            captchaActive = true
+            applyAuthOverlayState()
+            return
+        }
+        if (isGoogleAuthRelatedUrl(url)) {
+            authLoginActive = true
+            onGoogleAuth = true
+            captchaActive = false
+            applyAuthOverlayState()
+            return
+        }
+        if (isFlowWorkspaceUrl(url)) {
+            if (authLoginActive) {
+                // Keep cover briefly, then clear once Flow workspace is up
+                onGoogleAuth = true
+                applyAuthOverlayState()
+                scope.launch {
+                    delay(1600)
+                    val cur = flowView.url ?: return@launch
+                    if (isFlowWorkspaceUrl(cur) && !isGoogleAuthRelatedUrl(cur)) {
+                        clearAuthCoverSession()
+                    }
+                }
+                return
+            }
+            clearAuthCoverSession()
+            return
+        }
+        if (authLoginActive) {
+            onGoogleAuth = true
+            applyAuthOverlayState()
+            return
+        }
+        onGoogleAuth = false
+        captchaActive = false
+        applyAuthOverlayState()
+    }
+
+    private fun applyAuthOverlayState() {
+        runOnUiThread {
+            val want = when {
+                (authLoginActive || onGoogleAuth) && captchaActive -> 2
+                authLoginActive || onGoogleAuth -> 1
+                else -> 0
+            }
+            if (want == authUiMode) return@runOnUiThread
+            authUiMode = want
+            when (want) {
+                2 -> {
+                    authCover.visibility = View.GONE
+                    captchaBanner.visibility = View.VISIBLE
+                }
+                1 -> {
+                    captchaBanner.visibility = View.GONE
+                    authCover.visibility = View.VISIBLE
+                    authCover.bringToFront()
+                }
+                else -> {
+                    authCover.visibility = View.GONE
+                    captchaBanner.visibility = View.GONE
+                }
+            }
+        }
+    }
+
+    private fun isGoogleAuthRelatedUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        val u = url.lowercase()
+        if (u.contains("accounts.google.com") || u.contains("accounts.youtube.com")) return true
+        if ((u.contains("google.com") || u.contains("youtube.com")) &&
+            (u.contains("/signin") || u.contains("/accountchooser") || u.contains("servicelogin") || u.contains("/oauth"))
+        ) return true
+        return false
+    }
+
+    private fun isGoogleRecaptchaChallengeUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        val u = url.lowercase()
+        return u.contains("recaptcha") || u.contains("challenge/recaptcha") || u.contains("hcaptcha")
+    }
+
+    private fun isFlowWorkspaceUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        val u = url.lowercase()
+        return u.contains("flow.google.com") || u.contains("labs.google")
+    }
+
     private fun injectGoogleAutofillOnce(emailRaw: String, passwordRaw: String) {
         val src = flowView.url ?: return
-        if (!src.contains("accounts.google.com", true)) return
+        if (!src.contains("accounts.google.com", true) && !src.contains("accounts.youtube.com", true)) return
         val email = jsString(emailRaw)
         val password = jsString(passwordRaw)
         val code = """
@@ -736,61 +897,82 @@ class MainActivity : AppCompatActivity() {
     el.dispatchEvent(new Event('change', { bubbles:true }));
     return (el.value || '') === val || (el.value || '').toLowerCase() === String(val).toLowerCase();
   };
-  const clickNext = () => {
-    const next = document.querySelector('#identifierNext button, #identifierNext, #passwordNext button, #passwordNext') ||
-      Array.from(document.querySelectorAll('button')).find(b => /^\s*next\s*$/i.test((b.innerText || b.textContent || '')));
+  const clickNextFor = (kind) => {
+    let next = null;
+    if (kind === 'password') next = document.querySelector('#passwordNext button, #passwordNext');
+    else if (kind === 'identifier') next = document.querySelector('#identifierNext button, #identifierNext');
+    if (!next || !visible(next)) {
+      next = Array.from(document.querySelectorAll('button')).find(b => /^\s*next\s*$/i.test((b.innerText || b.textContent || '')));
+    }
     if (!next || !visible(next)) return false;
     try { next.removeAttribute('disabled'); next.setAttribute('aria-disabled','false'); } catch (e) {}
     try { next.click(); } catch (e) {}
     return true;
   };
-  try {
-    const onPwd = /\/challenge\/pwd/i.test(path) || !!document.querySelector('input[type="password"]');
-    if (!document.getElementById('__flow_host_ol__') && !st.overlayDismissed && !onPwd) {
-      const s = document.createElement('style');
-      s.id = '__flow_host_ol_style__';
-      s.textContent = '#__flow_host_ol__{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:rgba(2,6,23,.82);color:#f8fafc;font-family:sans-serif;cursor:pointer}#__flow_host_ol__ .c{text-align:center;pointer-events:none}#__flow_host_ol__ h3{margin:0 0 8px;font-size:20px}#__flow_host_ol__ p{margin:0;color:#94a3b8;font-size:14px}';
-      (document.head||document.documentElement).appendChild(s);
-      const ol = document.createElement('div');
-      ol.id = '__flow_host_ol__';
-      ol.innerHTML = '<div class="c"><h3>Signing you in…</h3><p>Automatic Google login · click anywhere to watch</p></div>';
-      ol.addEventListener('click', () => { st.overlayDismissed = true; ol.remove(); }, { once:true });
-      (document.body||document.documentElement).appendChild(ol);
-    }
-    if (onPwd) {
-      const ol = document.getElementById('__flow_host_ol__');
-      if (ol) ol.remove();
-    }
-  } catch (e) {}
-  const pwd = Array.from(document.querySelectorAll('input[name="Passwd"], input[type="password"], input[autocomplete*="current-password"]')).find(el => visible(el));
-  if (pwd && password) {
+
+  const pageTxt = ((document.body && document.body.innerText) || '').slice(0, 1500);
+  const totpEl = document.querySelector('input[name="totpPin"], input#totpPin, input[autocomplete="one-time-code"]');
+  const onTotp = /\/challenge\/totp/i.test(path) ||
+    (totpEl && visible(totpEl)) ||
+    (/Authenticator|2-Step Verification/i.test(pageTxt) && /Enter code|verification code/i.test(pageTxt));
+  if (onTotp) return { ok:true, step:'totp-wait' };
+
+  const onPwdPath = /\/challenge\/pwd/i.test(path);
+  const pwd = Array.from(document.querySelectorAll(
+    'input[name="Passwd"], input[type="password"], input[autocomplete*="current-password"]'
+  )).find(el => visible(el));
+
+  if (pwd && password && (onPwdPath || !document.querySelector('input#identifierId'))) {
     const pwdKey = 'pwd:' + stepKey;
     if (st[pwdKey] === 'submitted') return { ok:true, step:'password-done' };
     const already = (pwd.value || '') === password;
     const ok = already || fill(pwd, password);
-    if (ok && st[pwdKey] !== 'filled') {
+    if (!ok) return { ok:false, step:'password', reason:'fill-failed', valLen:(pwd.value||'').length };
+    if (st[pwdKey] !== 'filled' && st[pwdKey] !== 'submitted') {
       st[pwdKey] = 'filled';
       setTimeout(() => {
         if (st[pwdKey] === 'submitted') return;
-        if (clickNext()) st[pwdKey] = 'submitted';
-      }, 500);
+        if (!pwd.isConnected) { delete st[pwdKey]; return; }
+        // Never click Next on an empty/cleared password field
+        if ((pwd.value || '') !== password) {
+          const again = fill(pwd, password);
+          if (!again || (pwd.value || '') !== password) { delete st[pwdKey]; return; }
+        }
+        if (document.querySelector('input[name="totpPin"], input#totpPin')) return;
+        if (clickNextFor('password')) st[pwdKey] = 'submitted';
+        else delete st[pwdKey];
+      }, 900);
     }
-    return { ok, step:'password', already };
+    return { ok:true, step:'password', already };
   }
+
+  // SPA lag: password URL but field not mounted — do not click email Next
+  if (onPwdPath) return { ok:false, reason:'awaiting-password', path };
+
   const em = document.querySelector('input#identifierId, input[type="email"], input[name="identifier"], input[autocomplete="username"]');
-  if (em && visible(em) && email) {
+  if (em && visible(em) && email && (!pwd || !visible(pwd))) {
     const emKey = 'email:' + stepKey;
     if (st[emKey] === 'submitted') return { ok:true, step:'email-done' };
     const already = (em.value || '').toLowerCase() === email.toLowerCase();
     const ok = already || fill(em, email);
-    if (ok && st[emKey] !== 'filled' && st[emKey] !== 'submitted') {
+    if (!ok) return { ok:false, step:'email', reason:'fill-failed' };
+    if (st[emKey] !== 'filled' && st[emKey] !== 'submitted') {
       st[emKey] = 'filled';
       setTimeout(() => {
         if (st[emKey] === 'submitted') return;
-        if (clickNext()) st[emKey] = 'submitted';
+        if (!em.isConnected) { delete st[emKey]; return; }
+        // Already moved to password — never fire identifier Next there
+        if (/\/challenge\/pwd/i.test(location.pathname || '')) return;
+        if (document.querySelector('input[name="Passwd"], input[type="password"]')) {
+          const p = document.querySelector('input[name="Passwd"], input[type="password"]');
+          if (p && visible(p)) return;
+        }
+        if ((em.value || '').toLowerCase() !== email.toLowerCase()) { delete st[emKey]; return; }
+        if (clickNextFor('identifier')) st[emKey] = 'submitted';
+        else delete st[emKey];
       }, 1100);
     }
-    return { ok, step:'email', already };
+    return { ok:true, step:'email', already };
   }
   return { ok:false, reason:'no-field', path };
 })()

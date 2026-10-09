@@ -1161,30 +1161,33 @@ function findAuthenticatorOption() {
   return null;
 }
 
+function findGoogleNextButton(kind) {
+  const rootSel = kind === 'password' ? '#passwordNext' : kind === 'totp' ? '#totpNext' : '#identifierNext';
+  let next =
+    document.querySelector(rootSel + ' button') ||
+    document.querySelector(rootSel);
+  if (next && isElementVisible(next)) return next;
+
+  // Newer Google UI: jsname / role=button labeled Next
+  next = Array.from(document.querySelectorAll('button, div[role="button"]')).find((b) => {
+    if (!isElementVisible(b)) return false;
+    const t = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
+    return /^next$/i.test(t);
+  });
+  return next || null;
+}
+
 function submitGoogleNext(kind, input) {
   if (DEBUG_FILL_ONLY) {
     console.log('[Flow Preload] DEBUG_FILL_ONLY — skip Next click:', kind);
     return false;
   }
   const pathKey = `${kind}:${location.pathname}`;
-  if (autoLoginState.submittedKeys.has(pathKey + ':submit')) return false;
+  // Do not hard-block retries — Google often paints Next after fill
 
-  const rootSel = kind === 'password' ? '#passwordNext' : '#identifierNext';
-  // Prefer real Next button â€” never form.submit()
-  let next =
-    document.querySelector(rootSel + ' button') ||
-    document.querySelector(rootSel);
-
-  // Fallback: visible button whose label is exactly Next (ignore "Forgot email?")
-  if (!next || !isElementVisible(next)) {
-    next = Array.from(document.querySelectorAll('button')).find(b => {
-      const t = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
-      return /^next$/i.test(t) && isElementVisible(b);
-    });
-  }
+  const next = findGoogleNextButton(kind);
 
   if (next && isElementVisible(next)) {
-    autoLoginState.submittedKeys.add(pathKey + ':submit');
     autoLoginState.lastActionTime = Date.now();
     try {
       next.removeAttribute('disabled');
@@ -1192,7 +1195,25 @@ function submitGoogleNext(kind, input) {
     } catch (e) {}
     try { next.focus(); } catch (e) {}
     try { next.click(); } catch (e) {}
+    autoLoginState.submittedKeys.add(pathKey + ':submit');
     return true;
+  }
+
+  // Fallback: Enter on the input (works when Next is delayed/hidden)
+  if (input && input.isConnected) {
+    try {
+      input.focus();
+      const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+      input.dispatchEvent(new KeyboardEvent('keydown', opts));
+      input.dispatchEvent(new KeyboardEvent('keypress', opts));
+      input.dispatchEvent(new KeyboardEvent('keyup', opts));
+      if (input.form) {
+        try { input.form.requestSubmit(); } catch (e) {}
+      }
+      autoLoginState.lastActionTime = Date.now();
+      autoLoginState.submittedKeys.add(pathKey + ':submit');
+      return true;
+    } catch (e) {}
   }
   return false;
 }
@@ -1678,8 +1699,10 @@ function runGoogleAutoLogin() {
     } catch (e) {}
 
     if (autoLoginState.passwordSubmitted) {
-      // Only retry on a clear wrong-password alert — not generic page text
-      if (hasGoogleAuthError() && now - autoLoginState.lastActionTime > 8000 && autoLoginState.attempts < 1) {
+      const stuckTooLong = now - autoLoginState.lastActionTime > 8000;
+      const wrongPwd = hasGoogleAuthError();
+      // Retry if wrong password OR still on /challenge/pwd with no progress (Next click was a no-op)
+      if (stuckTooLong && autoLoginState.attempts < 2 && (wrongPwd || onPwdChallenge)) {
         autoLoginState.attempts += 1;
         autoLoginState.passwordSubmitted = false;
         autoLoginState.submittedKeys.delete(`password:${pathname}:fill`);
@@ -1690,6 +1713,7 @@ function runGoogleAutoLogin() {
             delete window.__flowHostAuto[pwdKey];
           }
         } catch (e) {}
+        console.warn('[Flow Preload] Password step stuck — retry submit', { wrongPwd, attempts: autoLoginState.attempts });
       } else {
         return;
       }
@@ -1708,17 +1732,27 @@ function runGoogleAutoLogin() {
       autoLoginState.lastActionTime = now;
       if (DEBUG_FILL_ONLY) {
         console.log('[Flow Preload] DEBUG_FILL_ONLY — password filled, wait for manual Next');
-      } else {
-        setTimeout(() => {
-          if (!passwordInput.isConnected) return;
-          if (autoLoginState.passwordSubmitted) return;
-          autoLoginState.passwordSubmitted = true;
-          try {
-            window.__flowHostAuto = window.__flowHostAuto || {};
-            window.__flowHostAuto['pwd:' + location.pathname.split('/').slice(0, 5).join('/')] = 'submitted';
-          } catch (e) {}
-          submitGoogleNext('password', passwordInput);
-        }, 1600);
+        return;
+      }
+    }
+
+    // Keep clicking Next until navigation — previously we set passwordSubmitted
+    // even when click failed, which froze on /challenge/pwd until manual reload.
+    if (!DEBUG_FILL_ONLY && !autoLoginState.passwordSubmitted) {
+      if (now - (autoLoginState.lastActionTime || 0) < 700) return;
+      const clicked = submitGoogleNext('password', passwordInput);
+      if (clicked) {
+        autoLoginState.passwordSubmitted = true;
+        autoLoginState.lastActionTime = now;
+        try {
+          window.__flowHostAuto = window.__flowHostAuto || {};
+          window.__flowHostAuto['pwd:' + location.pathname.split('/').slice(0, 5).join('/')] = 'submitted';
+        } catch (e) {}
+        console.log('[Flow Preload] Password Next clicked');
+      } else if (now - (autoLoginState.lastActionTime || 0) > 10000 && !autoLoginState.pwdUiReloadTried) {
+        autoLoginState.pwdUiReloadTried = true;
+        console.warn('[Flow Preload] Password Next never appeared — cache reload');
+        try { ipcRenderer.sendToHost('auth:stuck-pwd'); } catch (e) {}
       }
     }
     return;
