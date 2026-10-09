@@ -6,6 +6,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { ArrowLeft, Trash2 } from 'lucide-react';
 import { flowFetch } from '@/lib/flowApi';
 import { HARDCODED_STD_CREDITS } from '@/lib/plans';
+import { formatLogDetails } from '@/lib/adminLogFormat';
 
 type FlowUser = {
   id: string;
@@ -22,6 +23,11 @@ type FlowUser = {
   ownerLabel?: string | null;
   acquiredVia?: string;
   createdAt?: string;
+  lastIp?: string | null;
+  lastCountry?: string | null;
+  lastDeviceId?: string | null;
+  lastClient?: string | null;
+  deviceIds?: string[];
 };
 
 type PlanRow = { id: string; name: string; maxParallel?: number; standardCreditsCycle?: number };
@@ -40,6 +46,7 @@ type ActivityRow = {
   action: string;
   username?: string | null;
   createdAt: string;
+  details?: Record<string, unknown> | null;
 };
 
 const inputClass =
@@ -255,6 +262,21 @@ export default function AdminUserDetailPage() {
             <Card label="OWNER" value={user.ownerLabel || '—'} hint={user.acquiredVia || undefined} />
           </div>
 
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Card label="LAST IP" value={user.lastIp || '—'} />
+            <Card label="COUNTRY" value={user.lastCountry || '—'} />
+            <Card
+              label="DEVICE ID"
+              value={user.lastDeviceId || '—'}
+              hint={
+                Array.isArray(user.deviceIds) && user.deviceIds.length > 1
+                  ? `${user.deviceIds.length} devices seen`
+                  : undefined
+              }
+            />
+            <Card label="CLIENT" value={user.lastClient || '—'} />
+          </div>
+
           <div className="grid gap-5 lg:grid-cols-2">
             <section className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-5">
               <h3 className="mb-3 text-sm font-semibold">Credit history</h3>
@@ -306,15 +328,23 @@ export default function AdminUserDetailPage() {
                     Activity
                   </h4>
                   <ul className="max-h-40 space-y-2 overflow-auto text-xs text-[var(--ink2)]">
-                    {activity.map((a) => (
-                      <li key={a.id}>
-                        <span className="text-[var(--ink3)]">
-                          {new Date(a.createdAt).toLocaleString()}
-                        </span>{' '}
-                        · {a.action}
-                        {a.username ? ` by ${a.username}` : ''}
-                      </li>
-                    ))}
+                    {activity.map((a) => {
+                      const detail = formatLogDetails(a.details || null);
+                      return (
+                        <li key={a.id}>
+                          <span className="text-[var(--ink3)]">
+                            {new Date(a.createdAt).toLocaleString()}
+                          </span>{' '}
+                          · {a.action}
+                          {a.username ? ` by ${a.username}` : ''}
+                          {detail ? (
+                            <span className="mt-0.5 block font-mono text-[10px] text-[var(--ink3)]">
+                              {detail}
+                            </span>
+                          ) : null}
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               )}

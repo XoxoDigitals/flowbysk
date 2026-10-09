@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { flowFetch } from '@/lib/flowApi';
+import { formatLogDetails } from '@/lib/adminLogFormat';
 
 type LogRow = {
   id?: string;
@@ -13,6 +14,14 @@ type LogRow = {
   createdAt?: string;
   timestamp?: string;
 };
+
+function actionBadgeClass(action?: string) {
+  if (action === 'client_login') return 'bg-emerald-500/15 text-emerald-400';
+  if (action === 'suspicious_login' || action === 'ban_user') return 'bg-rose-500/15 text-rose-400';
+  if (action === 'login_failed') return 'bg-amber-500/15 text-amber-400';
+  if (action === 'switch_server') return 'bg-sky-500/15 text-sky-400';
+  return 'bg-[var(--bg2)] text-[var(--ink2)]';
+}
 
 export default function AdminLogsPage() {
   const [logs, setLogs] = useState<LogRow[]>([]);
@@ -41,7 +50,9 @@ export default function AdminLogsPage() {
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-center justify-between">
-        <p className="text-[13px] text-[var(--ink3)]">Auth, credits, and admin actions from Express</p>
+        <p className="text-[13px] text-[var(--ink3)]">
+          Auth, credits, Device ID / IP / country, and admin actions
+        </p>
         <button type="button" onClick={load} className="btn-secondary !px-3 !py-2 !text-xs">
           <RefreshCw className="h-3.5 w-3.5" />
           Refresh
@@ -59,7 +70,7 @@ export default function AdminLogsPage() {
               <th className="px-4 py-3">When</th>
               <th className="px-4 py-3">Who</th>
               <th className="px-4 py-3">Action</th>
-              <th className="px-4 py-3">Details</th>
+              <th className="px-4 py-3">IP / Country / Device / Client</th>
             </tr>
           </thead>
           <tbody>
@@ -83,9 +94,15 @@ export default function AdminLogsPage() {
                     <span className="font-medium">{log.username || '—'}</span>
                     <span className="ml-1 text-[11px] text-[var(--ink3)]">{log.role || ''}</span>
                   </td>
-                  <td className="px-4 py-3 font-mono text-[12px]">{log.action || '—'}</td>
+                  <td className="px-4 py-3">
+                    <span
+                      className={`inline-block rounded-md px-2 py-0.5 font-mono text-[11px] ${actionBadgeClass(log.action)}`}
+                    >
+                      {log.action || '—'}
+                    </span>
+                  </td>
                   <td className="px-4 py-3 font-mono text-[11px] text-[var(--ink2)] break-all">
-                    {log.details ? JSON.stringify(log.details) : '—'}
+                    {formatLogDetails(log.details) || '—'}
                   </td>
                 </tr>
               ))

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { RefreshCw } from 'lucide-react';
 import { flowFetch } from '@/lib/flowApi';
+import { formatPeriodWindow } from '@/lib/adminLogFormat';
 
 type ServerMetric = {
   id: string;
@@ -12,6 +13,15 @@ type ServerMetric = {
   isActive: boolean;
   hasTotp: boolean;
   assignedUserCount: number;
+};
+
+type PeriodStats = {
+  periodStart?: string;
+  periodEnd?: string;
+  newUsers?: number;
+  renewals?: number;
+  total?: number;
+  error?: string;
 };
 
 type Metrics = {
@@ -24,6 +34,7 @@ type Metrics = {
   resellers: number;
   systemUsers: number;
   adminUserCounts?: { id: string; username: string; displayName?: string; userCount: number }[];
+  period?: PeriodStats | null;
   servers: ServerMetric[];
 };
 
@@ -123,6 +134,29 @@ export default function AdminOverviewPage() {
             <StatCard label="RESELLERS" value={metrics.resellers} href="/admin/resellers" />
             <StatCard label="SYSTEM USERS" value={metrics.systemUsers} href="/admin/system-users" />
           </div>
+
+          {metrics.period && !metrics.period.error ? (
+            <section className="flex flex-col gap-3">
+              <div className="flex flex-wrap items-end justify-between gap-2">
+                <div>
+                  <h2 className="text-[15px] font-semibold tracking-tight">
+                    Billing period (20th → 20th UTC)
+                  </h2>
+                  <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
+                    New users vs renewals in the current window
+                  </p>
+                </div>
+                <span className="rounded-md bg-[var(--bg2)] px-2.5 py-1 font-mono text-[11px] text-[var(--ink2)]">
+                  {formatPeriodWindow(metrics.period.periodStart, metrics.period.periodEnd)}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3">
+                <StatCard label="NEW USERS" value={metrics.period.newUsers ?? 0} href="/admin/users" />
+                <StatCard label="RENEWALS" value={metrics.period.renewals ?? 0} />
+                <StatCard label="PERIOD TOTAL" value={metrics.period.total ?? 0} />
+              </div>
+            </section>
+          ) : null}
 
           <section className="flex flex-col gap-3">
             <div>
