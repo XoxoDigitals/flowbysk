@@ -344,6 +344,13 @@ router.get('/metrics', requireAdminAuth, async (req, res) => {
     period = { error: err.message || 'period_stats_failed' };
   }
 
+  let planBreakdown = { rows: [], byPlan: [] };
+  try {
+    planBreakdown = await db.adminPlanBreakdown(adminUserCounts);
+  } catch (err) {
+    planBreakdown = { rows: [], byPlan: [], error: err.message || 'plan_breakdown_failed' };
+  }
+
   res.json({
     success: true,
     metrics: {
@@ -357,6 +364,7 @@ router.get('/metrics', requireAdminAuth, async (req, res) => {
       systemUsers: (await db.getSystemUsers()).length + 1,
       adminUserCounts,
       period,
+      planBreakdown,
       servers: servers.map((s) => ({
         id: s.id,
         name: s.name,

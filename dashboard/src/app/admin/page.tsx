@@ -43,6 +43,18 @@ type Metrics = {
     periodTotal?: number;
   }[];
   period?: PeriodStats | null;
+  planBreakdown?: {
+    rows?: {
+      planId?: string | null;
+      planName: string;
+      adminId: string;
+      adminUsername: string;
+      adminDisplayName?: string;
+      userCount: number;
+    }[];
+    byPlan?: { planName: string; userCount: number }[];
+    error?: string;
+  } | null;
   servers: ServerMetric[];
 };
 
@@ -221,6 +233,72 @@ export default function AdminOverviewPage() {
                 </tbody>
               </table>
             </div>
+          </section>
+
+          <section className="flex flex-col gap-3">
+            <div>
+              <h2 className="text-[15px] font-semibold tracking-tight">Users by plan × admin</h2>
+              <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
+                Sorted by plan — how many users each admin has on each plan
+              </p>
+            </div>
+            {metrics.planBreakdown?.error ? (
+              <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+                Plan breakdown unavailable: {metrics.planBreakdown.error}
+              </p>
+            ) : (
+              <>
+                {(metrics.planBreakdown?.byPlan || []).length > 0 && (
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                    {(metrics.planBreakdown?.byPlan || []).map((p) => (
+                      <StatCard
+                        key={p.planName}
+                        label={p.planName.toUpperCase()}
+                        value={p.userCount}
+                        href="/admin/users"
+                      />
+                    ))}
+                  </div>
+                )}
+                <div className="overflow-hidden rounded-2xl border border-[var(--line)]">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-[var(--bg2)] text-[11px] uppercase tracking-wider text-[var(--ink3)]">
+                      <tr>
+                        <th className="px-4 py-3 font-medium">Plan</th>
+                        <th className="px-4 py-3 font-medium">Admin</th>
+                        <th className="px-4 py-3 font-medium">Users</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(metrics.planBreakdown?.rows || []).map((r) => (
+                        <tr
+                          key={`${r.planName}-${r.adminId}`}
+                          className="border-t border-[var(--line)]"
+                        >
+                          <td className="px-4 py-3 font-medium">{r.planName}</td>
+                          <td className="px-4 py-3">
+                            <span className="font-medium">
+                              {r.adminDisplayName || r.adminUsername}
+                            </span>
+                            {r.adminDisplayName ? (
+                              <div className="text-[11px] text-[var(--ink3)]">{r.adminUsername}</div>
+                            ) : null}
+                          </td>
+                          <td className="px-4 py-3 font-mono">{r.userCount}</td>
+                        </tr>
+                      ))}
+                      {!(metrics.planBreakdown?.rows || []).length && (
+                        <tr>
+                          <td colSpan={3} className="px-4 py-6 text-center text-[var(--ink3)]">
+                            No plan assignments yet
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
           </section>
 
           <section className="flex flex-col gap-3">

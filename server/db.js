@@ -1611,6 +1611,67 @@ class Database {
     return rows.map((r) => r.id);
   }
 
+  /**
+   * Per-admin plan counts, sorted by plan name then user count desc.
+   * @param {Array<{id:string,username:string,displayName?:string}>} admins
+   */
+  async adminPlanBreakdown(admins = []) {
+    await this.ready();
+    const rows = [];
+    const planTotals = new Map();
+
+    for (const admin of admins || []) {
+      if (!admin?.id) continue;
+      const customers = await prisma.user.findMany({
+        where: await this.ownedCustomerWhereForAdmin(admin.id),
+        select: {
+          id: true,
+          subscriptions: {
+            where: { status: 'ACTIVE' },
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            include: { plan: { select: { id: true, name: true } } },
+          },
+        },
+      });
+
+      const counts = new Map();
+      for (const c of customers) {
+        const plan = c.subscriptions?.[0]?.plan;
+        const planName = plan?.name || 'Standard';
+        const planId = plan?.id || null;
+        const key = planId || `name:${planName}`;
+        const cur = counts.get(key) || { planId, planName, count: 0 };
+        cur.count += 1;
+        counts.set(key, cur);
+      }
+
+      for (const v of counts.values()) {
+        rows.push({
+          planId: v.planId,
+          planName: v.planName,
+          adminId: admin.id,
+          adminUsername: admin.username,
+          adminDisplayName: admin.displayName || '',
+          userCount: v.count,
+        });
+        planTotals.set(v.planName, (planTotals.get(v.planName) || 0) + v.count);
+      }
+    }
+
+    rows.sort((a, b) => {
+      const byPlan = String(a.planName).localeCompare(String(b.planName));
+      if (byPlan) return byPlan;
+      return b.userCount - a.userCount;
+    });
+
+    const byPlan = [...planTotals.entries()]
+      .map(([planName, userCount]) => ({ planName, userCount }))
+      .sort((a, b) => b.userCount - a.userCount || a.planName.localeCompare(b.planName));
+
+    return { rows, byPlan };
+  }
+
   async ownedUserCountsByAdmin() {
     await this.ready();
     const admins = await prisma.user.findMany({
