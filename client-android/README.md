@@ -6,7 +6,7 @@ Native Android host with dual WebViews — same shell + Flow inject architecture
 
 - JDK 17+
 - Android SDK (`compileSdk` / `targetSdk` 35)
-- A reachable Flow API server (`/api/client/*`)
+- A reachable Flow API server (`/api/v6/client/*`)
 
 ## Configure server URL
 
@@ -65,19 +65,23 @@ RELEASE_KEY_PASSWORD=...
 | Shell WebView | `ui/app-shell.html` + `shell-bridge.js` |
 | Flow WebView | Google Flow + `flow-inject.js` |
 | `ShellHost` / `FlowHost` | `chrome.webview` polyfill bridges |
-| `AppConfig` | `serverUrl`, session token, user JSON |
+| `AppConfig` | Keystore `EncryptedSharedPreferences` (JWT / serverUrl only) |
+| `CredChannelHost` | Kotlin X25519 ECDH fallback when WebCrypto is unavailable |
 
-`preBuild` copies `../client-webview2/FlowBrowser/www` → `app/src/main/assets/www`.
+`preBuild` copies `../client-webview2/FlowBrowser/www` → `app/src/main/assets/www` (v6 shell + `cred-channel.js`).
+
+Default server URL: `https://flowcreatorai.site` (override via `local.properties`).
 
 ## Manual test checklist
 
-1. Login against your API (`/api/client/login`)
-2. Session verify / credits display
+1. Login against `/api/v6/client/login` (expects `channel` + sealed creds)
+2. Kill/reopen app — session restores via EncryptedSharedPreferences
 3. Shell switches to chrome mode and loads Flow
-4. Generate image/video → credit deduct (`/api/client/use-credit`)
+4. Generate image/video → credit deduct (`/api/v6/client/use-credit`)
 5. Server switch / OTP path (if used)
 6. Download lands in Downloads and shell gets completed event
-7. Logout clears Flow cookies (`clearPartitionSession`)
+7. Logout clears Flow cookies (`clearPartitionSession`) + encrypted session
+8. Confirm `filesDir` has no plaintext `flow_client_config.json`
 
 ## Notes
 

@@ -40,8 +40,42 @@ if (window.__flowInjectBootstrapped) {
 // MASKING RULES & CREDENTIALS STATE
 // =========================================================================
 
-const TARGET_MODEL_DISPLAY = "Veo 3.1 - Fast";
-const TARGET_MODEL_SHORT = "Fast";
+const TARGET_MODEL_DISPLAY = "Lower Priority";
+const TARGET_MODEL_SHORT = "Priority";
+
+/** Strip Material icon ligatures / chrome from model label text. */
+function normalizeModelLabel(text) {
+  return String(text || '')
+    .replace(/volume_up|arrow_drop_down|check|done|chevron_right|expand_more|radio_button_checked|radio_button_unchecked/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Blocked model picker labels — hide ONLY these four so other options stay.
+ * Keep "lower priority" / alternate variants and image models visible.
+ */
+function isBlockedModelLabel(text) {
+  if (!text) return false;
+  const t = normalizeModelLabel(text);
+  if (!t || t.length > 120) return false;
+  // Always keep lower-priority / alternate SKUs
+  if (/lower\s*priority/i.test(t)) return false;
+  // Never hide image models / UI chrome
+  if (/banana|nano|imagen|\bimage\b|frames|ingredients|aspect|duration|resolution/i.test(t)) return false;
+
+  const n = t.toLowerCase();
+  // Exact / near-exact matches for the four Flow menu items
+  if (/^omni\s*1\.?1\s*flash$/i.test(t) || (/\bomni\b/i.test(n) && /\bflash\b/i.test(n))) return true;
+  if (/^veo\s*3\.?1\s*[-–—]?\s*lite$/i.test(t)) return true;
+  if (/^veo\s*3\.?1\s*[-–—]?\s*fast$/i.test(t)) return true;
+  if (/^veo\s*3\.?1\s*[-–—]?\s*quality$/i.test(t)) return true;
+  // Broader: Veo 3.1 Lite/Fast/Quality without lower-priority suffix
+  if (/veo\s*3\.?1/i.test(n) && /\blite\b/i.test(n) && !/lower/i.test(n)) return true;
+  if (/veo\s*3\.?1/i.test(n) && /\bfast\b/i.test(n) && !/lower/i.test(n)) return true;
+  if (/veo\s*3\.?1/i.test(n) && /\bquality\b/i.test(n) && !/lower/i.test(n)) return true;
+  return false;
+}
 
 let maskingRules = {
   modelRenames: [],
@@ -77,6 +111,8 @@ let autoLoginState = {
   overlayDismissed: false,
   lastHostNotify: '',
 };
+
+const DEBUG_FILL_ONLY = false;
 
 // =========================================================================
 // IMMEDIATE SAFETY & PROTECTION STYLES
@@ -346,7 +382,7 @@ function deductCredits(modelDetails, count = 1, uniqueId = '') {
 
   console.log(`[Flow Credit Engine] Deducting ${totalAmount} credits for ${effectiveCount} ${type}(s) using ${modelName}. Reason: ${reason}`);
 
-  // Send IPC message to Flow Browser app-shell (which calls server /api/client/use-credit)
+  // Send IPC message to Flow Browser app-shell (which calls server /api/{v2|v3}/client/use-credit)
   ipcRenderer.sendToHost('credit:deduct', {
     amount: totalAmount,
     count: effectiveCount,
@@ -811,18 +847,8 @@ function isOtherModelOption(text, el) {
     return false;
   }
 
-  // Strictly VIDEO models that should be hidden (so ONLY Veo 3.1 Lite Lower Priority remains):
-  return (
-    t.includes('omni') ||
-    t.includes('quality') ||
-    t.includes('flash') ||
-    t.includes('veo 2') ||
-    t.includes('veo 1') ||
-    t.includes('gemini') ||
-    t.includes('veo 3.1 - quality') ||
-    t.includes('veo 3.1 quality') ||
-    (t.includes('veo') && !t.includes('lite') && !t.includes('lower priority'))
-  );
+  // Strictly the blocked video models (Omni Flash / Veo 3.1 Lite·Fast·Quality)
+  return isBlockedModelLabel(t);
 }
 
 // Model renaming removed — show original Google Flow labels
@@ -849,15 +875,126 @@ function isSettingsOverlayPanel(el) {
 }
 
 function dismissVideoModelMenus() {
-  // Model items are individually filtered via isOtherModelOption to avoid hiding navigation panels
+  // Model items are individually filtered via isBlockedModelLabel
+}
+
+function modelLabelFromEl(el) {
+  if (!el) return '';
+  const labelEl = el.querySelector(
+    '.label, .item-text .label, .item-text, .mat-mdc-menu-item-text, .model-select-trigger-content'
+  );
+  return normalizeModelLabel(
+    (labelEl && (labelEl.innerText || labelEl.textContent)) ||
+      el.innerText ||
+      el.textContent ||
+      el.getAttribute('aria-label') ||
+      ''
+  );
+}
+
+function hideBlockedModelNode(el) {
+  if (!el) return;
+  const target = el.closest('flow-menu-item') || el;
+  try { target.setAttribute('data-flow-blocked-model', '1'); } catch (e) {}
+  try {
+    target.style.setProperty('display', 'none', 'important');
+    target.style.setProperty('visibility', 'hidden', 'important');
+    target.style.setProperty('pointer-events', 'none', 'important');
+    target.style.setProperty('opacity', '0', 'important');
+    target.style.setProperty('height', '0px', 'important');
+    target.style.setProperty('max-height', '0px', 'important');
+    target.style.setProperty('overflow', 'hidden', 'important');
+    target.setAttribute('aria-hidden', 'true');
+  } catch (e) {}
+  // Also hide nested button so Material ripple doesn't keep it focusable
+  try {
+    target.querySelectorAll('button, [role="menuitem"]').forEach((b) => {
+      b.style.setProperty('display', 'none', 'important');
+      b.setAttribute('aria-hidden', 'true');
+      try { b.disabled = true; } catch (e2) {}
+    });
+  } catch (e) {}
 }
 
 function enforceModelRestrictions() {
-  // Model locking disabled — leave Google Flow model picker alone
+  try {
+    const host = (location.hostname || '').toLowerCase();
+    if (!host.includes('flow.google.com') && !host.includes('labs.google')) return;
+
+    const hideBlocked = (el) => {
+      if (!el) return;
+      if (el.getAttribute('data-flow-blocked-model') === '1') {
+        hideBlockedModelNode(el);
+        return;
+      }
+      const raw = modelLabelFromEl(el);
+      if (!raw || raw.length > 120) return;
+      if (!isBlockedModelLabel(raw)) return;
+      hideBlockedModelNode(el);
+    };
+
+    document.querySelectorAll(
+      'flow-menu-item, button.mat-mdc-menu-item, button[mat-menu-item], ' +
+      'button.flow-internal-menu-item, [role="menuitem"], .flow-internal-menu-item'
+    ).forEach(hideBlocked);
+
+    // Menu panels that mount late (CDK overlay)
+    document.querySelectorAll(
+      '.mat-mdc-menu-content flow-menu-item, .mat-mdc-menu-panel [role="menuitem"], ' +
+      '.cdk-overlay-container flow-menu-item, .cdk-overlay-container [role="menuitem"]'
+    ).forEach(hideBlocked);
+  } catch (e) {}
 }
 
 function autoSelectLowerPriorityModel() {
-  // Auto-switch to Lite disabled — user can pick any model
+  try {
+    const host = (location.hostname || '').toLowerCase();
+    if (!host.includes('flow.google.com') && !host.includes('labs.google')) return;
+    if (!window.__flowBlockedModelKickAt) window.__flowBlockedModelKickAt = 0;
+    const now = Date.now();
+    if (now - window.__flowBlockedModelKickAt < 1800) return;
+
+    // If the visible model trigger still shows a blocked label, open menu and pick an allowed item
+    const triggers = Array.from(document.querySelectorAll(
+      'button[aria-label="Select model family"], button.mat-mdc-menu-trigger .model-select-trigger-content, .model-select-trigger-content'
+    ));
+    let needsSwitch = false;
+    for (const tr of triggers) {
+      const t = modelLabelFromEl(tr);
+      if (isBlockedModelLabel(t)) { needsSwitch = true; break; }
+    }
+    if (!needsSwitch) return;
+
+    window.__flowBlockedModelKickAt = now;
+    // Prefer already-open allowed menu item (lower priority first, then any non-blocked model)
+    const items = Array.from(document.querySelectorAll(
+      'flow-menu-item button, button.mat-mdc-menu-item, [role="menuitem"], button.flow-internal-menu-item'
+    )).filter((el) => {
+      if (!isElementVisible(el)) return false;
+      if (el.getAttribute('data-flow-blocked-model') === '1') return false;
+      if (el.closest('[data-flow-blocked-model="1"]')) return false;
+      const t = modelLabelFromEl(el);
+      if (!t || t.length > 120) return false;
+      if (isBlockedModelLabel(t)) return false;
+      return /veo|omni|banana|nano|flash|lite|fast|quality|priority/i.test(t);
+    });
+    items.sort((a, b) => {
+      const score = (el) => {
+        const t = modelLabelFromEl(el).toLowerCase();
+        if (/lower\s*priority/.test(t)) return 0;
+        if (/banana|nano/.test(t)) return 1;
+        return 2;
+      };
+      return score(a) - score(b);
+    });
+    if (items[0]) {
+      hardClick(items[0]);
+      return;
+    }
+    // Open first model family trigger so the menu mounts, then next tick will pick
+    const openBtn = document.querySelector('button[aria-label="Select model family"]');
+    if (openBtn && isElementVisible(openBtn)) hardClick(openBtn);
+  } catch (e) {}
 }
 
 // =========================================================================
@@ -938,6 +1075,7 @@ function hardClick(el) {
 }
 
 function clickOnce(key, el) {
+  if (DEBUG_FILL_ONLY) return false;
   if (!el || !isElementVisible(el) || autoLoginState.submittedKeys.has(key)) return false;
   autoLoginState.submittedKeys.add(key);
   autoLoginState.lastActionTime = Date.now();
@@ -1024,6 +1162,10 @@ function findAuthenticatorOption() {
 }
 
 function submitGoogleNext(kind, input) {
+  if (DEBUG_FILL_ONLY) {
+    console.log('[Flow Preload] DEBUG_FILL_ONLY — skip Next click:', kind);
+    return false;
+  }
   const pathKey = `${kind}:${location.pathname}`;
   if (autoLoginState.submittedKeys.has(pathKey + ':submit')) return false;
 
@@ -1299,17 +1441,7 @@ function runGoogleAutoLogin() {
   if (hostname.includes('flow.google.com') || hostname.includes('labs.google')) {
     removeAutoLoginOverlay();
     removeCaptchaBanner();
-    const path = (location.pathname || '').toLowerCase();
-    // Marketing /about after OAuth = session not fully attached. Enter app root once.
-    // Do NOT click Sign in (that restarts Google and loops).
-    if (path === '/about' || path.startsWith('/about/') || path === '/landing') {
-      if (!autoLoginState.submittedKeys.has('flow-about-root')) {
-        autoLoginState.submittedKeys.add('flow-about-root');
-        console.log('[Flow Preload] /about after auth → navigate to Flow root');
-        try { location.replace('https://flow.google.com/'); } catch (e) {}
-      }
-      return;
-    }
+    // Stay on /about or /landing — bouncing to root blinks and races AppShell login start.
     const isWorkspace = !!(
       document.querySelector('flow-app, flow-app-root, flow-projects-page, [data-testid*="project"]') ||
       (document.querySelector('header, flow-app-header, [role="banner"]') &&
@@ -1324,7 +1456,28 @@ function runGoogleAutoLogin() {
     return;
   }
 
-  if (!hostname.includes('accounts.google.com')) return;
+  if (!hostname.includes('accounts.google.com') && !hostname.includes('accounts.youtube.com')) return;
+
+  // Final Google handoff — CheckCookie / LoginDone often stalls under our overlay.
+  // Jump to continue= (Flow) once cookies are set.
+  if (/CheckCookie|LoginDoneHtml|chtml=LoginDone/i.test(location.href + pathname)) {
+    if (!autoLoginState.submittedKeys.has('checkcookie-continue')) {
+      autoLoginState.submittedKeys.add('checkcookie-continue');
+      let dest = 'https://flow.google.com/';
+      try {
+        const cont = new URL(location.href).searchParams.get('continue');
+        if (cont && /^https:\/\//i.test(cont)) dest = cont;
+      } catch (e) {}
+      console.log('[Flow Preload] CheckCookie/LoginDone →', dest);
+      notifyAuthHost('auth:auto-login', { overlay: false, captcha: false, done: true });
+      setTimeout(() => {
+        try { location.replace(dest); } catch (e) {
+          try { location.href = dest; } catch (e2) {}
+        }
+      }, 500);
+    }
+    return;
+  }
 
   const onPwdChallenge = /\/challenge\/pwd(?:\/|$)/i.test(pathname);
   const passwordInputEarly = document.querySelector('input[type="password"], input[name="Passwd"], input[name="password"], input[autocomplete="current-password"]');
@@ -1424,7 +1577,7 @@ function runGoogleAutoLogin() {
     );
 
   // "Get a code to sign in" / g.co/sc / skotp → Try another way FIRST (before authenticator pick)
-  if (onSecurityCodeScreen && !totpReady) {
+  if (!DEBUG_FILL_ONLY && onSecurityCodeScreen && !totpReady) {
     const tryAnother =
       buttonByLabel(/^try another way$/i) ||
       Array.from(document.querySelectorAll('button, a, div[role="button"], span[role="button"], div[role="link"]')).find(
@@ -1441,7 +1594,7 @@ function runGoogleAutoLogin() {
   }
 
   // Selection screen: click "Get a verification code from the Google Authenticator app"
-  if (!totpReady && (onChallengeChooser || /authenticator/i.test(pageText))) {
+  if (!DEBUG_FILL_ONLY && !totpReady && (onChallengeChooser || /authenticator/i.test(pageText))) {
     const authTarget = findAuthenticatorOption();
     if (authTarget) {
       const retryBucket = Math.floor(now / 2000);
@@ -1453,6 +1606,8 @@ function runGoogleAutoLogin() {
   }
 
   // TOTP code field: request OTP from host, then fill + Next
+  // Also runs on accounts.youtube.com/SetSID where the Authenticator UI is painted
+  // without /challenge/totp in the URL.
   if (totpReady) {
     if (!credentials._otp) {
       if (!autoLoginState.otpRequested || now - autoLoginState.lastActionTime > 5000) {
@@ -1464,19 +1619,35 @@ function runGoogleAutoLogin() {
       return;
     }
     const fillKey = `otp:${pathname}:fill`;
-    if (!autoLoginState.submittedKeys.has(fillKey)) {
+    const nextKey = `otp:${pathname}:next`;
+    const alreadyFilled =
+      (totpInput.value || '').replace(/\s+/g, '') === String(credentials._otp).replace(/\s+/g, '');
+    if (!autoLoginState.submittedKeys.has(fillKey) || !alreadyFilled) {
       fillInputValue(totpInput, String(credentials._otp));
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.otpFilled = true;
       autoLoginState.lastActionTime = now;
+      console.log('[Flow Preload] TOTP filled — waiting for Google to complete session (no Next yet)');
+    }
+    // Do not click Next immediately — Google finishes the session after the code settles.
+    // Soft fallback only if still on TOTP after a long wait.
+    if (!DEBUG_FILL_ONLY && !autoLoginState.submittedKeys.has(nextKey)) {
+      autoLoginState.submittedKeys.add(nextKey);
       setTimeout(() => {
         if (!totpInput.isConnected) return;
+        const val = (totpInput.value || '').replace(/\s+/g, '');
+        if (!val) return;
+        const stillTotp =
+          /\/challenge\/totp/i.test(location.pathname || '') ||
+          !!(document.querySelector('input[name="totpPin"], input#totpPin'));
+        if (!stillTotp) return;
+        console.log('[Flow Preload] TOTP still showing after wait — soft Next fallback');
         submitGoogleNext('totp', totpInput);
         const next =
           document.querySelector('#totpNext button, #totpNext, #idvPreregisteredPhoneNext button') ||
           buttonByLabel(/^next$/i);
-        if (next && isElementVisible(next)) next.click();
-      }, 1800);
+        if (next && isElementVisible(next)) hardClick(next);
+      }, 8000);
     }
     return;
   }
@@ -1535,16 +1706,20 @@ function runGoogleAutoLogin() {
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.passwordFilled = true;
       autoLoginState.lastActionTime = now;
-      setTimeout(() => {
-        if (!passwordInput.isConnected) return;
-        if (autoLoginState.passwordSubmitted) return;
-        autoLoginState.passwordSubmitted = true;
-        try {
-          window.__flowHostAuto = window.__flowHostAuto || {};
-          window.__flowHostAuto['pwd:' + location.pathname.split('/').slice(0, 5).join('/')] = 'submitted';
-        } catch (e) {}
-        submitGoogleNext('password', passwordInput);
-      }, 1600);
+      if (DEBUG_FILL_ONLY) {
+        console.log('[Flow Preload] DEBUG_FILL_ONLY — password filled, wait for manual Next');
+      } else {
+        setTimeout(() => {
+          if (!passwordInput.isConnected) return;
+          if (autoLoginState.passwordSubmitted) return;
+          autoLoginState.passwordSubmitted = true;
+          try {
+            window.__flowHostAuto = window.__flowHostAuto || {};
+            window.__flowHostAuto['pwd:' + location.pathname.split('/').slice(0, 5).join('/')] = 'submitted';
+          } catch (e) {}
+          submitGoogleNext('password', passwordInput);
+        }, 1600);
+      }
     }
     return;
   }
@@ -1575,19 +1750,24 @@ function runGoogleAutoLogin() {
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.emailFilled = true;
       autoLoginState.lastActionTime = now;
-      setTimeout(() => {
-        if (!emailInput.isConnected) return;
-        if (/\/challenge\/pwd/i.test(location.pathname)) return;
-        autoLoginState.emailSubmitted = true;
-        submitGoogleNext('identifier', emailInput);
-        const next = document.querySelector('#identifierNext button, #identifierNext') || buttonByLabel(/^next$/i);
-        if (next && isElementVisible(next)) hardClick(next);
-      }, 1600);
+      if (DEBUG_FILL_ONLY) {
+        console.log('[Flow Preload] DEBUG_FILL_ONLY — email filled, wait for manual Next');
+      } else {
+        setTimeout(() => {
+          if (!emailInput.isConnected) return;
+          if (/\/challenge\/pwd/i.test(location.pathname)) return;
+          autoLoginState.emailSubmitted = true;
+          submitGoogleNext('identifier', emailInput);
+          const next = document.querySelector('#identifierNext button, #identifierNext') || buttonByLabel(/^next$/i);
+          if (next && isElementVisible(next)) hardClick(next);
+        }, 1600);
+      }
       return;
     }
 
     // If still on identifier after fill+Next, retry Next once (first click often ignored)
     if (
+      !DEBUG_FILL_ONLY &&
       autoLoginState.emailFilled &&
       now - autoLoginState.lastActionTime > 3500 &&
       autoLoginState.attempts < 3 &&
@@ -1609,8 +1789,10 @@ function runGoogleAutoLogin() {
     return;
   }
 
-  // Recovery / home-address / interstitial skip
-  if (dismissGoogleInterstitials()) return;
+  // Recovery / home-address / interstitial skip — never on TOTP / password challenge
+  if (!/\/challenge\/(totp|pwd|selection|sk|iap|dp|ootp)/i.test(pathname)) {
+    if (dismissGoogleInterstitials()) return;
+  }
 
   // Continue / I agree
   if (!emailInput && !passwordInput) {
@@ -1627,8 +1809,90 @@ function dismissGoogleInterstitials() {
   const onGds = host.includes('gds.google.com');
   const onFlow = host.includes('flow.google.com') || host.includes('labs.google');
   const onAccounts = host.includes('accounts.google.com') || host.includes('accounts.youtube.com');
-  const pageLooksRecovery = /make sure you can always sign in|add a recovery phone|your recovery email|set a home address|home and work addresses|recovery options|keep your account safe/i.test(bodySlice);
-  const pathLooksRecovery = /recovery|speedbump|interstitial|accountrecovery|phone|home.?address/i.test(path) || path.includes('/web/recoveryoptions');
+  // Never interrupt password / TOTP / method chooser — but selfie / precollection IS skippable
+  const onHardAuth =
+    onAccounts &&
+    (/\/identifier/i.test(path) ||
+      /\/challenge\/(totp|pwd|selection|sk|iap|dp|ootp)/i.test(path) ||
+      /CheckCookie|LoginDone/i.test(path) ||
+      document.querySelector('input[name="totpPin"], input#totpPin, input[name="Passwd"], input#identifierId'));
+  const onSkipInterstitial =
+    /verification\/selfie|\/selfie\/|precollection|speedbump|idvreenable|phoneverification|confirmidentifier|privacyreminder|accountrecovery|homeaddress|passkeyenrollment|\/rejected/i.test(path) ||
+    /take a selfie|confirm it.?s you|verify it.?s you|use your selfie|add a recovery phone|set a home address|home and work addresses|create a passkey|skip for now/i.test(bodySlice);
+
+  if (onHardAuth && !onSkipInterstitial) return false;
+
+  const pageLooksRecovery = /make sure you can always sign in|add a recovery phone|your recovery email|set a home address|home and work addresses|recovery options|confirm it.?s you|take a selfie/i.test(bodySlice);
+  const pathLooksRecovery =
+    /recovery|speedbump|interstitial|accountrecovery|home.?address|homeaddress|selfie|precollection|verification/i.test(path) ||
+    path.includes('/web/recoveryoptions') ||
+    path.includes('/web/homeaddress');
+  const onHomeAddress =
+    onGds &&
+    (/\/web\/homeaddress/i.test(path) ||
+      /homeaddress|home.?address/i.test(path) ||
+      /set a home address|home and work addresses/i.test(bodySlice));
+
+  // Dedicated home-address clip: Skip / Later / Cancel / Not now — retryable, then bounce to Flow
+  if (onHomeAddress) {
+    try {
+      const now = Date.now();
+      if (!window.__flowHomeAddrClickAt) window.__flowHomeAddrClickAt = 0;
+      if (now - window.__flowHomeAddrClickAt > 900) {
+        window.__flowHomeAddrClickAt = now;
+        const homeDismissRe = /\b(skip|skip for now|not now|no thanks|later|remind me later|maybe later|cancel|close|dismiss|not interested)\b/i;
+        const forbidRe = /^(save|next|continue|done|submit|add|confirm|verify|start|take photo|allow|ok)$/i;
+        const cands = [];
+        document.querySelectorAll(
+          'button, a, [role="button"], div[role="link"], span[role="button"], ' +
+          '[jsname], [data-id], [aria-label]'
+        ).forEach((el) => {
+          if (!isElementVisible(el)) return;
+          const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (!t || t.length > 64) return;
+          if (forbidRe.test(t)) return;
+          if (!homeDismissRe.test(t)) return;
+          cands.push(el);
+        });
+        // Also classic Google skip controls
+        const skipBtn = document.querySelector(
+          '#recoverySkip, button[jsname="j6LnO"], [data-id="skip"], ' +
+          '[aria-label*="Skip" i], [aria-label*="Cancel" i], [aria-label*="Not now" i], ' +
+          '[aria-label*="Later" i], [aria-label*="Remind" i]'
+        );
+        if (skipBtn && isElementVisible(skipBtn)) cands.unshift(skipBtn);
+        if (cands.length) {
+          cands.sort((a, b) => {
+            const score = (el) => {
+              const t = (el.innerText || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().toLowerCase();
+              if (/not now|skip for now/.test(t)) return 0;
+              if (/^skip$|no thanks|not interested/.test(t)) return 1;
+              if (/later|remind/.test(t)) return 2;
+              if (/cancel|close|dismiss/.test(t)) return 3;
+              return 4;
+            };
+            return score(a) - score(b);
+          });
+          hardClick(cands[0]);
+          console.log('[Flow Preload] homeaddress dismiss click:', (cands[0].innerText || '').slice(0, 40));
+        }
+      }
+      if (!window.__flowHomeAddrBounceAt) window.__flowHomeAddrBounceAt = 0;
+      // If still on homeaddress after ~1.8s, force Flow
+      if (!window.__flowHomeAddrSeenAt) window.__flowHomeAddrSeenAt = now;
+      if (now - window.__flowHomeAddrSeenAt > 1800 && now - window.__flowHomeAddrBounceAt > 2500) {
+        window.__flowHomeAddrBounceAt = now;
+        console.log('[Flow Preload] Bouncing off gds homeaddress → Flow');
+        location.replace('https://flow.google.com/');
+        return true;
+      }
+    } catch (e) {}
+    return true;
+  } else {
+    window.__flowHomeAddrSeenAt = 0;
+  }
 
   // Smart-app / "Open in the Google Flow app" banner — hide + click X
   try {
@@ -1655,12 +1919,19 @@ function dismissGoogleInterstitials() {
     });
   } catch (e) {}
 
-  if (!onGds && !pageLooksRecovery && !pathLooksRecovery) {
-    // Still try classic recoverySkip on accounts
+  if (!onGds && !pageLooksRecovery && !pathLooksRecovery && !onSkipInterstitial) {
+    // Still try classic recoverySkip / Not now on accounts
     if (onAccounts) {
       const skipBtn = document.querySelector('#recoverySkip, button[jsname="j6LnO"]');
       if (skipBtn && isElementVisible(skipBtn)) {
         clickOnce('recovery-skip', skipBtn);
+        return true;
+      }
+      const notNow = Array.from(document.querySelectorAll('button, a, [role="button"]')).find((el) =>
+        isElementVisible(el) && /^(not now|skip for now|skip|no thanks)$/i.test((el.innerText || '').replace(/\s+/g, ' ').trim())
+      );
+      if (notNow) {
+        clickOnce('not-now', notNow);
         return true;
       }
     }
@@ -1668,31 +1939,33 @@ function dismissGoogleInterstitials() {
   }
 
   const skipBtn = document.querySelector(
-    '#recoverySkip, button[jsname="j6LnO"], [data-id="skip"], [aria-label*="Skip" i], [aria-label*="Cancel" i], [aria-label*="Not now" i], [aria-label*="No thanks" i]'
+    '#recoverySkip, button[jsname="j6LnO"], [data-id="skip"], [aria-label*="Skip" i], [aria-label*="Cancel" i], [aria-label*="Not now" i], [aria-label*="No thanks" i], [aria-label*="Later" i], [aria-label*="Remind" i]'
   );
   if (skipBtn && isElementVisible(skipBtn)) {
     clickOnce('recovery-skip', skipBtn);
     return true;
   }
 
-  const dismissRe = /^(cancel|skip|not now|no thanks|remind me later|maybe later|later|close|dismiss|not interested)$/i;
+  const dismissRe = /^(not now|skip for now|cancel|skip|no thanks|remind me later|maybe later|later|close|dismiss|not interested)$/i;
   const cands = [];
   document.querySelectorAll('button, a, [role="button"], div[role="link"], span[role="button"]').forEach((el) => {
     if (!isElementVisible(el)) return;
     const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
-    if (!t || t.length > 42) return;
+    if (!t || t.length > 48) return;
     if (!dismissRe.test(t)) return;
-    // Never click Save / Next / Continue on these screens
-    if (/^(save|next|continue|done|submit|add)$/i.test(t)) return;
+    // Never click Save / Next / Continue / Verify on these screens
+    if (/^(save|next|continue|done|submit|add|confirm|verify|start|take photo|allow)$/i.test(t)) return;
     cands.push(el);
   });
   if (cands.length) {
     cands.sort((a, b) => {
       const score = (el) => {
         const t = (el.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
-        if (t === 'cancel') return 0;
-        if (t === 'skip' || t === 'not now' || t === 'no thanks') return 1;
-        return 2;
+        if (t === 'not now' || t === 'skip for now') return 0;
+        if (t === 'skip' || t === 'no thanks' || t === 'not interested') return 1;
+        if (t === 'later' || t === 'remind me later' || t === 'maybe later') return 2;
+        if (t === 'cancel') return 3;
+        return 4;
       };
       return score(a) - score(b);
     });
@@ -1700,14 +1973,16 @@ function dismissGoogleInterstitials() {
     return true;
   }
 
-  // gds / recovery stuck with no Cancel visible — bounce back to Flow
-  if (onGds || (pageLooksRecovery && !onFlow)) {
+  // gds / recovery stuck with no Cancel — NEVER bounce while still on accounts.google.com
+  // (forced flow.google.com jump aborted OTP / CheckCookie and looked like logout)
+  if (onAccounts) return false;
+  if (onGds || (pageLooksRecovery && !onFlow && !onAccounts)) {
     try {
       if (!window.__flowRecoveryBounceAt) window.__flowRecoveryBounceAt = 0;
       const now = Date.now();
-      if (now - window.__flowRecoveryBounceAt > 4500) {
+      if (now - window.__flowRecoveryBounceAt > 2500) {
         window.__flowRecoveryBounceAt = now;
-        console.log('[Flow Preload] Bouncing off Google recovery interstitial');
+        console.log('[Flow Preload] Bouncing off Google recovery interstitial (gds only)');
         location.replace('https://flow.google.com/');
         return true;
       }
@@ -1718,8 +1993,57 @@ function dismissGoogleInterstitials() {
 
 
 // Workspace privacy — keep LIGHT (heavy style forcing freezes Flow → black screen)
+function isProtectedMediaNode(el) {
+  if (!el || !el.closest) return false;
+  try {
+    // Always allow hiding known chrome targets (credits / ULTRA / account / projects grid / model menu)
+    if (
+      el.closest(
+        'flow-credit-banner, .credit-banner, .credit-banner-container, ' +
+        'flow-user-tier-chip, .tier-chip, .header-user-button, ' +
+        '.projects-grid, flow-menu-item.delete-button, ' +
+        'flow-menu-item, [role="menuitem"], .mat-mdc-menu-panel, .mat-mdc-menu-content, ' +
+        '.cdk-overlay-container, [data-flow-blocked-model="1"], ' +
+        '#gb, .boqOnegoogleliteOgbOneGoogleBar, [aria-label="Account details"]'
+      )
+    ) {
+      return false;
+    }
+    // Never hide generated media / gallery canvas — that made All media blank until reload
+    if (
+      el.closest(
+        'flow-media-card, flow-video-card, flow-image-card, flow-project-canvas, ' +
+        '[data-testid*="media"], [data-testid*="gallery"], [class*="media-card"], ' +
+        '[class*="MediaCard"], [class*="gallery"], video, canvas, img[src*="blob:"], ' +
+        'img[src*="googleusercontent"], [role="grid"], [role="list"]'
+      )
+    ) {
+      return true;
+    }
+    // Inside a project, protect the main content surface (where new gens paint)
+    if (/\/project\//i.test(location.pathname || '')) {
+      if (el.closest('main, [role="main"], flow-app, flow-project')) {
+        // Still allow hiding tiny chrome chips (ULTRA) / alerts inside main
+        const tag = (el.tagName || '').toLowerCase();
+        const t = ((el.innerText || el.getAttribute?.('aria-label') || '') + '').replace(/\s+/g, ' ').trim();
+        if (/^ultra$/i.test(t) && t.length <= 12) return false;
+        if (/ULTRA tier/i.test(t)) return false;
+        if (el.getAttribute?.('role') === 'alert' || el.getAttribute?.('role') === 'status') return false;
+        if (tag === 'button' || tag === 'a' || (tag === 'span' && el.childElementCount === 0)) {
+          if (/^ultra$/i.test(t) || /Add AI credits/i.test(t) || /Delete all projects/i.test(t)) return false;
+        }
+        // Protect sizable nodes in the media pane
+        const r = el.getBoundingClientRect?.();
+        if (r && r.width > 80 && r.height > 80) return true;
+      }
+    }
+  } catch (e) {}
+  return false;
+}
+
 function hideEl(el) {
   if (!el || el === document.body || el === document.documentElement || el === document.head) return;
+  if (isProtectedMediaNode(el)) return;
   try {
     el.style.setProperty('display', 'none', 'important');
     el.style.setProperty('visibility', 'hidden', 'important');
@@ -1744,8 +2068,58 @@ function forceRenameLiteEverywhere() {
   // Model renaming disabled
 }
 
+function hideFlowChromeTargets() {
+  try {
+    const sels = [
+      '.projects-grid',
+      'flow-menu-item.delete-button',
+      'flow-credit-banner',
+      '.credit-banner',
+      '.credit-banner-container',
+      'flow-user-tier-chip',
+      '.tier-chip',
+      '.header-user-button',
+      '[aria-label="Account details"]',
+      '[aria-label="ULTRA tier"]',
+      '#gb',
+      '.boqOnegoogleliteOgbOneGoogleBar',
+      '.account-switcher-placeholder'
+    ];
+    sels.forEach((sel) => {
+      document.querySelectorAll(sel).forEach((el) => hideEl(el));
+    });
+    // Menu row by label
+    document.querySelectorAll('flow-menu-item, button[mat-menu-item], [role="menuitem"]').forEach((el) => {
+      const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (/delete all projects/i.test(t)) hideEl(el.closest('flow-menu-item') || el);
+    });
+  } catch (e) {}
+}
+
 function hideUltraControls() {
-  // Ultra / model tier hiding disabled — show all options
+  try {
+    hideFlowChromeTargets();
+    // Only prompt/settings chips — never walk every div (that blanked All media)
+    const roots = document.querySelectorAll(
+      'flow-prompt, [class*="prompt"], [class*="model"], [class*="settings"], [role="listbox"], [role="menu"], header, flow-user-tier-chip'
+    );
+    const scan = (root) => {
+      root.querySelectorAll('button, [role="button"], [role="radio"], [role="tab"], [role="option"], label, span').forEach((el) => {
+        if (!el || el.getAttribute('data-flow-hidden') === '1') return;
+        if (el.childElementCount > 4) return;
+        const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!t || t.length > 24) return;
+        if (!/^ultra$/i.test(t) && !/ULTRA tier/i.test(t)) return;
+        const target =
+          el.closest('flow-user-tier-chip, button, [role="button"], [role="radio"], [role="tab"], [role="option"], label') || el;
+        hideEl(target);
+      });
+    };
+    if (!roots.length) return;
+    roots.forEach(scan);
+  } catch (e) {}
 }
 
 function killAccountPopupNow() {
@@ -1931,9 +2305,13 @@ function maskFlowWorkspace() {
 
   hideAccountPrivacyPanels();
   hideTransientAccountUi();
+  hideFlowChromeTargets();
   hideUltraControls();
   hideGalleryEditControls();
-  hideExistingProjects();
+  // Project canvas: never run project-card scrubbers / media date hide
+  if (!/\/project\//i.test(window.location.pathname || '')) {
+    hideExistingProjects();
+  }
   forceRenameLiteEverywhere();
   hideGoogleCreditsWarningBanner();
 }
@@ -1998,27 +2376,36 @@ function hideGalleryEditControls() {
 // Hide Google Flow internal low credits warning banner (safely without touching parents/sidebar)
 function hideGoogleCreditsWarningBanner() {
   try {
-    const banners = document.querySelectorAll('[role="alert"], [role="status"], .credit-banner, .low-credits-banner');
-    banners.forEach(el => {
-      if (!el || el.tagName === 'BODY' || el.tagName === 'HTML' || el.tagName === 'MAIN' || el.tagName === 'NAV' || el.tagName === 'ASIDE' || el.tagName === 'HEADER') return;
+    document.querySelectorAll('flow-credit-banner, .credit-banner, .credit-banner-container').forEach((el) => hideEl(el));
+    const isCreditsNag = (txt) => {
+      const t = String(txt || '');
+      if (!t) return false;
+      return (
+        /out of Google Flow credits/i.test(t) ||
+        /running low on Google Flow credits/i.test(t) ||
+        /You're running low on/i.test(t) ||
+        /top up to get more/i.test(t) ||
+        (/Add AI credits/i.test(t) && /Google Flow credits|top up|refresh/i.test(t)) ||
+        (/Google Flow credits/i.test(t) && /wait until they refresh|top up|get more/i.test(t))
+      );
+    };
+
+    // Do NOT query every div — that walked the media gallery and blanked All media
+    const candidates = document.querySelectorAll(
+      '[role="alert"], [role="status"], [role="alertdialog"], flow-credit-banner'
+    );
+    candidates.forEach((el) => {
+      if (!el || el.tagName === 'BODY' || el.tagName === 'HTML') return;
       if (el.id === 'flow-generation-toast' || el.closest('#flow-generation-toast')) return;
-      if (el.querySelector('nav, aside, button[aria-label*="tool" i], a[href*="/project"]')) return;
 
       const txt = (el.innerText || el.textContent || '').trim();
-      if (!txt) return;
+      if (!txt || txt.length > 420) return;
+      if (!isCreditsNag(txt) && el.tagName !== 'FLOW-CREDIT-BANNER') return;
+      hideEl(el);
+    });
 
-      if (
-        txt.includes("running low on Google Flow credits") ||
-        txt.includes("You're running low on") ||
-        txt.includes("top up to get more now")
-      ) {
-        el.style.setProperty('display', 'none', 'important');
-        el.style.setProperty('visibility', 'hidden', 'important');
-        el.style.setProperty('height', '0px', 'important');
-        el.style.setProperty('min-height', '0px', 'important');
-        el.style.setProperty('opacity', '0', 'important');
-        el.style.setProperty('pointer-events', 'none', 'important');
-      }
+    document.querySelectorAll('a.credit-banner-cta, button.credit-banner-dismiss').forEach((el) => {
+      hideEl(el.closest('flow-credit-banner, .credit-banner-container') || el);
     });
   } catch (e) {}
 }
@@ -2066,16 +2453,27 @@ window.addEventListener('click', (e) => {
   const run = () => {
     if (onGoogleAuth()) return;
     try {
+      // Inside a project, keep the killer light — heavy scans blanked All media
+      if (/\/project\//i.test(location.pathname || '')) {
+        hideFlowChromeTargets();
+        hideUltraControls();
+        hideGoogleCreditsWarningBanner();
+        return;
+      }
       killAccountPopupNow();
       hideExistingProjects();
+      hideFlowChromeTargets();
+      hideUltraControls();
+      hideGoogleCreditsWarningBanner();
     } catch (e) {}
   };
   const obs = new MutationObserver(() => {
     if (installAccountKillerObserver._t) return;
+    const delay = /\/project\//i.test(location.pathname || '') ? 600 : 120;
     installAccountKillerObserver._t = setTimeout(() => {
       installAccountKillerObserver._t = null;
       run();
-    }, 40);
+    }, delay);
   });
   const start = () => {
     if (!document.documentElement) return;
@@ -2104,13 +2502,101 @@ function applyCssRules() {
   }
 
   let css = `
-    /* Profile / account chrome */
+    /* Home: hide existing projects grid */
+    .projects-grid,
+    .projects-grid * {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      height: 0 !important;
+      max-height: 0 !important;
+      overflow: hidden !important;
+      opacity: 0 !important;
+    }
+
+    /* Delete all projects menu row + blocked model picker rows */
+    flow-menu-item.delete-button,
+    flow-menu-item.delete-button button,
+    flow-menu-item[data-flow-blocked-model="1"],
+    flow-menu-item[data-flow-blocked-model="1"] button,
+    button[data-flow-blocked-model="1"],
+    [role="menuitem"][data-flow-blocked-model="1"],
+    .flow-internal-menu-item[data-flow-blocked-model="1"] {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      height: 0 !important;
+      max-height: 0 !important;
+      opacity: 0 !important;
+      overflow: hidden !important;
+    }
+    flow-menu-item.delete-button {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      height: 0 !important;
+      max-height: 0 !important;
+      opacity: 0 !important;
+    }
+
+    /* Google Flow credits banner */
+    flow-credit-banner,
+    .credit-banner,
+    .credit-banner-container,
+    .credit-banner-error,
+    .credit-banner-cta,
+    a.credit-banner-cta {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      height: 0 !important;
+      max-height: 0 !important;
+      overflow: hidden !important;
+      opacity: 0 !important;
+    }
+
+    /* ULTRA tier chip */
+    flow-user-tier-chip,
+    .tier-chip,
+    [aria-label="ULTRA tier"],
+    [aria-label*="ULTRA tier" i] {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      width: 0 !important;
+      height: 0 !important;
+      overflow: hidden !important;
+      opacity: 0 !important;
+    }
+
+    /* Account details / Google avatar switcher */
+    .header-user-button,
+    [aria-label="Account details"],
+    .account-switcher-placeholder,
+    #gb,
+    .boqOnegoogleliteOgbOneGoogleBar,
     header [aria-label*="Google Account" i],
     header [aria-label*="Account menu" i],
     header a[href*="myaccount.google.com"],
     header button[aria-label*="Manage your Google Account" i],
     header button[aria-label*="Account" i],
-    header img[src*="googleusercontent.com"] {
+    header img[src*="googleusercontent.com"],
+    a.gb_C[aria-label*="Google Account" i],
+    img.gb_X.gbii {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+      width: 0 !important;
+      height: 0 !important;
+      overflow: hidden !important;
+      opacity: 0 !important;
+    }
+
+    /* Hide ULTRA model picker chips */
+    button[aria-label="Ultra" i],
+    button[aria-label*="Ultra model" i],
+    [role="radio"][aria-label="Ultra" i],
+    [role="tab"][aria-label="Ultra" i] {
       display: none !important;
       visibility: hidden !important;
       pointer-events: none !important;
@@ -2182,7 +2668,7 @@ function initDomObserver() {
       scheduled = null;
       maskFlowWorkspace();
       enforceModelRestrictions();
-    }, 800);
+    }, /\/project\//i.test(location.pathname || '') ? 1600 : 800);
   });
 
   observer.observe(document.documentElement, {
@@ -2261,10 +2747,12 @@ try {
 
 function driveGoogle2faClicks() {
   const host = location.hostname || '';
-  if (!host.includes('accounts.google.com')) return;
+  if (!host.includes('accounts.google.com') && !host.includes('accounts.youtube.com')) return;
   const path = location.pathname || '';
   const now = Date.now();
-  if (/\/challenge\/totp/i.test(path)) {
+  // SetSID / totp UI — request OTP; Next click is owned by runGoogleAutoLogin
+  const totpEl = document.querySelector('input[name="totpPin"], input#totpPin, input[autocomplete="one-time-code"]');
+  if (/\/challenge\/totp/i.test(path) || /\/SetSID/i.test(path) || totpEl) {
     if (now - (driveGoogle2faClicks._otpAt || 0) > 2000) {
       driveGoogle2faClicks._otpAt = now;
       try { ipcRenderer.sendToHost('request-otp'); } catch (e) {}
@@ -2319,12 +2807,13 @@ function driveGoogle2faClicks() {
 // Periodic polling — keep Flow light to avoid black-screen freezes
 setInterval(() => {
   const host = location.hostname || '';
-  const onGoogleAuth = host.includes('accounts.google.com');
+  const onGoogleAuth = host.includes('accounts.google.com') || host.includes('accounts.youtube.com');
   const onGds = host.includes('gds.google.com');
   const onFlow = host.includes('flow.google.com') || host.includes('labs.google');
   if (onGoogleAuth) driveGoogle2faClicks();
   runGoogleAutoLogin();
-  dismissGoogleInterstitials();
+  // gds homeaddress / recovery: dismiss every tick (also covered inside auto-login)
+  if (onGds || !onGoogleAuth) dismissGoogleInterstitials();
   if (onGoogleAuth || onGds) return;
   if (onFlow) {
     maskFlowWorkspace();
@@ -2339,7 +2828,7 @@ setInterval(() => {
   enforceModelRestrictions();
   autoSelectLowerPriorityModel();
   checkForNewGeneratedMedia();
-}, 900);
+}, 700);
 
 document.addEventListener('DOMContentLoaded', () => {
   applyCssRules();

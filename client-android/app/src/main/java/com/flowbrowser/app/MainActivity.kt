@@ -53,6 +53,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var root: FrameLayout
     private lateinit var config: AppConfig
     private lateinit var wwwServer: WwwServer
+    private val credChannel = CredChannelHost()
 
     private val scope = CoroutineScope(Dispatchers.Main + Job())
     private var shellMode = "full"
@@ -432,16 +433,44 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (payload.has("activeServer")) {
                     val s = payload.opt("activeServer")
-                    config.activeServerJson = if (s is JSONObject) s.toString() else null
+                    config.activeServerJson = if (s is JSONObject) {
+                        AppConfig.sanitizeActiveServerJson(s.toString())
+                    } else null
                 }
+                // vaultPassword is Windows-only; Android uses Keystore EncryptedSharedPreferences
                 config.save()
                 JSONObject().put("success", true)
             }
             "clearSession" -> {
-                config.authToken = null
-                config.userJson = null
-                config.activeServerJson = null
-                config.save()
+                config.clearSessionFields()
+                credChannel.clear()
+                JSONObject().put("success", true)
+            }
+            "credGenerateKey" -> {
+                JSONObject().put("clientPublicKey", credChannel.generateClientPublicKey())
+            }
+            "credEstablish" -> {
+                val channelId = payload.optString("channelId")
+                val serverPublicKey = payload.optString("serverPublicKey")
+                if (channelId.isBlank() || serverPublicKey.isBlank()) {
+                    throw IllegalArgumentException("channelId and serverPublicKey required")
+                }
+                credChannel.establish(channelId, serverPublicKey)
+                JSONObject().put("success", true).put("channelId", credChannel.channelId)
+            }
+            "credMac" -> {
+                credChannel.mac(payload.optString("attemptId"), payload.optString("stage"))
+            }
+            "credDecrypt" -> {
+                val ct = payload.optString("ciphertext")
+                val nonce = payload.optString("nonce")
+                if (ct.isBlank() || nonce.isBlank()) {
+                    throw IllegalArgumentException("ciphertext and nonce required")
+                }
+                JSONObject().put("plaintext", credChannel.decryptSealed(ct, nonce))
+            }
+            "credClear" -> {
+                credChannel.clear()
                 JSONObject().put("success", true)
             }
             "clearPartitionSession" -> {

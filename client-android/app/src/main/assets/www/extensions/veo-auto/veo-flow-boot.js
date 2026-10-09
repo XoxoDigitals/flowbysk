@@ -63,7 +63,11 @@
     id: 'flowbrowser-veo-auto-local',
     lastError: null,
     getURL(path) {
-      return 'http://flowbrowser.local/extensions/veo-auto/' + String(path || '').replace(/^\//, '');
+      var base =
+        typeof location !== 'undefined' && location.origin && location.origin !== 'null'
+          ? location.origin
+          : 'https://app.flowbrowser.localhost';
+      return base + '/extensions/veo-auto/' + String(path || '').replace(/^\//, '');
     },
     getManifest() {
       return { name: 'Flow Automation', version: '3.3.0', manifest_version: 3 };

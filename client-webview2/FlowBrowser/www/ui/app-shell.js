@@ -207,7 +207,11 @@ class FlowBrowserApp {
       this.btnToggleExtension.addEventListener('click', () => {
         this.extensionDrawer.classList.toggle('hidden');
         if (!this.extensionDrawer.classList.contains('hidden')) {
-          const url = 'https://app.flowbrowser.localhost/extensions/veo-shio-auto-login/popup.html';
+          const base =
+            typeof location !== 'undefined' && location.origin && location.origin !== 'null'
+              ? location.origin
+              : 'https://app.flowbrowser.localhost';
+          const url = base + '/extensions/veo-shio-auto-login/popup.html';
           if (this.extensionWebview.src !== url) this.extensionWebview.src = url;
           window.electronAPI.setShellMode?.('full');
         } else {
@@ -227,7 +231,11 @@ class FlowBrowserApp {
       this.btnToggleVeoAuto.addEventListener('click', () => {
         this.veoAutoDrawer.classList.toggle('hidden');
         if (!this.veoAutoDrawer.classList.contains('hidden')) {
-          const url = 'https://app.flowbrowser.localhost/extensions/veo-auto/src/ui/side-panel/index.html';
+          const base =
+            typeof location !== 'undefined' && location.origin && location.origin !== 'null'
+              ? location.origin
+              : 'https://app.flowbrowser.localhost';
+          const url = base + '/extensions/veo-auto/src/ui/side-panel/index.html';
           // Bust cache so chrome-polyfill + panel reload after updates
           const bust = url + '?v=' + Date.now();
           this.veoAutoWebview.src = bust;
