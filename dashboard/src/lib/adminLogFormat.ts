@@ -29,6 +29,7 @@ export function formatLogDetails(details?: Record<string, unknown> | null): stri
   const cascadeCount = details.cascadeCount;
   const cascaded = details.cascaded;
   const serverName = details.serverName;
+  const autoBanned = details.autoBanned;
 
   if (ip) parts.push(`IP ${ip}`);
   if (typeof country === 'string' && country) parts.push(country);
@@ -37,6 +38,7 @@ export function formatLogDetails(details?: Record<string, unknown> | null): stri
   if (typeof serverName === 'string' && serverName) parts.push(serverName);
   if (typeof code === 'string' && code) parts.push(code);
   if (typeof reason === 'string' && reason) parts.push(reason);
+  if (autoBanned === true) parts.push('AUTO-BANNED');
   if (typeof cascadeCount === 'number' && cascadeCount > 0) {
     parts.push(`cascade:${cascadeCount}`);
   }

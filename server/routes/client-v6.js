@@ -147,22 +147,38 @@ async function loginClientUser(username, password, ip, req) {
   const country = await lookupCountry(clientIp);
   const attestation = requireAppDeviceAttestation(req || { headers: {}, body: {} });
 
-  // App logins without Device ID / X-Flow-Client are blocked (web portal does not use this route for apps).
+  // App logins without Device ID / X-Flow-Client are blocked + auto-ban (web portal does not use this route).
   if (!attestation.ok) {
-    await db.addLog(null, username || 'unknown', 'suspicious_login', {
+    const suspect = await db.getUserByUsername(username);
+    let autoBanned = false;
+    if (suspect && !suspect.banned) {
+      await db.updateUser(suspect.id, {
+        banned: true,
+        banReason: attestation.error || 'Suspicious client login (missing Device ID / X-Flow-Client)',
+      });
+      await db.forceLogoutAndWipe(suspect.id);
+      autoBanned = true;
+    }
+    await db.addLog(suspect?.id || null, username || 'unknown', 'suspicious_login', {
       ip: clientIp,
       country,
       client: attestation.client || req?.headers?.['x-flow-client'] || null,
       deviceId: attestation.deviceId || null,
       code: attestation.code,
       reason: attestation.error,
+      autoBanned,
+      targetUserId: suspect?.id || null,
+      targetUsername: username || null,
     });
     return {
       status: 403,
       body: {
         success: false,
         code: attestation.code || 'SUSPICIOUS_CLIENT',
-        error: attestation.error || 'Official app client required.',
+        error: autoBanned
+          ? 'Suspicious client detected. Account has been banned.'
+          : attestation.error || 'Official app client required.',
+        autoBanned,
       },
     };
   }

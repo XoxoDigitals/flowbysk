@@ -1552,6 +1552,12 @@ class Database {
                     equals: username,
                   },
                 },
+                {
+                  details: {
+                    path: ['username'],
+                    equals: username,
+                  },
+                },
               ]
             : []),
         ],
