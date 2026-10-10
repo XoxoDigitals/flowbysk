@@ -98,7 +98,10 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    const result = await loginClientUser(username, password, req.ip);
+    // Website login — never require EXE/APK Device ID (that auto-banned portal users).
+    const result = await loginClientUser(username, password, req.ip, req, {
+      requireDeviceAttestation: false,
+    });
     if (!result.body?.success) {
       return res.status(result.status).json(result.body);
     }

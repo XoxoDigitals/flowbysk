@@ -138,16 +138,24 @@ function generateTotpCode(secret) {
   return { value: code, expiresAt, expiresInSeconds: remaining };
 }
 
-async function loginClientUser(username, password, ip, req) {
+/**
+ * @param {object} [opts]
+ * @param {boolean} [opts.requireDeviceAttestation=true] — EXE/APK only. Web portal must pass false.
+ */
+async function loginClientUser(username, password, ip, req, opts = {}) {
   if (!username || !password) {
     return { status: 400, body: { success: false, error: 'Please enter both username and password' } };
   }
 
+  const requireDevice = opts.requireDeviceAttestation !== false;
   const clientIp = clientIpFromReq(req) || String(ip || '').trim();
   const country = await lookupCountry(clientIp);
-  const attestation = requireAppDeviceAttestation(req || { headers: {}, body: {} });
+  const attestation = requireDevice
+    ? requireAppDeviceAttestation(req || { headers: {}, body: {} })
+    : { ok: true, skipped: true, deviceId: null, client: null };
 
-  // App logins without Device ID / X-Flow-Client are blocked + auto-ban (web portal does not use this route).
+  // App logins without Device ID / X-Flow-Client are blocked + auto-ban.
+  // Web portal (/api/session/login) skips this — browser has no Device ID.
   if (!attestation.ok) {
     const suspect = await db.getUserByUsername(username);
     let autoBanned = false;
@@ -377,7 +385,9 @@ async function loginClientUser(username, password, ip, req) {
 }
 
 router.post('/login', async (req, res) => {
-  const result = await loginClientUser(req.body?.username, req.body?.password, req.ip, req);
+  const result = await loginClientUser(req.body?.username, req.body?.password, req.ip, req, {
+    requireDeviceAttestation: true,
+  });
   return res.status(result.status).json(result.body);
 });
 
