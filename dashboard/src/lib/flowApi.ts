@@ -5,7 +5,8 @@ const STORAGE_KEY = 'flowbro_session';
 const CLIENT_API_VERSION_KEY = 'flowbro_client_api_version';
 
 export type FlowRole = 'admin' | 'reseller' | 'user';
-export type ClientApiVersion = 'v2' | 'v3' | 'v4';
+/** Live client API is v6; older versions always 410 FORCE_UPDATE. */
+export type ClientApiVersion = 'v2' | 'v3' | 'v4' | 'v5' | 'v6';
 
 export type FlowSession = {
   token: string;
@@ -44,17 +45,21 @@ export function downloadFlowAndroidUrl() {
 
 function normalizeClientApiVersion(value: unknown): ClientApiVersion {
   const v = String(value || '').toLowerCase();
+  if (v === 'v6') return 'v6';
+  if (v === 'v5') return 'v5';
   if (v === 'v4') return 'v4';
   if (v === 'v3') return 'v3';
-  return 'v2';
+  if (v === 'v2') return 'v2';
+  // Branding / unknown → current live API
+  return 'v6';
 }
 
 function readCachedClientApiVersion(): ClientApiVersion {
-  if (typeof window === 'undefined') return 'v4';
+  if (typeof window === 'undefined') return 'v6';
   try {
-    return normalizeClientApiVersion(localStorage.getItem(CLIENT_API_VERSION_KEY) || 'v4');
+    return normalizeClientApiVersion(localStorage.getItem(CLIENT_API_VERSION_KEY) || 'v6');
   } catch {
-    return 'v4';
+    return 'v6';
   }
 }
 
@@ -85,17 +90,20 @@ export async function resolveClientApiVersion(force = false): Promise<ClientApiV
     }
     return version;
   } catch {
-    return readCachedClientApiVersion();
+    writeCachedClientApiVersion('v6');
+    return 'v6';
   }
 }
 
-/** Build `/api/v2|v3|v4/client/...` from a suffix like `/me`. */
+/** Build `/api/v6/client/...` (or cached version) from a suffix like `/me`. */
 export function clientApiPath(suffix = '', version?: ClientApiVersion) {
   const ver = version || readCachedClientApiVersion();
   const path = String(suffix || '');
   const normalized = path.startsWith('/') ? path : path ? `/${path}` : '';
   return `/api/${ver}/client${normalized}`;
 }
+
+const CLIENT_API_PATH_RE = /^\/api\/v[2-6]\/client(?:\/|$)/i;
 
 export async function flowFetch(path: string, init: RequestInit = {}) {
   const session = readSession();
@@ -105,11 +113,11 @@ export async function flowFetch(path: string, init: RequestInit = {}) {
     headers.set('Content-Type', 'application/json');
   }
 
-  const isClientApi = /^\/api\/v[234]\/client(?:\/|$)/i.test(path);
+  const isClientApi = CLIENT_API_PATH_RE.test(path);
   let urlPath = path;
   if (isClientApi) {
     await resolveClientApiVersion(false);
-    urlPath = path.replace(/^\/api\/v[234]\/client/i, `/api/${readCachedClientApiVersion()}/client`);
+    urlPath = path.replace(/^\/api\/v[2-6]\/client/i, `/api/${readCachedClientApiVersion()}/client`);
   }
 
   let res = await fetch(`${FLOW_API}${urlPath}`, { ...init, headers });
@@ -119,10 +127,16 @@ export async function flowFetch(path: string, init: RequestInit = {}) {
       const clone = res.clone();
       const data = await clone.json();
       if (data?.code === 'FORCE_UPDATE') {
+        writeCachedClientApiVersion('v6');
         const next = await resolveClientApiVersion(true);
-        const retryPath = path.replace(/^\/api\/v[234]\/client/i, `/api/${next}/client`);
+        const retryPath = path.replace(/^\/api\/v[2-6]\/client/i, `/api/${next}/client`);
         if (retryPath !== urlPath) {
           res = await fetch(`${FLOW_API}${retryPath}`, { ...init, headers });
+        } else if (next !== 'v6') {
+          res = await fetch(
+            `${FLOW_API}${path.replace(/^\/api\/v[2-6]\/client/i, '/api/v6/client')}`,
+            { ...init, headers }
+          );
         }
       }
     } catch {
@@ -144,6 +158,10 @@ export async function loginFlow(username: string, password: string) {
     const err = new Error(data.error || 'Login failed') as Error & { code?: string };
     err.code = data.code;
     throw err;
+  }
+  writeCachedClientApiVersion('v6');
+  if (typeof window !== 'undefined') {
+    (window as unknown as { __flowClientApiResolved?: boolean }).__flowClientApiResolved = true;
   }
   writeSession({
     token: data.token,

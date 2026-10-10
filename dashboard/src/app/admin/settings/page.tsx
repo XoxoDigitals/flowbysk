@@ -21,7 +21,7 @@ type SiteForm = {
   ticketSystemEnabled: boolean;
   contactPageEnabled: boolean;
   maintenanceMode: boolean;
-  clientApiVersion: 'v2' | 'v3' | 'v4';
+  clientApiVersion: 'v2' | 'v3' | 'v4' | 'v5' | 'v6';
 };
 
 type DownloadPackage = {
@@ -49,7 +49,7 @@ const emptySite: SiteForm = {
   ticketSystemEnabled: true,
   contactPageEnabled: true,
   maintenanceMode: false,
-  clientApiVersion: 'v4',
+  clientApiVersion: 'v6',
 };
 
 function formatBytes(n: number) {
@@ -138,9 +138,13 @@ export default function AdminSettingsPage() {
       contactPageEnabled: row.contactPageEnabled !== false,
       maintenanceMode: row.maintenanceMode === true,
       clientApiVersion:
-        row.clientApiVersion === 'v2' || row.clientApiVersion === 'v3' || row.clientApiVersion === 'v4'
+        row.clientApiVersion === 'v2' ||
+        row.clientApiVersion === 'v3' ||
+        row.clientApiVersion === 'v4' ||
+        row.clientApiVersion === 'v5' ||
+        row.clientApiVersion === 'v6'
           ? row.clientApiVersion
-          : 'v4',
+          : 'v6',
     });
     setSocial(row.socialLinks || {});
     if (noticesRes.ok) setNotices(noticesData.notices || []);
@@ -494,16 +498,16 @@ export default function AdminSettingsPage() {
           style={{ borderColor: 'var(--a1)' }}
         >
           <div>
-            <div className="text-sm font-medium">Client API v4</div>
+            <div className="text-sm font-medium">Client API v6</div>
             <p className="text-xs text-[var(--ink3)]">
-              Locked on. /api/v2 and /api/v3 always return 410 FORCE_UPDATE. Only /api/v4/client is live.
+              Locked on. /api/v2–v5 always return 410 FORCE_UPDATE. Only /api/v6/client is live.
             </p>
           </div>
           <Toggle
             on={true}
-            onLabel="v4 ON"
-            offLabel="v4 ON"
-            onChange={() => setSite({ ...site, clientApiVersion: 'v4' })}
+            onLabel="v6 ON"
+            offLabel="v6 ON"
+            onChange={() => setSite({ ...site, clientApiVersion: 'v6' })}
           />
         </div>
 
