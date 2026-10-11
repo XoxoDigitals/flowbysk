@@ -31,6 +31,8 @@ public partial class MainWindow : Window
     string? _flowCredTarget;
     int _autofillGeneration;
     long _lastAutofillKickMs;
+    long _lastTextCaptchaProbeMs;
+    int _textCaptchaMisses;
     bool _onGoogleAuth;
     bool _captchaActive;
     /// <summary>Sticky until explicit login-done — keeps overlay across reloads/bounces.</summary>
@@ -325,6 +327,7 @@ public partial class MainWindow : Window
             PostToShell(new { type = "flow-event", @event = "did-navigate", url });
             PostToShell(new { type = "flow-event", @event = "did-finish-load", url });
             PostToShell(new { type = "flow-event", @event = "dom-ready", url });
+            _ = ProbeGoogleTextCaptchaAsync(url);
             _ = TryHostGoogleAutofillAsync(url);
         };
         core.HistoryChanged += (_, _) =>
@@ -333,6 +336,7 @@ public partial class MainWindow : Window
             UpdateAuthOverlayFromUrl(url);
             PostToShell(new { type = "flow-event", @event = "did-navigate-in-page", url });
             PostToShell(new { type = "flow-event", @event = "page-title-updated", url });
+            _ = ProbeGoogleTextCaptchaAsync(url);
             _ = TryHostGoogleAutofillAsync(url);
         };
         core.NewWindowRequested += (_, e) =>
@@ -607,10 +611,10 @@ public partial class MainWindow : Window
             }
             _authLoginActive = true;
             _onGoogleAuth = true;
-            // Resume cover on normal sign-in steps after leaving /challenge/recaptcha
-            if (IsGoogleCredentialStepUrl(url))
-                _captchaActive = false;
+            // Do NOT clear _captchaActive on /identifier|/pwd — classic text captcha
+            // lives on those URLs. Clearing here re-covered the page and blocked the user.
             ApplyAuthOverlayState();
+            _ = ProbeGoogleTextCaptchaAsync(url);
             return;
         }
 
@@ -817,6 +821,7 @@ public partial class MainWindow : Window
         if (captcha)
         {
             _captchaActive = true;
+            _textCaptchaMisses = 0;
             _onGoogleAuth = true;
             _authLoginActive = true;
             ApplyAuthOverlayState();
@@ -833,9 +838,16 @@ public partial class MainWindow : Window
             ApplyAuthOverlayState();
             return;
         }
-        _captchaActive = false;
+        // Keep cover lifted if a text captcha is still on the page (probe confirms)
         _onGoogleAuth = true;
         _authLoginActive = true;
+        if (_captchaActive)
+        {
+            _ = ProbeGoogleTextCaptchaAsync(live);
+            ApplyAuthOverlayState();
+            return;
+        }
+        _captchaActive = false;
         ApplyAuthOverlayState();
     }
 
@@ -1155,6 +1167,90 @@ public partial class MainWindow : Window
             .Replace("\u2029", "\\u2029") + "'";
     }
 
+    /// <summary>
+    /// Lift the opaque cover when Google shows a classic text captcha on /identifier
+    /// (no /recaptcha in the URL). Without this, users cannot type the captcha.
+    /// </summary>
+    async Task ProbeGoogleTextCaptchaAsync(string? url)
+    {
+        try
+        {
+            if (FlowView.CoreWebView2 == null) return;
+            var u = url ?? FlowView.CoreWebView2.Source ?? "";
+            if (!u.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase) &&
+                !u.Contains("accounts.youtube.com", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (nowMs - _lastTextCaptchaProbeMs < 400) return;
+            _lastTextCaptchaProbeMs = nowMs;
+
+            const string script = @"
+(() => {
+  const visible = (el) => {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    const s = getComputedStyle(el);
+    return s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) !== 0;
+  };
+  const inputs = Array.from(document.querySelectorAll(
+    'input[type=""text""], input:not([type]), input[name=""ca""], input[name=""captcha""], input[name=""Captcha""], input#ca, input#captcha, input[name=""captchaEntered""]'
+  ));
+  for (const el of inputs) {
+    if (!visible(el) || el.type === 'hidden' || el.type === 'password' || el.type === 'email') continue;
+    const hint = ((el.placeholder || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.name || '') + ' ' + (el.id || '')).toLowerCase();
+    if (/type the text|hear or see|captcha|characters you see|\bca\b/i.test(hint)) return 'yes';
+  }
+  const imgs = Array.from(document.querySelectorAll('#captchaimg, img#captchaimg, img[src*=""Captcha"" i], img[src*=""captcha"" i], img[alt*=""captcha"" i]'));
+  for (const img of imgs) {
+    if (!visible(img)) continue;
+    const r = img.getBoundingClientRect();
+    if (r.width >= 40 && r.height >= 20) return 'yes';
+  }
+  const t = ((document.body && document.body.innerText) || '').slice(0, 2500);
+  if (/type the text you hear or see|type the text|characters you see in the (?:box|image)/i.test(t)) return 'yes';
+  return 'no';
+})()";
+
+            var raw = await FlowView.CoreWebView2.ExecuteScriptAsync(script);
+            var hit = (raw ?? "").Contains("yes", StringComparison.OrdinalIgnoreCase);
+            if (hit)
+            {
+                _textCaptchaMisses = 0;
+                if (!_captchaActive)
+                    Debug.WriteLine("[AuthOverlay] text captcha detected — lifting cover");
+                _captchaActive = true;
+                _authLoginActive = true;
+                _onGoogleAuth = true;
+                ApplyAuthOverlayState();
+                // Ask shell to show captcha banner
+                PostToShell(new
+                {
+                    type = "flow-event",
+                    @event = "ipc-message",
+                    channel = "auth:captcha",
+                    args = new object[] { new { active = true } }
+                });
+            }
+            else if (_captchaActive && !IsGoogleRecaptchaChallengeUrl(u))
+            {
+                _textCaptchaMisses++;
+                // Require a few misses so SPA flicker does not re-cover mid-type
+                if (_textCaptchaMisses >= 4)
+                {
+                    _captchaActive = false;
+                    _textCaptchaMisses = 0;
+                    ApplyAuthOverlayState();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("ProbeGoogleTextCaptcha: " + ex.Message);
+        }
+    }
+
     async Task TryHostGoogleAutofillAsync(string? url)
     {
         try
@@ -1170,6 +1266,10 @@ public partial class MainWindow : Window
             var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (nowMs - _lastAutofillKickMs < 1200) return;
             _lastAutofillKickMs = nowMs;
+
+            // Probe first — text captcha on /identifier has no special URL
+            await ProbeGoogleTextCaptchaAsync(u);
+            if (_captchaActive) return;
 
             await InjectGoogleAutofillOnceAsync();
             var gen = Interlocked.Increment(ref _autofillGeneration);
