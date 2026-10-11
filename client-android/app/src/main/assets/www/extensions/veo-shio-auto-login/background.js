@@ -2,9 +2,36 @@
 // Connects to the Flow Browser backend (https://flowcreatorai.site)
 
 const API_ORIGIN = "https://flowcreatorai.site";
-const API_BASE = `${API_ORIGIN}/api/v7/client`;
+/** Active base path — v7 traditional login only. */
+let CLIENT_API_PATH = "/api/v7/client";
 const FLOW_URL = "https://flow.google.com/";
 const GOOGLE_LOGOUT = "https://accounts.google.com/Logout";
+
+function normalizeClientApiVersion(value) {
+  void value;
+  return "v7";
+}
+
+function originFromSavedUrl(value) {
+  let base = String(value || API_ORIGIN).replace(/\/$/, "");
+  base = base.replace(/\/api\/v[2-7]\/client$/i, "").replace(/\/api\/client$/i, "");
+  return base || API_ORIGIN;
+}
+
+async function resolveClientApiPath(origin, force = false) {
+  const base = originFromSavedUrl(origin);
+  try {
+    const res = await fetch(`${base}/api/public/branding`, { cache: "no-store" });
+    const data = await res.json();
+    const ver = normalizeClientApiVersion(
+      data?.settings?.clientApiVersion ?? data?.clientApiVersion
+    );
+    CLIENT_API_PATH = `/api/${ver}/client`;
+  } catch (err) {
+    if (!force) console.warn("[VeoShio] branding failed, keeping", CLIENT_API_PATH, err);
+  }
+  return `${base}${CLIENT_API_PATH}`;
+}
 
 function isFlowUrl(value) {
   try { const url = new URL(value); return url.protocol === "https:" && url.hostname === "flow.google.com"; }
@@ -18,7 +45,7 @@ function allowedNavigation(value) {
   return isFlowUrl(value) || isGoogleLoginUrl(value);
 }
 function createNavigationRules() {
-  // Profile/DNR redirects removed â€” auto-login only.
+  // Profile/DNR redirects removed — auto-login only.
   return [];
 }
 function validCredentialSender(sender, session) {
@@ -76,7 +103,7 @@ const initialize = Promise.all([chrome.storage.local, sessionStore].map(async ar
   if (typeof area?.setAccessLevel === "function") await area.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
 })).then(() => null, () => new Error("The browser could not protect extension storage."));
 
-// â”€â”€â”€ Local State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Local State ────────────────────────────────────────────────────────────
 const localState = async () => {
   const error = await initialize;
   if (error) throw error;
@@ -91,15 +118,11 @@ const isConnected = async () => {
   return !!saved.flowBrowserToken;
 };
 
-// â”€â”€â”€ API Client â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── API Client ─────────────────────────────────────────────────────────────
 async function api(path, body, anonymous = false) {
   const saved = await localState();
-  let baseUrl = saved.flowBrowserServerUrl || API_BASE;
-  // Electron may sync origin-only URL; normalize to /api/client
-  baseUrl = String(baseUrl || "").replace(/\/$/, "");
-  if (!/\/api\/client$/i.test(baseUrl)) {
-    baseUrl = `${baseUrl}/api/v2/client`;
-  }
+  const origin = originFromSavedUrl(saved.flowBrowserServerUrl || API_ORIGIN);
+  let baseUrl = await resolveClientApiPath(origin);
   const token = saved.flowBrowserToken;
 
   if (!anonymous && !token) throw new Error("Not connected. Log in to Flow Browser first.");
@@ -107,20 +130,33 @@ async function api(path, body, anonymous = false) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20000);
   try {
-    const response = await fetch(`${baseUrl}${path}`, {
-      method: body === undefined ? "GET" : "POST",
-      cache: "no-store",
-      headers: {
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        ...(!anonymous && token ? { Authorization: `Bearer ${token}` } : {})
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: controller.signal
-    });
-    const result = await response.json().catch(() => ({}));
+    const doFetch = async (url) => {
+      const response = await fetch(url, {
+        method: body === undefined ? "GET" : "POST",
+        cache: "no-store",
+        headers: {
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(!anonymous && token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: controller.signal
+      });
+      const result = await response.json().catch(() => ({}));
+      return { response, result };
+    };
+
+    let { response, result } = await doFetch(`${baseUrl}${path}`);
+    // Hard cutover: branding flipped to v3 while we were on v2
+    if (result && result.code === "FORCE_UPDATE") {
+      const prev = baseUrl;
+      baseUrl = await resolveClientApiPath(origin, true);
+      if (baseUrl !== prev) {
+        ({ response, result } = await doFetch(`${baseUrl}${path}`));
+      }
+    }
     if (!response.ok) throw Object.assign(
       new Error(result.error || result.message || `Request failed (${response.status}).`),
-      { status: response.status }
+      { status: response.status, code: result.code }
     );
     return result;
   } catch (error) {
@@ -129,7 +165,7 @@ async function api(path, body, anonymous = false) {
   } finally { clearTimeout(timeout); }
 }
 
-// â”€â”€â”€ Extension Protection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Extension Protection ───────────────────────────────────────────────────
 const extensionProtection = createExtensionProtection({
   chrome, isEnabled: async () => supportedBrowser && (await localState()).profileProtectionEnabled === true
 });
@@ -137,7 +173,7 @@ async function protectionStatus() {
   return { ...(await extensionProtection.status()), enabled: (await localState()).profileProtectionEnabled === true };
 }
 
-// â”€â”€â”€ Workspace (login attempt state) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Workspace (login attempt state) ────────────────────────────────────────
 const workspace = async () => (await sessionStore.get("workspace")).workspace || null;
 let workspaceMutations = Promise.resolve();
 function queueWorkspaceMutation(operation) {
@@ -178,7 +214,7 @@ const mutateWorkspace = mutator => queueWorkspaceMutation(async () => {
   return writeWorkspace(next);
 });
 
-// â”€â”€â”€ OTP Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── OTP Helpers ────────────────────────────────────────────────────────────
 const otpFetchFailureCount = state => {
   const value = Number(state?.otpFetchFailureCount);
   return Number.isInteger(value) && value >= 0 ? value : 0;
@@ -246,7 +282,7 @@ async function recordOtpRejection(state, expiresAt) {
   });
 }
 
-// â”€â”€â”€ Tab and Automation Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Tab and Automation Helpers ─────────────────────────────────────────────
 const managedTabs = state => state ? [...new Set([state.tabId, ...(state.managedTabIds || []), ...(state.openerStack || []).map(tab => tab.tabId)])] : [];
 const loginInProgress = state => !!state && ["login", "manual"].includes(state.phase) && Date.parse(state.expiresAt) > Date.now();
 const redirectingTabs = new Set();
@@ -340,7 +376,7 @@ async function ensureAutomation(tabId) {
   }
 }
 
-// â”€â”€â”€ Navigation Rules â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Navigation Rules ───────────────────────────────────────────────────────
 const profileRedirectsEnabled = () => false;
 
 function refreshRules() {
@@ -358,7 +394,7 @@ async function recordProblem(message, phase = "manual", manualReason) {
   await refreshRules();
 }
 
-// â”€â”€â”€ Identity Verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Identity Verification ──────────────────────────────────────────────────
 async function verifyAttemptIdentity(state = null, attemptId = null) {
   const status = await api("/extension-status");
   const statusEmail = assignedEmail(status);
@@ -379,7 +415,7 @@ async function verifyAttemptIdentity(state = null, attemptId = null) {
   return email;
 }
 
-// â”€â”€â”€ Login Flow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Login Flow ─────────────────────────────────────────────────────────────
 async function bindLoginToTab(tab, { navigateToFlow = false } = {}) {
   const tabId = tab?.id;
   if (!Number.isInteger(tabId)) throw new Error("The browser could not find the Flow tab.");
@@ -527,7 +563,7 @@ async function closeAllFlowTabs(except = null) {
 }
 
 async function clearLocalConnection(state) {
-  // Do NOT remove flowBrowserToken â€” that's managed by the Electron shell
+  // Do NOT remove flowBrowserToken — that's managed by the Electron shell
   await saveWorkspace(null);
   await refreshRules();
   await chrome.alarms.clear("flow-auto-login-check");
@@ -541,7 +577,7 @@ async function disconnect(signOut) {
   return { message: signOut ? "Disconnected. Complete Google sign-out in the opened tab." : "Disconnected. Your existing Google session may still be signed in." };
 }
 
-// â”€â”€â”€ Message Handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Message Handler ────────────────────────────────────────────────────────
 async function messageHandler(message, sender) {
   const fromPopup = sender.id === chrome.runtime.id && sender.url?.split("?")[0] === chrome.runtime.getURL("popup.html");
 
@@ -567,7 +603,7 @@ async function messageHandler(message, sender) {
     const onAuthHost = sender.id === chrome.runtime.id && sender.frameId === 0 &&
       Number.isInteger(sender.tab?.id) && (isFlowUrl(sender.url) || isGoogleLoginUrl(sender.url));
 
-    // Electron webview guests sometimes omit sender.tab â€” still auto-bind using any Google/Flow tab.
+    // Electron webview guests sometimes omit sender.tab — still auto-bind using any Google/Flow tab.
     if (onAuthHost && await isConnected()) {
       let stateNow = await workspace();
       const boundHere = stateNow && loginInProgress(stateNow) &&
@@ -629,7 +665,7 @@ async function messageHandler(message, sender) {
     };
   }
 
-  // â”€â”€â”€ Authenticator / OTP Handlers (unchanged) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── Authenticator / OTP Handlers (unchanged) ─────────────────────────────
   if (message?.type === "ALTERNATE_AUTHENTICATOR_ROUTE") {
     const latest = await workspace();
     const validRouteSender = latest && latest.phase === "login" &&
@@ -726,7 +762,7 @@ async function messageHandler(message, sender) {
     return otpMetadata(saved);
   }
 
-  // â”€â”€â”€ Credential Step Handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── Credential Step Handler ──────────────────────────────────────────────
   if (message?.type === "STEP") {
     const backupCodeStep = message.stage === "backup_code";
     const backupCodeSender = backupCodeStep && state?.backupCodeAttempted === true &&
@@ -798,7 +834,7 @@ async function messageHandler(message, sender) {
     }
   }
 
-  // â”€â”€â”€ Login Success / Manual / Mismatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── Login Success / Manual / Mismatch ────────────────────────────────────
   if (message?.type === "LOGIN_SUCCESS") {
     if (!fromLoginTab || !isFlowUrl(sender.url) || state.phase !== "login" || !loginInProgress(state)) throw new Error("Invalid or expired login completion.");
     try {
@@ -912,7 +948,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   return true;
 });
 
-// â”€â”€â”€ Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Lifecycle ──────────────────────────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   (async () => {
     if (supportedBrowser && (await localState()).profileProtectionEnabled === undefined) {
@@ -950,7 +986,7 @@ async function bootstrap(isInstall) {
   if (supportedBrowser) await extensionProtection.scan().catch(() => {});
 }
 
-// â”€â”€â”€ Navigation Containment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Navigation Containment ─────────────────────────────────────────────────
 async function containNavigation(tabId, windowId, url) {
   return;
 }
@@ -1105,7 +1141,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
   })().catch(() => {});
 });
 
-// â”€â”€â”€ Auto-Connect Listener â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Auto-Connect Listener ──────────────────────────────────────────────────
 // When the Electron shell writes the token, auto-arm the connection check
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.flowBrowserToken) {

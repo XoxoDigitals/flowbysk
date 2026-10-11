@@ -103,6 +103,7 @@ let autoLoginState = {
   pathSeenAt: {},
   lastPath: '',
   pwdUiReloadTried: false,
+  selectionUiReloadTried: false,
   otpRequested: false,
   otpFilled: false,
   captchaPaused: false,
@@ -1100,31 +1101,45 @@ function clickElement(el) {
 function findAuthenticatorOption() {
   const isAuthText = (raw) => {
     const t = String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    if (!t || t.length > 180) return false;
+    if (!t || t.length > 220) return false;
     // Must look like THIS option alone — not a parent that lists every method
-    if (/one-time security code|security key|tap yes|use your passkey|try another way|phone or tablet|eligible device/.test(t) &&
+    if (/one-time security code|security key|tap yes|use your passkey|try another way|phone or tablet|eligible device|text message|voice call|backup code/.test(t) &&
         !/authenticator/.test(t)) return false;
     if (/one-time security code|tap yes on your phone|use your passkey|can.?t find an eligible/.test(t)) return false;
     return (
       /google authenticator/.test(t) ||
-      (/authenticator app/.test(t) && /code|verification/.test(t)) ||
+      /^authenticator$/.test(t) ||
+      (/authenticator/.test(t) && /app|code|verification|google/.test(t)) ||
       (/verification code/.test(t) && /authenticator/.test(t)) ||
-      (/code from/.test(t) && /authenticator/.test(t))
+      (/get a verification code/.test(t) && /authenticator/.test(t)) ||
+      (/code from/.test(t) && /authenticator/.test(t)) ||
+      /authentication app/.test(t)
     );
   };
 
-  // Prefer dedicated challenge nodes (Google Glif)
-  const preferred = Array.from(document.querySelectorAll(
+  const clickableSel =
     '[data-challengeid], [data-challengetype], [data-action="selectchallenge"], ' +
-    'li[jsname], div[role="link"], div[role="button"], button, a[role="link"], a'
-  ));
+    'li[jsname], div[role="link"], div[role="button"], button, a[role="link"], a';
+
+  // Challenge type 6 / TOTP / totp — Google's machine id for Authenticator
+  const byType = Array.from(document.querySelectorAll('[data-challengetype], [data-challengeid]')).filter((el) => {
+    if (!isElementVisible(el)) return false;
+    const typ = String(el.getAttribute('data-challengetype') || el.getAttribute('data-challengeid') || '').toLowerCase();
+    return typ === '6' || typ === 'totp' || /totp|authenticator/.test(typ);
+  });
+  if (byType[0]) {
+    return byType[0].closest(clickableSel) || byType[0];
+  }
+
+  // Prefer dedicated challenge nodes (Google Glif)
+  const preferred = Array.from(document.querySelectorAll(clickableSel));
   const rowHits = preferred.filter((el) => {
     if (!isElementVisible(el)) return false;
     const label = el.getAttribute?.('aria-label') || '';
     const own = (el.innerText || el.textContent || '');
     // Prefer elements whose own text is the authenticator line (not a huge list)
     const ownNorm = own.replace(/\s+/g, ' ').trim();
-    if (ownNorm.length > 180) return false;
+    if (ownNorm.length > 220) return false;
     return isAuthText(label) || isAuthText(ownNorm);
   });
   // Smallest matching row wins (avoids outer wrappers)
@@ -1142,7 +1157,7 @@ function findAuthenticatorOption() {
     let node;
     while ((node = walker.nextNode())) {
       const t = (node.nodeValue || '').replace(/\s+/g, ' ').trim();
-      if (!t || t.length > 120) continue;
+      if (!t || t.length > 140) continue;
       if (!/authenticator/i.test(t)) continue;
       if (!isAuthText(t) && !/google authenticator/i.test(t)) continue;
       let el = node.parentElement;
@@ -1161,74 +1176,100 @@ function findAuthenticatorOption() {
   return null;
 }
 
-function findGoogleNextButton(kind) {
-  const rootSel = kind === 'password' ? '#passwordNext' : kind === 'totp' ? '#totpNext' : '#identifierNext';
-  let next =
-    document.querySelector(rootSel + ' button') ||
-    document.querySelector(rootSel);
-  if (next && isElementVisible(next)) return next;
-
-  // Newer Google UI: jsname / role=button labeled Next
-  next = Array.from(document.querySelectorAll('button, div[role="button"]')).find((b) => {
-    if (!isElementVisible(b)) return false;
-    const t = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
-    return /^next$/i.test(t);
-  });
-  return next || null;
-}
-
 function submitGoogleNext(kind, input) {
   if (DEBUG_FILL_ONLY) {
     console.log('[Flow Preload] DEBUG_FILL_ONLY — skip Next click:', kind);
     return false;
   }
+  // Host CDP owns identifier/password Next
+  if (window.__flowHostOwnsNext && (kind === 'password' || kind === 'identifier')) {
+    return false;
+  }
   const pathKey = `${kind}:${location.pathname}`;
-  // Do not hard-block retries — Google often paints Next after fill
+  if (autoLoginState.submittedKeys.has(pathKey + ':submit')) return false;
 
-  const next = findGoogleNextButton(kind);
-
-  if (next && isElementVisible(next)) {
-    autoLoginState.lastActionTime = Date.now();
-    try {
-      next.removeAttribute('disabled');
-      next.setAttribute('aria-disabled', 'false');
-    } catch (e) {}
-    try { next.focus(); } catch (e) {}
-    try { next.click(); } catch (e) {}
-    autoLoginState.submittedKeys.add(pathKey + ':submit');
-    return true;
+  // Never Next while Glif top bar / busy spinner is running
+  if (isGoogleProcessing()) {
+    console.log('[Flow Preload] Next deferred — page still loading:', kind);
+    return false;
   }
 
-  // Fallback: Enter on the input (works when Next is delayed/hidden)
-  if (input && input.isConnected) {
+  const rootSel = kind === 'password' ? '#passwordNext' : '#identifierNext';
+  // Prefer real Next button — never form.submit()
+  let next =
+    document.querySelector(rootSel + ' button') ||
+    document.querySelector(rootSel);
+
+  // Fallback: visible button whose label is exactly Next (ignore "Forgot email?")
+  if (!next || !isElementVisible(next)) {
+    next = Array.from(document.querySelectorAll('button')).find(b => {
+      const t = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
+      return /^next$/i.test(t) && isElementVisible(b);
+    });
+  }
+
+  if (next && isElementVisible(next)) {
+    // Disabled / aria-busy Next = still settling
     try {
-      input.focus();
-      const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-      input.dispatchEvent(new KeyboardEvent('keydown', opts));
-      input.dispatchEvent(new KeyboardEvent('keypress', opts));
-      input.dispatchEvent(new KeyboardEvent('keyup', opts));
-      if (input.form) {
-        try { input.form.requestSubmit(); } catch (e) {}
+      if (next.disabled || next.getAttribute('aria-disabled') === 'true' ||
+          next.getAttribute('aria-busy') === 'true') {
+        return false;
       }
-      autoLoginState.lastActionTime = Date.now();
-      autoLoginState.submittedKeys.add(pathKey + ':submit');
-      return true;
     } catch (e) {}
+    autoLoginState.submittedKeys.add(pathKey + ':submit');
+    autoLoginState.lastActionTime = Date.now();
+    try { next.focus(); } catch (e) {}
+    try { next.click(); } catch (e) {}
+    return true;
   }
   return false;
 }
 
 function isGoogleProcessing() {
   try {
-    const progressBar = document.querySelector('[role="progressbar"], .vxxSae, [aria-busy="true"]');
-    if (progressBar) {
+    // Only the thin Glif top strip — generic [role=progressbar] false-positives blocked Next forever
+    const nodes = document.querySelectorAll('.vxxSae, .XhSMyb, [role="progressbar"]');
+    for (const progressBar of nodes) {
       const style = window.getComputedStyle(progressBar);
-      if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && progressBar.offsetWidth > 0) {
-        return true;
-      }
+      const r = progressBar.getBoundingClientRect();
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) < 0.05) continue;
+      if (r.top >= 0 && r.top < 180 && r.height > 0 && r.height <= 6 && r.width > 40) return true;
     }
+    if (document.body && document.body.getAttribute('aria-busy') === 'true') return true;
   } catch (e) {}
   return false;
+}
+
+/** Wait until Glif finishes loading, then click Next (retries; no reload). */
+function submitGoogleNextWhenReady(kind, input, opts = {}) {
+  if (DEBUG_FILL_ONLY) return;
+  const maxMs = opts.maxMs || 12000;
+  const started = Date.now();
+  const tick = () => {
+    if (Date.now() - started > maxMs) {
+      console.warn('[Flow Preload] Next wait timed out:', kind);
+      return;
+    }
+    if (isGoogleProcessing()) {
+      setTimeout(tick, 350);
+      return;
+    }
+    // Password must still be present
+    if (kind === 'password' && input) {
+      if (!input.isConnected || !(input.value || '').length) {
+        setTimeout(tick, 350);
+        return;
+      }
+    }
+    // Settle briefly after bar disappears
+    if (!pathSettled('next-ready:' + kind, 500)) {
+      setTimeout(tick, 200);
+      return;
+    }
+    const ok = submitGoogleNext(kind, input);
+    if (!ok) setTimeout(tick, 400);
+  };
+  setTimeout(tick, opts.initialDelayMs || 800);
 }
 
 function hasGoogleAuthError() {
@@ -1263,6 +1304,7 @@ function resetAutoLoginState() {
   autoLoginState.pathSeenAt = {};
   autoLoginState.lastPath = '';
   autoLoginState.pwdUiReloadTried = false;
+  autoLoginState.selectionUiReloadTried = false;
   autoLoginState.otpRequested = false;
   autoLoginState.otpFilled = false;
   autoLoginState.captchaPaused = false;
@@ -1289,23 +1331,76 @@ function detectGoogleCaptcha() {
       if (src.includes('badge')) return false; // footer badge ≠ challenge
       const r = f.getBoundingClientRect();
       // Challenge / checkbox widgets are sizable; ignore tiny/hidden frames
-      return r.width >= 100 && r.height >= 60 && r.bottom > 0 && r.top < window.innerHeight;
+      return r.width >= 80 && r.height >= 40 && r.bottom > 0 && r.top < window.innerHeight;
     });
     if (frames.length) return true;
 
-    const widgets = document.querySelectorAll(
-      '.g-recaptcha, #recaptcha, [data-sitekey], #captchaimg, img#captchaimg'
-    );
-    for (const w of widgets) {
-      const r = w.getBoundingClientRect();
-      if (r.width >= 100 && r.height >= 60 && isElementVisible(w)) return true;
+    // Identifier image captcha (#captchaimg) — often smaller than recaptcha widgets
+    const captchaImgs = Array.from(document.querySelectorAll(
+      '#captchaimg, img#captchaimg, img[src*="Captcha" i], img[src*="captcha" i], img[alt*="captcha" i]'
+    )).filter((img) => {
+      if (!isElementVisible(img)) return false;
+      const r = img.getBoundingClientRect();
+      return r.width >= 20 && r.height >= 12;
+    });
+    if (captchaImgs.length) return true;
+
+    // Any captcha-named / "Type the text you hear or see" field = captcha (no copyHit required)
+    const captchaInputs = Array.from(document.querySelectorAll(
+      'input[name="ca"], input#ca, input[name="captcha"], input[id*="captcha" i], ' +
+      'input[aria-label*="Type the text" i], input[aria-label*="hear or see" i], ' +
+      'input[aria-label*="characters" i], input[placeholder*="Type the text" i], ' +
+      'input[placeholder*="hear or see" i], input[placeholder*="characters" i]'
+    )).filter(isElementVisible);
+    if (captchaInputs.length) return true;
+
+    // User rule: any ADDITIONAL visible text field beyond email/identifier = captcha
+    const path = location.pathname || '';
+    const onCredStep = /identifier|challenge\/pwd|signin\/v2\/sl\/pwd/i.test(path);
+    if (onCredStep || /accounts\.google\.com/i.test(location.hostname || '')) {
+      const textInputs = Array.from(document.querySelectorAll('input')).filter((el) => {
+        if (!isElementVisible(el)) return false;
+        const t = String(el.getAttribute('type') || 'text').toLowerCase();
+        if (['hidden', 'password', 'submit', 'button', 'checkbox', 'radio', 'file', 'image', 'reset'].includes(t)) {
+          return false;
+        }
+        // text / email / tel / search / no type
+        return true;
+      });
+      const isPrimaryId = (el) => {
+        const typ = String(el.getAttribute('type') || '').toLowerCase();
+        const meta = [
+          el.name, el.id, el.autocomplete, el.getAttribute('aria-label'), el.placeholder
+        ].map((x) => String(x || '').toLowerCase()).join(' ');
+        return typ === 'email' ||
+          /^(email|identifier|username)$/i.test(String(el.name || el.id || '')) ||
+          /identifierid|\bidentifier\b|\bemail\b|\busername\b|account name|phone number/i.test(meta);
+      };
+      const extras = textInputs.filter((el) => !isPrimaryId(el));
+      // Extra text field (e.g. captcha) on identifier = captcha
+      if (extras.length >= 1 && /identifier/i.test(path)) return true;
+      if (onCredStep && textInputs.length >= 2) return true;
+      // Placeholder / label copy alone
+      if (textInputs.some((el) => {
+        const meta = [
+          el.placeholder, el.getAttribute('aria-label'), el.name, el.id
+        ].map((x) => String(x || '')).join(' ');
+        return /type the text|hear or see|enter the characters|captcha/i.test(meta);
+      })) return true;
     }
 
-    const text = ((document.body && document.body.innerText) || '').slice(0, 2500);
-    // Real challenge copy — not the footer "protected by reCAPTCHA"
-    if (/unusual traffic from your computer|select all (?:images|squares)|i.?m not a robot|verify it.?s you|couldn.?t sign you in/i.test(text)) {
-      if (frames.length || widgets.length || /unusual traffic|select all (?:images|squares)/i.test(text)) return true;
-    }
+    const widgets = Array.from(document.querySelectorAll(
+      '.g-recaptcha, #recaptcha, [data-sitekey]'
+    )).filter((w) => {
+      const r = w.getBoundingClientRect();
+      return r.width >= 80 && r.height >= 40 && isElementVisible(w);
+    });
+    if (widgets.length) return true;
+
+    const text = ((document.body && document.body.innerText) || '').slice(0, 3000);
+    const copyHit = /type the text you hear or see|type the text|enter the characters|unusual traffic from your computer|select all (?:images|squares)|i.?m not a robot|verify it.?s you|couldn.?t sign you in/i.test(text);
+    if (copyHit && /captcha|hear or see|type the text/i.test(text)) return true;
+    if (/unusual traffic|select all (?:images|squares)/i.test(text)) return true;
   } catch (e) {}
   return false;
 }
@@ -1405,7 +1500,8 @@ function syncGoogleAuthChrome() {
     autoLoginState.captchaHits = 0;
   }
 
-  const captchaConfirmed = autoLoginState.captchaHits >= 2;
+  // 1 hit is enough — identifier image captcha must lift cover immediately
+  const captchaConfirmed = autoLoginState.captchaHits >= 1;
   const captchaCleared = autoLoginState.captchaMisses >= 3;
 
   if (captchaConfirmed) {
@@ -1517,23 +1613,30 @@ function runGoogleAutoLogin() {
     return;
   }
 
-  // Progress bar can linger on Glif — never block identifier/email forever
+  // Progress bar on password/identifier — wait; do not reload, do not Next yet
   const onIdentifierPath = /signin\/identifier|\/identifier(?:\/|$)/i.test(pathname);
-  const on2faPath = /\/challenge\/(totp|selection|sk|iap|dp|ootp)/i.test(pathname);
-  if (isGoogleProcessing() && !onPwdChallenge && !on2faPath && !onIdentifierPath) {
-    if (!pathSettled('processing-wait', 2000)) return;
+  const on2faPath = /\/challenge\/(totp|selection|sk|iap|dp|ootp|skotp)/i.test(pathname);
+  if (isGoogleProcessing()) {
+    // Allow fill while loading, but block submit paths further down via submitGoogleNext
+    if ((onPwdChallenge || onIdentifierPath) && !pathSettled('processing-wait', 400)) return;
+    if (!onPwdChallenge && !on2faPath && !onIdentifierPath && !pathSettled('processing-wait', 2000)) return;
   }
 
   // Google SPA: URL often updates before the new form paints
   if (autoLoginState.lastPath !== pathname) {
     const wasPwd = /\/challenge\/pwd/i.test(autoLoginState.lastPath || '');
     const nowPwd = /\/challenge\/pwd/i.test(pathname);
+    const nowPostPwd = /\/challenge\/(selection|totp|skotp|sk|iap|dp|ootp)/i.test(pathname);
     const prev = autoLoginState.lastPath;
     autoLoginState.lastPath = pathname;
-    // Staying on password challenge — do not reset fill/submit (path flicker caused loops)
+    // Staying on password — keep keys. Leaving pwd → selection/totp — KEEP passwordSubmitted
+    // so we never re-fill/re-Next. Only clear on identifier bounce or forceReset.
     if (wasPwd && nowPwd) {
-      // keep passwordSubmitted / keys
-    } else {
+      // keep
+    } else if (wasPwd && nowPostPwd) {
+      autoLoginState.passwordSubmitted = true;
+      autoLoginState.passwordFilled = true;
+    } else if (!nowPwd && !nowPostPwd) {
       autoLoginState.emailSubmitted = false;
       autoLoginState.passwordSubmitted = false;
       autoLoginState.emailFilled = false;
@@ -1597,6 +1700,21 @@ function runGoogleAutoLogin() {
       (/enter code/i.test(pageText) && /authenticator/i.test(pageText))
     );
 
+  // Host owns 2FA CDP — still allow inject fallback if host stalls (skotp / chooser)
+  const host2faStalled = (() => {
+    if (!window.__flowHostOwns2fa) return false;
+    const key = 'host2fa-watch:' + pathname;
+    if (!autoLoginState.submittedKeys.has(key)) {
+      autoLoginState.submittedKeys.add(key);
+      autoLoginState._host2faSince = now;
+      return false;
+    }
+    return now - (autoLoginState._host2faSince || now) > 4500;
+  })();
+  if (window.__flowHostOwns2fa && (onSecurityCodeScreen || onChallengeChooser) && !host2faStalled) {
+    return;
+  }
+
   // "Get a code to sign in" / g.co/sc / skotp → Try another way FIRST (before authenticator pick)
   if (!DEBUG_FILL_ONLY && onSecurityCodeScreen && !totpReady) {
     const tryAnother =
@@ -1615,15 +1733,28 @@ function runGoogleAutoLogin() {
   }
 
   // Selection screen: click "Get a verification code from the Google Authenticator app"
+  // Keep cover on — only auto-select; do not wait for user.
   if (!DEBUG_FILL_ONLY && !totpReady && (onChallengeChooser || /authenticator/i.test(pageText))) {
     const authTarget = findAuthenticatorOption();
     if (authTarget) {
-      const retryBucket = Math.floor(now / 2000);
+      const retryBucket = Math.floor(now / 1400);
       console.log('[Flow Preload] Selecting Google Authenticator TOTP option');
       autoLoginState.submittedKeys.delete('auth-app:' + pathname + ':' + (retryBucket - 1));
       clickOnce('auth-app:' + pathname + ':' + retryBucket, authTarget);
       return;
     }
+    // URL already /challenge/selection but SPA still shows password card — wait, do not reload
+    if (/\/challenge\/selection/i.test(pathname)) {
+      const pwdStill =
+        document.querySelector('input[name="Passwd"], input[type="password"], input[autocomplete="current-password"]');
+      const chooserReady =
+        /choose how you want to sign in|choose a way/i.test(pageText) ||
+        /authenticator/i.test(pageText);
+      if (pwdStill && isElementVisible(pwdStill) && !chooserReady) {
+        return; // host DriveAuthenticator waits; reloading bounced to password
+      }
+    }
+    return;
   }
 
   // TOTP code field: request OTP from host, then fill + Next
@@ -1679,8 +1810,11 @@ function runGoogleAutoLogin() {
   );
   const passwordInput = passwordInputEarly;
 
-  // Password: only when field is actually painted — submit ONCE (no click loops)
-  if (onPwdChallenge || pwdFieldReady) {
+  // Password: only on /challenge/pwd — never while selection/totp paints Passwd (SPA lag)
+  const onPostPwdPath = /\/challenge\/(selection|totp|skotp|sk|iap|dp|ootp)/i.test(pathname);
+  if (onPostPwdPath) return;
+  if (onPwdChallenge || (pwdFieldReady && !onChallengeChooser && !onSecurityCodeScreen)) {
+    if (!onPwdChallenge && !pwdFieldReady) return;
     if (!pwdFieldReady) {
       pathSettled('challenge-form', 500);
       return;
@@ -1688,21 +1822,24 @@ function runGoogleAutoLogin() {
     if (!pathSettled('pwd-ready', 400)) return;
     if (!credentials.password) return;
 
-    // Host already submitted this password step
+    // Host already submitted / scheduled CDP Next
     try {
       const st = window.__flowHostAuto;
       const pwdKey = 'pwd:' + pathname.split('/').slice(0, 5).join('/');
-      if (st && st[pwdKey] === 'submitted') {
-        autoLoginState.passwordSubmitted = true;
+      if (st && (st[pwdKey] === 'submitted' || st[pwdKey] === 'cdp-scheduled' || st[pwdKey] === 'filled')) {
+        autoLoginState.passwordSubmitted = st[pwdKey] === 'submitted';
+        autoLoginState.passwordFilled = true;
+        // Host owns Next — fill only if empty
+        if ((passwordInput.value || '') !== credentials.password) {
+          fillInputValue(passwordInput, credentials.password);
+        }
         return;
       }
     } catch (e) {}
 
     if (autoLoginState.passwordSubmitted) {
-      const stuckTooLong = now - autoLoginState.lastActionTime > 8000;
-      const wrongPwd = hasGoogleAuthError();
-      // Retry if wrong password OR still on /challenge/pwd with no progress (Next click was a no-op)
-      if (stuckTooLong && autoLoginState.attempts < 2 && (wrongPwd || onPwdChallenge)) {
+      // Only retry on a clear wrong-password alert — not generic page text
+      if (hasGoogleAuthError() && now - autoLoginState.lastActionTime > 8000 && autoLoginState.attempts < 1) {
         autoLoginState.attempts += 1;
         autoLoginState.passwordSubmitted = false;
         autoLoginState.submittedKeys.delete(`password:${pathname}:fill`);
@@ -1713,7 +1850,6 @@ function runGoogleAutoLogin() {
             delete window.__flowHostAuto[pwdKey];
           }
         } catch (e) {}
-        console.warn('[Flow Preload] Password step stuck — retry submit', { wrongPwd, attempts: autoLoginState.attempts });
       } else {
         return;
       }
@@ -1730,29 +1866,28 @@ function runGoogleAutoLogin() {
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.passwordFilled = true;
       autoLoginState.lastActionTime = now;
-      if (DEBUG_FILL_ONLY) {
-        console.log('[Flow Preload] DEBUG_FILL_ONLY — password filled, wait for manual Next');
-        return;
-      }
-    }
-
-    // Keep clicking Next until navigation — previously we set passwordSubmitted
-    // even when click failed, which froze on /challenge/pwd until manual reload.
-    if (!DEBUG_FILL_ONLY && !autoLoginState.passwordSubmitted) {
-      if (now - (autoLoginState.lastActionTime || 0) < 700) return;
-      const clicked = submitGoogleNext('password', passwordInput);
-      if (clicked) {
-        autoLoginState.passwordSubmitted = true;
-        autoLoginState.lastActionTime = now;
-        try {
-          window.__flowHostAuto = window.__flowHostAuto || {};
-          window.__flowHostAuto['pwd:' + location.pathname.split('/').slice(0, 5).join('/')] = 'submitted';
-        } catch (e) {}
-        console.log('[Flow Preload] Password Next clicked');
-      } else if (now - (autoLoginState.lastActionTime || 0) > 10000 && !autoLoginState.pwdUiReloadTried) {
-        autoLoginState.pwdUiReloadTried = true;
-        console.warn('[Flow Preload] Password Next never appeared — cache reload');
-        try { ipcRenderer.sendToHost('auth:stuck-pwd'); } catch (e) {}
+      // Host CDP owns Next when __flowHostOwnsNext — do not submitGoogleNextWhenReady
+      if (window.__flowHostOwnsNext || DEBUG_FILL_ONLY) {
+        console.log('[Flow Preload] Password filled — host owns Next');
+        // If host CDP never advances, DOM-click Next after stall (password loop fix)
+        const watchKey = `host-next-watch:password:${pathname}`;
+        if (!autoLoginState.submittedKeys.has(watchKey)) {
+          autoLoginState.submittedKeys.add(watchKey);
+          setTimeout(() => {
+            try {
+              if (!/\/challenge\/pwd/i.test(location.pathname || '')) return;
+              const pwd = document.querySelector('input[name="Passwd"], input[type="password"]');
+              if (!pwd || !(pwd.value || '').length) return;
+              console.warn('[Flow Preload] Host Next stalled on password — DOM fallback');
+              const owned = window.__flowHostOwnsNext;
+              window.__flowHostOwnsNext = false;
+              submitGoogleNext('password', pwd);
+              window.__flowHostOwnsNext = owned;
+            } catch (e) {}
+          }, 6000);
+        }
+      } else if (!autoLoginState.passwordSubmitted) {
+        submitGoogleNextWhenReady('password', passwordInput, { initialDelayMs: 900, maxMs: 14000 });
       }
     }
     return;
@@ -1784,8 +1919,24 @@ function runGoogleAutoLogin() {
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.emailFilled = true;
       autoLoginState.lastActionTime = now;
-      if (DEBUG_FILL_ONLY) {
-        console.log('[Flow Preload] DEBUG_FILL_ONLY — email filled, wait for manual Next');
+      if (DEBUG_FILL_ONLY || window.__flowHostOwnsNext) {
+        console.log('[Flow Preload] Email filled — host owns Next / fill-only');
+        const watchKey = `host-next-watch:identifier:${pathname}`;
+        if (window.__flowHostOwnsNext && !autoLoginState.submittedKeys.has(watchKey)) {
+          autoLoginState.submittedKeys.add(watchKey);
+          setTimeout(() => {
+            try {
+              if (/\/challenge\/pwd/i.test(location.pathname || '')) return;
+              const em = document.querySelector('input#identifierId, input[type="email"]');
+              if (!em || !(em.value || '').trim()) return;
+              console.warn('[Flow Preload] Host Next stalled on identifier — DOM fallback');
+              const owned = window.__flowHostOwnsNext;
+              window.__flowHostOwnsNext = false;
+              submitGoogleNext('identifier', em);
+              window.__flowHostOwnsNext = owned;
+            } catch (e) {}
+          }, 6000);
+        }
       } else {
         setTimeout(() => {
           if (!emailInput.isConnected) return;
@@ -1802,6 +1953,7 @@ function runGoogleAutoLogin() {
     // If still on identifier after fill+Next, retry Next once (first click often ignored)
     if (
       !DEBUG_FILL_ONLY &&
+      !window.__flowHostOwnsNext &&
       autoLoginState.emailFilled &&
       now - autoLoginState.lastActionTime > 3500 &&
       autoLoginState.attempts < 3 &&
@@ -2812,29 +2964,27 @@ function driveGoogle2faClicks() {
     try { ipcRenderer.sendToHost('cdp-click', { x, y, kind }); } catch (e) {}
   };
 
-  // g.co/sc / security-key prompt → Try another way
-  if (/\/challenge\/sk/i.test(path)) {
-    const tryAnother = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], span')).find((el) =>
+  // Host owns 2FA CDP — inject driveGoogle2faClicks is backup only
+  if (window.__flowHostOwns2fa) return;
+
+  // g.co/sc / skotp security-code prompt → Try another way
+  const onSkotp =
+    /\/challenge\/skotp/i.test(path) ||
+    /\/challenge\/sk(?:\/|$)/i.test(path) ||
+    (/g\.co\/sc|get a code to sign in|enter security code/i.test((document.body && document.body.innerText) || '') &&
+      !/choose how you want to sign in|authenticator app/i.test((document.body && document.body.innerText) || ''));
+  if (onSkotp) {
+    const tryAnother = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], span, div')).find((el) =>
       /^try another way$/i.test((el.innerText || '').replace(/\s+/g, ' ').trim()) && visible(el)
     );
     if (tryAnother) sendClick(tryAnother, 'try-another');
     return;
   }
 
-  // Method list → Google Authenticator
+  // Method list → Google Authenticator (reuse shared finder + CDP)
   if (/\/challenge\/selection/i.test(path)) {
-    const isAuth = (raw) => {
-      const t = String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      if (!t || t.length > 180) return false;
-      if (/one-time security code|tap yes|use your passkey|can.?t find an eligible/.test(t)) return false;
-      return /google authenticator/.test(t) || (/authenticator/.test(t) && /code|verification|app/.test(t));
-    };
-    const cands = Array.from(document.querySelectorAll(
-      '[data-challengeid], [data-challengetype], li, div[role="link"], div[role="button"], button, a'
-    )).filter((el) => visible(el) && isAuth(el.getAttribute('aria-label') || el.innerText || ''));
-    cands.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
-    const el = cands[0] && (cands[0].closest('[data-challengeid], [data-challengetype], li, [role="link"], [role="button"], button, a') || cands[0]);
-    if (el) sendClick(el, 'auth-app');
+    const el = typeof findAuthenticatorOption === 'function' ? findAuthenticatorOption() : null;
+    if (el && visible(el)) sendClick(el, 'auth-app');
   }
 }
 

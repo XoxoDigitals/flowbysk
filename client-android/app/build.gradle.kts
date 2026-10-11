@@ -18,8 +18,8 @@ android {
         applicationId = "com.flowbrowser.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 603
-        versionName = "6.0.3"
+        versionCode = 38
+        versionName = "2.4.0"
 
         val defaultServer =
             (project.findProperty("DEFAULT_SERVER_URL") as String?)
@@ -89,7 +89,6 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 }
 
 // Keep assets/www in sync with the Windows client www tree during builds.
