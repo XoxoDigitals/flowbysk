@@ -1866,7 +1866,7 @@ public partial class MainWindow : Window
                 _credChannel.Clear();
                 return new { success = true };
             case "getDeviceId":
-                return new { deviceId = GetStableDeviceId(), client = "windows-exe/6.1.0" };
+                return new { deviceId = GetStableDeviceId(), client = "windows-exe/7.0.0" };
             default:
                 throw new InvalidOperationException("Unknown command: " + cmd);
         }

@@ -1,11 +1,11 @@
 ﻿// Flow Browser App Shell Controller
 
-/** Active client API base — v6 traditional login only. */
-let CLIENT_API = '/api/v6/client';
+/** Active client API base — v7 traditional login only. */
+let CLIENT_API = '/api/v7/client';
 
 function normalizeClientApiVersion(value) {
   void value;
-  return 'v6';
+  return 'v7';
 }
 
 async function resolveClientApiBase(serverUrl, force = false) {
@@ -514,7 +514,7 @@ class FlowBrowserApp {
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
       let deviceId = null;
-      let flowClient = 'windows-exe/6.1.0';
+      let flowClient = 'windows-exe/7.0.0';
       try {
         if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
           const dev = await window.electronAPI.getDeviceId();

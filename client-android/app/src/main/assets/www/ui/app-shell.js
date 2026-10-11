@@ -1,11 +1,11 @@
 ﻿// Flow Browser App Shell Controller
 
-/** Active client API base — v6 traditional login only. */
-let CLIENT_API = '/api/v6/client';
+/** Active client API base — v7 traditional login only. */
+let CLIENT_API = '/api/v7/client';
 
 function normalizeClientApiVersion(value) {
   void value;
-  return 'v6';
+  return 'v7';
 }
 
 async function resolveClientApiBase(serverUrl, force = false) {

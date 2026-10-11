@@ -17,7 +17,7 @@ function isValidDeviceId(deviceId) {
   return true;
 }
 
-/** App clients must send Device ID; web portal does not use /api/v6/client. */
+/** App clients must send Device ID; web portal does not use /api/v7/client. */
 function requireAppDeviceAttestation(req) {
   const enabled = String(process.env.REQUIRE_DEVICE_ID || '1') !== '0';
   if (!enabled) return { ok: true, skipped: true };

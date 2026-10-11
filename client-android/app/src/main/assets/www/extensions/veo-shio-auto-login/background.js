@@ -2,7 +2,7 @@
 // Connects to the Flow Browser backend (https://flowcreatorai.site)
 
 const API_ORIGIN = "https://flowcreatorai.site";
-const API_BASE = `${API_ORIGIN}/api/v6/client`;
+const API_BASE = `${API_ORIGIN}/api/v7/client`;
 const FLOW_URL = "https://flow.google.com/";
 const GOOGLE_LOGOUT = "https://accounts.google.com/Logout";
 
