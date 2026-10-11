@@ -92,8 +92,7 @@ public partial class MainWindow : Window
         Loaded += async (_, _) => await InitAsync();
         Closing += (_, _) =>
         {
-            RuntimeProfiles.TryDeleteDirectory(_flowUserData);
-            RuntimeProfiles.TryDeleteDirectory(_shellUserData);
+            // Keep durable WebView profiles (Google cookies). Only wipe extracted www temp.
             WwwExtractor.WipeTempWww();
         };
     }
@@ -104,9 +103,10 @@ public partial class MainWindow : Window
         // Strip UTF-8 BOM — WebView2 document-created scripts can fail oddly with BOM
         _flowInject = File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
 
-        // v6: session.bin only; profiles always ephemeral under %TEMP%\FlowBrowserV6
-        DataPaths.EnsureSessionOnly();
+        // v6.1+: durable LocalAppData profiles + session.bin (cookies survive close)
+        DataPaths.EnsureDurableProfiles();
         DataPaths.MigrateFromLegacy();
+        RuntimeProfiles.CleanupLegacyTempProfiles();
         _shellUserData = RuntimeProfiles.CreateShell();
         _flowUserData = RuntimeProfiles.CreateFlow();
         Directory.CreateDirectory(_shellUserData);
@@ -1214,6 +1214,32 @@ public partial class MainWindow : Window
     const s = getComputedStyle(el);
     return s.display !== 'none' && s.visibility !== 'hidden';
   }};
+  const textCaptchaInput = () => {{
+    const byPh = Array.from(document.querySelectorAll('input[type=""text""], input:not([type]), input[name=""ca""], input[name=""captcha""], input#ca, input#captcha')).find((el) => {{
+      if (!visible(el) || el.type === 'hidden' || el.type === 'password') return false;
+      const hint = ((el.placeholder || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.name || '') + ' ' + (el.id || '')).toLowerCase();
+      return /type the text|hear or see|captcha|characters you see|\\bca\\b/i.test(hint);
+    }});
+    return byPh || null;
+  }};
+  const hasTextCaptcha = () => {{
+    if (textCaptchaInput()) return true;
+    const img = Array.from(document.querySelectorAll('#captchaimg, img#captchaimg, img[src*=""Captcha"" i], img[src*=""captcha"" i]')).find((el) => {{
+      if (!visible(el)) return false;
+      const r = el.getBoundingClientRect();
+      return r.width >= 40 && r.height >= 20;
+    }});
+    if (img) return true;
+    const t = ((document.body && document.body.innerText) || '').slice(0, 2000);
+    return /type the text you hear or see|characters you see in the (?:box|image)/i.test(t);
+  }};
+  if (hasTextCaptcha()) {{
+    try {{
+      if (typeof syncGoogleAuthChrome === 'function') syncGoogleAuthChrome();
+      else if (window.ipcRenderer) window.ipcRenderer.sendToHost('auth:captcha', {{ active: true }});
+    }} catch (e) {{}}
+    return {{ ok:false, reason:'text-captcha', path }};
+  }}
   const fill = (el, val) => {{
     if (!el || !val) return false;
     if ((el.value || '') === val || (el.value || '').toLowerCase() === String(val).toLowerCase()) return true;
@@ -1229,6 +1255,10 @@ public partial class MainWindow : Window
     return (el.value || '') === val || (el.value || '').toLowerCase() === String(val).toLowerCase();
   }};
   const clickNext = (input) => {{
+    if (hasTextCaptcha()) {{
+      const ca = textCaptchaInput();
+      if (!ca || !(ca.value || '').trim()) return false;
+    }}
     const next = document.querySelector('#identifierNext button, #identifierNext, #passwordNext button, #passwordNext, #totpNext button, #totpNext') ||
       Array.from(document.querySelectorAll('button, div[role=""button""]')).find(b => /^\\s*next\\s*$/i.test((b.innerText || b.textContent || '')) && visible(b));
     if (next && visible(next)) {{
@@ -1717,7 +1747,7 @@ public partial class MainWindow : Window
                 _credChannel.Clear();
                 return new { success = true };
             case "getDeviceId":
-                return new { deviceId = GetStableDeviceId(), client = "windows-exe/6.0.2" };
+                return new { deviceId = GetStableDeviceId(), client = "windows-exe/6.1.0" };
             default:
                 throw new InvalidOperationException("Unknown command: " + cmd);
         }

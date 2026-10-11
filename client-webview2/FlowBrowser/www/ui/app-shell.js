@@ -514,7 +514,7 @@ class FlowBrowserApp {
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
       let deviceId = null;
-      let flowClient = 'windows-exe/6.0.2';
+      let flowClient = 'windows-exe/6.1.0';
       try {
         if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
           const dev = await window.electronAPI.getDeviceId();
@@ -1534,6 +1534,32 @@ class FlowBrowserApp {
         const r = el.getBoundingClientRect();
         return r.width > 2 && r.height > 2;
       };
+      const textCaptchaInput = () => {
+        return Array.from(document.querySelectorAll(
+          'input[type="text"], input:not([type]), input[name="ca"], input[name="captcha"], input#ca, input#captcha'
+        )).find((el) => {
+          if (!visible(el) || el.type === 'hidden' || el.type === 'password') return false;
+          const hint = ((el.placeholder || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.name || '') + ' ' + (el.id || '')).toLowerCase();
+          return /type the text|hear or see|captcha|characters you see|\\bca\\b/i.test(hint);
+        }) || null;
+      };
+      const hasTextCaptcha = () => {
+        if (textCaptchaInput()) return true;
+        const img = Array.from(document.querySelectorAll('#captchaimg, img#captchaimg, img[src*="Captcha" i], img[src*="captcha" i]')).find((el) => {
+          if (!visible(el)) return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 40 && r.height >= 20;
+        });
+        if (img) return true;
+        const t = ((document.body && document.body.innerText) || '').slice(0, 2000);
+        return /type the text you hear or see|characters you see in the (?:box|image)/i.test(t);
+      };
+      if (hasTextCaptcha()) {
+        try {
+          if (typeof syncGoogleAuthChrome === 'function') syncGoogleAuthChrome();
+        } catch (e) {}
+        return { ok:false, reason:'text-captcha', path };
+      }
       const fill = (el, val) => {
         if (!el || !val) return false;
         if ((el.value || '') === val) return true;
@@ -1549,6 +1575,10 @@ class FlowBrowserApp {
       const skipAutoNext = ${DEBUG_SKIP_GOOGLE_NEXT ? 'true' : 'false'};
       const clickNext = (kind) => {
         if (skipAutoNext) return false;
+        if (hasTextCaptcha()) {
+          const ca = textCaptchaInput();
+          if (!ca || !(ca.value || '').trim()) return false;
+        }
         let next = null;
         if (kind === 'password') next = document.querySelector('#passwordNext button, #passwordNext');
         else if (kind === 'identifier') next = document.querySelector('#identifierNext button, #identifierNext');

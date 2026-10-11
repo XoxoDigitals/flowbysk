@@ -2,26 +2,37 @@
 
 namespace FlowBrowser;
 
-/// <summary>v6 ephemeral WebView2 profile folders under %TEMP%\FlowBrowserV6 (wiped on close).</summary>
+/// <summary>
+/// WebView2 user-data folders. v6.1+: durable under LocalAppData (DataPaths).
+/// TEMP GUID profiles are no longer used so Google cookies survive EXE close.
+/// </summary>
 static class RuntimeProfiles
 {
-    public static string Create(string leaf)
+    public static string CreateShell()
     {
-        var dir = Path.Combine(Path.GetTempPath(), "FlowBrowserV6", Guid.NewGuid().ToString("N"), leaf);
-        Directory.CreateDirectory(dir);
-        DataPaths.TryHide(dir);
-        try
-        {
-            var parent = Path.GetDirectoryName(dir);
-            if (parent != null) DataPaths.TryHide(parent);
-            DataPaths.TryHide(Path.Combine(Path.GetTempPath(), "FlowBrowserV6"));
-        }
-        catch { /* ignore */ }
-        return dir;
+        Directory.CreateDirectory(DataPaths.ShellProfile);
+        DataPaths.TryHide(DataPaths.ShellProfile);
+        return DataPaths.ShellProfile;
     }
 
-    public static string CreateShell() => Create("shell");
-    public static string CreateFlow() => Create("flow");
+    public static string CreateFlow()
+    {
+        Directory.CreateDirectory(DataPaths.FlowProfile);
+        DataPaths.TryHide(DataPaths.FlowProfile);
+        return DataPaths.FlowProfile;
+    }
+
+    /// <summary>Best-effort cleanup of leftover TEMP v6 ephemeral profiles (migration).</summary>
+    public static void CleanupLegacyTempProfiles()
+    {
+        try
+        {
+            var root = Path.Combine(Path.GetTempPath(), "FlowBrowserV6");
+            if (Directory.Exists(root))
+                TryDeleteDirectory(root);
+        }
+        catch { /* ignore */ }
+    }
 
     public static void TryDeleteDirectory(string? path)
     {

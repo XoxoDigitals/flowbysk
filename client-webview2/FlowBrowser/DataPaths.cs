@@ -80,17 +80,27 @@ static class DataPaths
         return new Guid(bytes).ToString("D");
     }
 
-    /// <summary>v6: only the session vault folder — no durable WebView profiles under LocalAppData.</summary>
-    public static void EnsureSessionOnly()
+    /// <summary>
+    /// Durable session vault + WebView profiles under LocalAppData (cookies survive EXE close).
+    /// Explicit wipe uses ClearFlowSessionAsync / Clear cookies button / admin revoke.
+    /// </summary>
+    public static void EnsureDurableProfiles()
     {
         Directory.CreateDirectory(SecureDir);
+        Directory.CreateDirectory(ShellProfile);
+        Directory.CreateDirectory(FlowProfile);
         TryHide(Root);
         TryHide(SecureDir);
-        TryDeleteTree(DataRoot);
+        TryHide(DataRoot);
+        TryHide(ShellProfile);
+        TryHide(FlowProfile);
         TryDeleteTree(Path.Combine(Root, "u"));
     }
 
-    public static void EnsureTree() => EnsureSessionOnly();
+    /// <summary>Deprecated name — durable profiles (v6.1+).</summary>
+    public static void EnsureSessionOnly() => EnsureDurableProfiles();
+
+    public static void EnsureTree() => EnsureDurableProfiles();
 
     /// <summary>Move session + profiles from old FlowBrowser paths, then delete brand folder.</summary>
     public static void MigrateFromLegacy()

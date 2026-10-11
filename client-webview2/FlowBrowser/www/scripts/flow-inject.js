@@ -1182,6 +1182,20 @@ function submitGoogleNext(kind, input) {
     console.log('[Flow Preload] DEBUG_FILL_ONLY — skip Next click:', kind);
     return false;
   }
+  // Never auto-Next while a text captcha is waiting for the user
+  try {
+    if (autoLoginState.captchaPaused || detectGoogleTextCaptcha()) {
+      const ca = findGoogleTextCaptchaInput();
+      if (ca && !(ca.value || '').trim()) {
+        console.log('[Flow Preload] skip Next — text captcha empty');
+        return false;
+      }
+      if (!ca && detectGoogleTextCaptcha()) {
+        console.log('[Flow Preload] skip Next — text captcha visible');
+        return false;
+      }
+    }
+  } catch (e) {}
   const pathKey = `${kind}:${location.pathname}`;
   // Do not hard-block retries — Google often paints Next after fill
 
@@ -1279,8 +1293,60 @@ function notifyAuthHost(channel, data) {
   try { ipcRenderer.sendToHost(channel, data || null); } catch (e) {}
 }
 
+/** Visible Google text-captcha input (classic "Type the text you hear or see"). */
+function findGoogleTextCaptchaInput() {
+  try {
+    const candidates = Array.from(document.querySelectorAll(
+      'input[name="ca"], input[name="captcha"], input[name="Captcha"], input#ca, input#captcha, ' +
+      'input[name="captchaEntered"], input[autocomplete="off"]'
+    ));
+    for (const el of candidates) {
+      if (!isElementVisible(el)) continue;
+      if (el.type === 'hidden' || el.type === 'password' || el.type === 'email') continue;
+      const hint = (
+        (el.getAttribute('aria-label') || '') + ' ' +
+        (el.placeholder || '') + ' ' +
+        (el.name || '') + ' ' +
+        (el.id || '')
+      ).toLowerCase();
+      if (/captcha|type the text|hear or see|characters you see|ca\b/i.test(hint)) return el;
+    }
+    // Placeholder-only match on any visible text input
+    const byPh = Array.from(document.querySelectorAll('input[type="text"], input:not([type])')).find((el) => {
+      if (!isElementVisible(el)) return false;
+      const ph = ((el.placeholder || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
+      return /type the text you hear or see|type the text|characters you see|hear or see/i.test(ph);
+    });
+    return byPh || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function detectGoogleTextCaptcha() {
+  try {
+    if (findGoogleTextCaptchaInput()) return true;
+    const imgs = Array.from(document.querySelectorAll(
+      '#captchaimg, img#captchaimg, img[src*="Captcha" i], img[src*="captcha" i], img[alt*="captcha" i]'
+    ));
+    for (const img of imgs) {
+      if (!isElementVisible(img)) continue;
+      const r = img.getBoundingClientRect();
+      if (r.width >= 40 && r.height >= 20) return true;
+    }
+    const text = ((document.body && document.body.innerText) || '').slice(0, 2500);
+    if (/type the text you hear or see|type the text|characters you see in the (?:box|image)/i.test(text)) {
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
 function detectGoogleCaptcha() {
   try {
+    // Classic text captcha on /identifier (no special URL) — treat as captcha immediately
+    if (detectGoogleTextCaptcha()) return true;
+
     const frames = Array.from(document.querySelectorAll(
       'iframe[src*="recaptcha" i], iframe[src*="Recaptcha"], iframe[title*="reCAPTCHA" i], ' +
       'iframe[src*="challenges.cloudflare.com" i], iframe[src*="hcaptcha" i]'
@@ -1377,13 +1443,14 @@ function syncGoogleAuthChrome() {
     return { captcha: false };
   }
 
-  // URL-level recaptcha challenge — lift cover immediately (no debounce)
+  // URL-level recaptcha OR classic text captcha on identifier — lift cover immediately
   const urlIsRecaptcha = /challenge\/recaptcha|\/recaptcha/i.test(path + location.search);
-  if (urlIsRecaptcha) {
+  const textCaptchaNow = detectGoogleTextCaptcha();
+  if (urlIsRecaptcha || textCaptchaNow) {
     autoLoginState.captchaHits = 2;
     autoLoginState.captchaMisses = 0;
     if (!autoLoginState.captchaPaused) {
-      console.log('[Flow Preload] reCAPTCHA URL — pausing auto-login');
+      console.log('[Flow Preload]', textCaptchaNow ? 'text captcha' : 'reCAPTCHA URL', '— pausing auto-login');
       autoLoginState.captchaPaused = true;
       autoLoginState.overlayDismissed = false;
       showCaptchaBanner();
