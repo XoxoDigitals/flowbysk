@@ -99,50 +99,69 @@ public partial class MainWindow : Window
 
     async Task InitAsync()
     {
-        _wwwRoot = WwwExtractor.ResolveWwwRoot();
-        // Strip UTF-8 BOM — WebView2 document-created scripts can fail oddly with BOM
-        _flowInject = File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
+        try
+        {
+            // Purge old TEMP GUID profiles BEFORE extracting www (ui-* must stay afterward)
+            RuntimeProfiles.CleanupLegacyTempProfiles();
 
-        // v6.1+: durable LocalAppData profiles + session.bin (cookies survive close)
-        DataPaths.EnsureDurableProfiles();
-        DataPaths.MigrateFromLegacy();
-        RuntimeProfiles.CleanupLegacyTempProfiles();
-        _shellUserData = RuntimeProfiles.CreateShell();
-        _flowUserData = RuntimeProfiles.CreateFlow();
-        Directory.CreateDirectory(_shellUserData);
-        Directory.CreateDirectory(_flowUserData);
+            _wwwRoot = WwwExtractor.ResolveWwwRoot();
+            // Strip UTF-8 BOM — WebView2 document-created scripts can fail oddly with BOM
+            _flowInject = File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
+
+            // v6.1+: durable LocalAppData profiles + session.bin (cookies survive close)
+            DataPaths.EnsureDurableProfiles();
+            DataPaths.MigrateFromLegacy();
+            _shellUserData = RuntimeProfiles.CreateShell();
+            _flowUserData = RuntimeProfiles.CreateFlow();
+            Directory.CreateDirectory(_shellUserData);
+            Directory.CreateDirectory(_flowUserData);
 
 #if DEBUG
-        var flowOpts = new CoreWebView2EnvironmentOptions(
-            additionalBrowserArguments: "--remote-debugging-port=9223");
-        var shellOpts = new CoreWebView2EnvironmentOptions(
-            additionalBrowserArguments: "--remote-debugging-port=9222");
+            var flowOpts = new CoreWebView2EnvironmentOptions(
+                additionalBrowserArguments: "--remote-debugging-port=9223");
+            var shellOpts = new CoreWebView2EnvironmentOptions(
+                additionalBrowserArguments: "--remote-debugging-port=9222");
 #else
-        // Release: NEVER expose CDP — users were dumping cookies via ports 9222/9223
-        var flowOpts = new CoreWebView2EnvironmentOptions();
-        var shellOpts = new CoreWebView2EnvironmentOptions();
+            // Release: NEVER expose CDP — users were dumping cookies via ports 9222/9223
+            var flowOpts = new CoreWebView2EnvironmentOptions();
+            var shellOpts = new CoreWebView2EnvironmentOptions();
 #endif
-        var shellEnv = await CoreWebView2Environment.CreateAsync(
-            browserExecutableFolder: null,
-            userDataFolder: _shellUserData,
-            options: shellOpts);
-        var flowEnv = await CoreWebView2Environment.CreateAsync(
-            browserExecutableFolder: null,
-            userDataFolder: _flowUserData,
-            options: flowOpts);
+            var shellEnv = await CoreWebView2Environment.CreateAsync(
+                browserExecutableFolder: null,
+                userDataFolder: _shellUserData,
+                options: shellOpts);
+            var flowEnv = await CoreWebView2Environment.CreateAsync(
+                browserExecutableFolder: null,
+                userDataFolder: _flowUserData,
+                options: flowOpts);
 
-        await ShellView.EnsureCoreWebView2Async(shellEnv);
-        await FlowView.EnsureCoreWebView2Async(flowEnv);
+            await ShellView.EnsureCoreWebView2Async(shellEnv);
+            await FlowView.EnsureCoreWebView2Async(flowEnv);
 
-        ConfigureShell();
-        ConfigureFlow();
+            ConfigureShell();
+            ConfigureFlow();
 
-        _shellReady = true;
-        _flowReady = true;
+            _shellReady = true;
+            _flowReady = true;
 
-        SetShellMode("full");
-        // Prefer *.localhost (secure context) + avoid .local DNS delay. Host ECDH does not need subtle.
-        ShellView.CoreWebView2.Navigate("https://app.flowbrowser.localhost/ui/app-shell.html");
+            SetShellMode("full");
+            // Prefer *.localhost (secure context) + avoid .local DNS delay. Host ECDH does not need subtle.
+            ShellView.CoreWebView2.Navigate("https://app.flowbrowser.localhost/ui/app-shell.html");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("[InitAsync] fatal: " + ex);
+            try
+            {
+                MessageBox.Show(
+                    "Flow Browser failed to start:\n\n" + ex.Message,
+                    "Flow Browser",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+            catch { /* ignore */ }
+            try { Close(); } catch { /* ignore */ }
+        }
     }
 
     void ConfigureShell()

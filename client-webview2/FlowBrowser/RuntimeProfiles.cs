@@ -11,25 +11,34 @@ static class RuntimeProfiles
     public static string CreateShell()
     {
         Directory.CreateDirectory(DataPaths.ShellProfile);
-        DataPaths.TryHide(DataPaths.ShellProfile);
         return DataPaths.ShellProfile;
     }
 
     public static string CreateFlow()
     {
         Directory.CreateDirectory(DataPaths.FlowProfile);
-        DataPaths.TryHide(DataPaths.FlowProfile);
         return DataPaths.FlowProfile;
     }
 
-    /// <summary>Best-effort cleanup of leftover TEMP v6 ephemeral profiles (migration).</summary>
+    /// <summary>
+    /// Best-effort cleanup of leftover TEMP v6 ephemeral profile folders (GUID dirs).
+    /// Never delete ui-* — WwwExtractor stores the embedded shell there.
+    /// </summary>
     public static void CleanupLegacyTempProfiles()
     {
         try
         {
             var root = Path.Combine(Path.GetTempPath(), "FlowBrowserV6");
-            if (Directory.Exists(root))
-                TryDeleteDirectory(root);
+            if (!Directory.Exists(root)) return;
+            foreach (var dir in Directory.EnumerateDirectories(root))
+            {
+                var name = Path.GetFileName(dir);
+                // Active / cached www extract for virtual-host mapping
+                if (name.StartsWith("ui-", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                // Old ephemeral layout: {guid}\shell|flow
+                TryDeleteDirectory(dir);
+            }
         }
         catch { /* ignore */ }
     }

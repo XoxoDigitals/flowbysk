@@ -91,9 +91,7 @@ static class DataPaths
         Directory.CreateDirectory(FlowProfile);
         TryHide(Root);
         TryHide(SecureDir);
-        TryHide(DataRoot);
-        TryHide(ShellProfile);
-        TryHide(FlowProfile);
+        // Do not System/Hidden-mark WebView user-data folders — WebView2 can refuse to open them
         TryDeleteTree(Path.Combine(Root, "u"));
     }
 
