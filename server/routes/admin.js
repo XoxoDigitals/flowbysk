@@ -768,11 +768,20 @@ router.delete('/servers/:id', requireAdminAuth, async (req, res) => {
 });
 
 // ── v5 cookie export management (additive; v4 credential login unchanged) ──
-const CookieCoreV5 = require('../../shared/cookie-core-v5');
+let CookieCoreV5;
+try {
+  CookieCoreV5 = require('../../shared/cookie-core-v5');
+} catch (err) {
+  console.error('[admin] cookie-core-v5 missing — cookie upload routes disabled:', err.message);
+  CookieCoreV5 = null;
+}
 const { sealForStorage } = require('../secretsCrypto');
 
 router.put('/servers/:id/cookies', requireAdminAuth, async (req, res) => {
   try {
+    if (!CookieCoreV5) {
+      return res.status(503).json({ success: false, error: 'Cookie upload unavailable on this build' });
+    }
     const server = await db.getServerById(req.params.id);
     if (!server) return res.status(404).json({ success: false, error: 'Server not found' });
 

@@ -207,6 +207,10 @@ async function mapCustomer(user, metaMap, ownerLookup) {
     lastLoginAt: user.lastSeenAt ? new Date(user.lastSeenAt).toISOString() : null,
     lastIp: user.lastIp || meta.lastIp || null,
     country: meta.lastCountry || meta.country || null,
+    lastCountry: meta.lastCountry || meta.country || null,
+    lastDeviceId: meta.lastDeviceId || null,
+    deviceIds: Array.isArray(meta.deviceIds) ? meta.deviceIds : [],
+    lastClient: meta.lastClient || null,
     activeServerId: meta.activeServerId || null,
     maxParallel,
     sessionVersion: Number(meta.sessionVersion) || 0,
@@ -745,6 +749,9 @@ class Database {
     if (updates.country !== undefined || updates.lastCountry !== undefined) {
       metaPatch.lastCountry = updates.country || updates.lastCountry || null;
     }
+    if (updates.lastDeviceId !== undefined) metaPatch.lastDeviceId = updates.lastDeviceId || '';
+    if (updates.lastClient !== undefined) metaPatch.lastClient = updates.lastClient || '';
+    if (updates.deviceIds !== undefined) metaPatch.deviceIds = Array.isArray(updates.deviceIds) ? updates.deviceIds : [];
     if (Object.keys(metaPatch).length) await patchUserMeta(id, metaPatch);
 
     if (
@@ -1734,6 +1741,279 @@ class Database {
       out[a.id] = await this.countOwnedUsersForAdmin(a.id);
     }
     return out;
+  }
+
+  async ownedCustomerWhereForAdmin(adminId) {
+    const resellerProfiles = await prisma.resellerProfile.findMany({
+      where: { parentAdminId: adminId },
+      select: { id: true, userId: true },
+    });
+    const resellerUserIds = resellerProfiles.map((r) => r.userId);
+    return {
+      role: 'CUSTOMER',
+      OR: [
+        { ownedByAdminId: adminId },
+        { createdByAdminId: adminId },
+        ...(resellerUserIds.length
+          ? [{ createdByResellerId: { in: resellerUserIds } }]
+          : []),
+      ],
+    };
+  }
+
+  async countOwnedUsersForAdmin(adminId) {
+    await this.ready();
+    if (!adminId) return 0;
+    return prisma.user.count({ where: await this.ownedCustomerWhereForAdmin(adminId) });
+  }
+
+  async ownedCustomerIdsForAdmin(adminId) {
+    await this.ready();
+    if (!adminId) return [];
+    const rows = await prisma.user.findMany({
+      where: await this.ownedCustomerWhereForAdmin(adminId),
+      select: { id: true },
+    });
+    return rows.map((r) => r.id);
+  }
+
+  /**
+   * Per-admin plan counts, sorted by plan name then user count desc.
+   * @param {Array<{id:string,username:string,displayName?:string}>} admins
+   */
+
+  async adminPlanBreakdown(admins = []) {
+    await this.ready();
+    const rows = [];
+    const planTotals = new Map();
+
+    for (const admin of admins || []) {
+      if (!admin?.id) continue;
+      const customers = await prisma.user.findMany({
+        where: await this.ownedCustomerWhereForAdmin(admin.id),
+        select: {
+          id: true,
+          subscriptions: {
+            where: { status: 'ACTIVE' },
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            include: { plan: { select: { id: true, name: true } } },
+          },
+        },
+      });
+
+      const counts = new Map();
+      for (const c of customers) {
+        const plan = c.subscriptions?.[0]?.plan;
+        const planName = plan?.name || 'Standard';
+        const planId = plan?.id || null;
+        const key = planId || `name:${planName}`;
+        const cur = counts.get(key) || { planId, planName, count: 0 };
+        cur.count += 1;
+        counts.set(key, cur);
+      }
+
+      for (const v of counts.values()) {
+        rows.push({
+          planId: v.planId,
+          planName: v.planName,
+          adminId: admin.id,
+          adminUsername: admin.username,
+          adminDisplayName: admin.displayName || '',
+          userCount: v.count,
+        });
+        planTotals.set(v.planName, (planTotals.get(v.planName) || 0) + v.count);
+      }
+    }
+
+    rows.sort((a, b) => {
+      const byPlan = String(a.planName).localeCompare(String(b.planName));
+      if (byPlan) return byPlan;
+      return b.userCount - a.userCount;
+    });
+
+    const byPlan = [...planTotals.entries()]
+      .map(([planName, userCount]) => ({ planName, userCount }))
+      .sort((a, b) => b.userCount - a.userCount || a.planName.localeCompare(b.planName));
+
+    return { rows, byPlan };
+  }
+
+  async ownedUserCountsByAdmin() {
+    await this.ready();
+    const admins = await prisma.user.findMany({
+      where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] } },
+      select: { id: true },
+    });
+    const out = {};
+    for (const a of admins) {
+      out[a.id] = await this.countOwnedUsersForAdmin(a.id);
+    }
+    return out;
+  }
+
+  async findUsersByDeviceId(deviceId) {
+    await this.ready();
+    const needle = String(deviceId || '').trim();
+    if (!needle) return [];
+    try {
+      const users = await prisma.user.findMany({
+        where: {
+          role: 'CUSTOMER',
+          OR: [
+            { meta: { path: ['lastDeviceId'], equals: needle } },
+            { meta: { path: ['deviceIds'], array_contains: needle } },
+          ],
+        },
+      });
+      return users.map(toEndUser);
+    } catch (err) {
+      console.warn('findUsersByDeviceId JSON filter failed, scanning:', err.message);
+      const all = await this.getUsers();
+      return all.filter((u) => {
+        if (u.lastDeviceId === needle) return true;
+        return Array.isArray(u.deviceIds) && u.deviceIds.includes(needle);
+      });
+    }
+  }
+
+  /**
+   * Ban every CUSTOMER sharing this Device ID (skip already banned).
+   * Returns list of newly banned users.
+   */
+
+  async cascadeBanByDeviceId(deviceId, { reason = '', sourceUserId = null, sourceUsername = null } = {}) {
+    const needle = String(deviceId || '').trim();
+    if (!needle) return [];
+    const peers = await this.findUsersByDeviceId(needle);
+    const cascaded = [];
+    for (const peer of peers) {
+      if (peer.banned) continue;
+      await this.updateUser(peer.id, {
+        banned: true,
+        banReason: reason || `Cascade ban via Device ID ${needle}`,
+      });
+      await this.forceLogoutAndWipe(peer.id);
+      cascaded.push({ id: peer.id, username: peer.username, deviceId: needle });
+      await this.addLog(peer.id, peer.username, 'cascade_ban_device', {
+        ip: null,
+        deviceId: needle,
+        reason: reason || `Cascade ban via Device ID ${needle}`,
+        sourceUserId,
+        sourceUsername,
+        targetUserId: peer.id,
+        targetUsername: peer.username,
+        autoBanned: true,
+      });
+    }
+    return cascaded;
+  }
+
+  /** True if any other banned CUSTOMER already used this Device ID. */
+
+  async isDeviceLinkedToBannedAccount(deviceId, exceptUserId = null) {
+    const peers = await this.findUsersByDeviceId(deviceId);
+    return peers.some((p) => p.banned && p.id !== exceptUserId);
+  }
+
+  async adminPeriodStats(adminIds = []) {
+    await this.ready();
+    const { periodWindow10th } = require('./deviceSecurity');
+    const { from, to } = periodWindow10th(new Date());
+    const createGrants = await prisma.creditLedger.findMany({
+      where: {
+        OR: [
+          { reason: 'admin_create_user' },
+          { reason: 'reseller_create_user' },
+          { reason: 'create_user' },
+        ],
+        createdAt: { gte: from, lt: to },
+      },
+      select: { userId: true },
+    });
+    const createUserIds = new Set(createGrants.map((g) => g.userId).filter(Boolean));
+    // Also count CUSTOMER end-users created in-window (covers rows without ledger create reason).
+    const createdUsers = await prisma.user.findMany({
+      where: {
+        role: 'CUSTOMER',
+        createdAt: { gte: from, lt: to },
+      },
+      select: { id: true },
+    });
+    for (const u of createdUsers) createUserIds.add(u.id);
+    const createdInPeriod = createUserIds.size;
+
+    // Renewals: admin credit/plan adjustments in-window for users not created this period.
+    const renewRows = await prisma.creditLedger.findMany({
+      where: {
+        createdAt: { gte: from, lt: to },
+        type: 'ADMIN_ADJUSTMENT',
+        AND: [
+          {
+            NOT: {
+              OR: [
+                { reason: 'admin_create_user' },
+                { reason: 'reseller_create_user' },
+                { reason: 'create_user' },
+              ],
+            },
+          },
+          ...(createUserIds.size
+            ? [{ NOT: { userId: { in: [...createUserIds] } } }]
+            : []),
+        ],
+      },
+      select: { userId: true },
+    });
+    const renewalUserIds = new Set(renewRows.map((r) => r.userId).filter(Boolean));
+    const renewals = renewalUserIds.size;
+
+    const byAdmin = [];
+    for (const adminId of adminIds || []) {
+      if (!adminId) continue;
+      const ownedIds = await this.ownedCustomerIdsForAdmin(adminId);
+      const ownedSet = new Set(ownedIds);
+      let newUsers = 0;
+      for (const id of createUserIds) if (ownedSet.has(id)) newUsers += 1;
+      let renewCount = 0;
+      for (const id of renewalUserIds) if (ownedSet.has(id)) renewCount += 1;
+      byAdmin.push({
+        id: adminId,
+        newUsers,
+        renewals: renewCount,
+        total: newUsers + renewCount,
+      });
+    }
+
+    return {
+      periodStart: from.toISOString(),
+      periodEnd: to.toISOString(),
+      newUsers: createdInPeriod,
+      renewals,
+      total: createdInPeriod + renewals,
+      byAdmin,
+    };
+  }
+
+  async recordDeviceTouch(userId, { deviceId, ip, country, client } = {}) {
+    await this.ready();
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return null;
+    const metaMap = await getUserMetaMap();
+    const meta = metaMap[userId] || {};
+    const deviceIds = Array.isArray(meta.deviceIds) ? [...meta.deviceIds] : [];
+    if (deviceId && !deviceIds.includes(deviceId)) deviceIds.push(deviceId);
+    const patch = {
+      lastLoginAt: new Date().toISOString(),
+    };
+    if (ip) patch.lastIp = ip;
+    if (country) patch.lastCountry = country;
+    if (deviceId) {
+      patch.lastDeviceId = deviceId;
+      patch.deviceIds = deviceIds.slice(-20);
+    }
+    if (client) patch.lastClient = client;
+    return this.updateUser(userId, patch);
   }
 }
 
