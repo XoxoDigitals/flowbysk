@@ -56,7 +56,7 @@ async function setJsonSetting(key, value) {
 }
 
 function normalizeClientApiVersion(value) {
-  // Only v7 is live (traditional login). Older clients FORCE_UPDATE.
+  // Only v7 is live (traditional login + vault EXE). Older clients FORCE_UPDATE.
   void value;
   return 'v7';
 }
@@ -206,10 +206,7 @@ async function mapCustomer(user, metaMap, ownerLookup) {
     createdAt: user.createdAt ? new Date(user.createdAt).toISOString() : null,
     lastLoginAt: user.lastSeenAt ? new Date(user.lastSeenAt).toISOString() : null,
     lastIp: user.lastIp || meta.lastIp || null,
-    lastCountry: meta.lastCountry || null,
-    lastDeviceId: meta.lastDeviceId || null,
-    deviceIds: Array.isArray(meta.deviceIds) ? meta.deviceIds : [],
-    lastClient: meta.lastClient || null,
+    country: meta.lastCountry || meta.country || null,
     activeServerId: meta.activeServerId || null,
     maxParallel,
     sessionVersion: Number(meta.sessionVersion) || 0,
@@ -744,11 +741,10 @@ class Database {
     if (updates.maxParallel !== undefined) metaPatch.maxParallel = clampParallel(updates.maxParallel);
     if (updates.displayPrice !== undefined) metaPatch.displayPrice = Number(updates.displayPrice) || 0;
     if (updates.banReason !== undefined) metaPatch.banReason = updates.banReason || '';
-    if (updates.lastCountry !== undefined) metaPatch.lastCountry = updates.lastCountry || '';
-    if (updates.lastDeviceId !== undefined) metaPatch.lastDeviceId = updates.lastDeviceId || '';
-    if (updates.lastClient !== undefined) metaPatch.lastClient = updates.lastClient || '';
-    if (updates.lastIp !== undefined) metaPatch.lastIp = updates.lastIp || '';
-    if (updates.deviceIds !== undefined) metaPatch.deviceIds = Array.isArray(updates.deviceIds) ? updates.deviceIds : [];
+    if (updates.lastIp !== undefined) metaPatch.lastIp = updates.lastIp || null;
+    if (updates.country !== undefined || updates.lastCountry !== undefined) {
+      metaPatch.lastCountry = updates.country || updates.lastCountry || null;
+    }
     if (Object.keys(metaPatch).length) await patchUserMeta(id, metaPatch);
 
     if (
@@ -889,6 +885,9 @@ class Database {
             })
             .catch((err) => console.warn('[db] secret migrate failed', s.id, err.message));
         }
+        const cookieMeta = s.cookieMeta && typeof s.cookieMeta === 'object' ? s.cookieMeta : null;
+        const cookieVersion = Number(s.cookieVersion) || 0;
+        const hasCookies = !!(s.cookieExportEnc && String(s.cookieExportEnc).trim()) && cookieVersion > 0;
         return {
           id: s.id,
           name: s.name,
@@ -898,6 +897,11 @@ class Database {
           totpSecret: totpNorm,
           isActive: s.isActive !== false,
           createdAt: s.createdAt.toISOString(),
+          hasCookies,
+          cookieVersion,
+          cookieMeta,
+          // sealed blob only for internal helpers — stripped by sanitizeServerForAdmin
+          cookieExportEnc: s.cookieExportEnc || null,
         };
       });
     } catch (err) {
@@ -912,6 +916,50 @@ class Database {
   async getServerById(id) {
     const rows = await this.getServers();
     return rows.find((s) => s.id === id) || null;
+  }
+
+  /** v5: store sealed cookie export + public meta (no plaintext in meta). */
+  async setServerCookies(id, { cookieExportEnc, cookieMeta, cookieVersion }) {
+    await this.ready();
+    try {
+      await prisma.sharedGoogleAccount.update({
+        where: { id },
+        data: {
+          cookieExportEnc: cookieExportEnc || null,
+          cookieMeta: cookieMeta || null,
+          cookieVersion: Number(cookieVersion) || 0,
+        },
+      });
+    } catch {
+      return null;
+    }
+    return this.getServerById(id);
+  }
+
+  async clearServerCookies(id) {
+    return this.setServerCookies(id, {
+      cookieExportEnc: null,
+      cookieMeta: null,
+      cookieVersion: 0,
+    });
+  }
+
+  /** Opens sealed cookie JSON for v5 client inject — never log the return value. */
+  async getServerCookieExportPlain(id) {
+    await this.ready();
+    try {
+      const row = await prisma.sharedGoogleAccount.findUnique({ where: { id } });
+      if (!row?.cookieExportEnc) return null;
+      const plain = openFromStorage(row.cookieExportEnc);
+      if (!plain) return null;
+      return {
+        cookiesJson: plain,
+        cookieVersion: Number(row.cookieVersion) || 0,
+        cookieMeta: row.cookieMeta && typeof row.cookieMeta === 'object' ? row.cookieMeta : null,
+      };
+    } catch {
+      return null;
+    }
   }
 
   async createServer(serverData) {
@@ -1496,19 +1544,100 @@ class Database {
   }
 
   async getLogs(limit = 100) {
+    return this.searchLogs({ limit });
+  }
+
+  /**
+   * Search activity logs with optional text / user / time / country filters.
+   * @param {{ q?: string, username?: string, userId?: string, country?: string, from?: string, to?: string, limit?: number }} opts
+   */
+  async searchLogs(opts = {}) {
     await this.ready();
+    const take = Math.min(1000, Math.max(1, Number(opts.limit) || 200));
+    const where = {};
+    if (opts.userId) where.userId = String(opts.userId);
+    if (opts.from || opts.to) {
+      where.createdAt = {};
+      if (opts.from) {
+        const d = new Date(opts.from);
+        if (!Number.isNaN(d.getTime())) where.createdAt.gte = d;
+      }
+      if (opts.to) {
+        const d = new Date(opts.to);
+        if (!Number.isNaN(d.getTime())) {
+          // If date-only (YYYY-MM-DD), include the full day
+          if (/^\d{4}-\d{2}-\d{2}$/.test(String(opts.to).trim())) {
+            d.setHours(23, 59, 59, 999);
+          }
+          where.createdAt.lte = d;
+        }
+      }
+      if (!Object.keys(where.createdAt).length) delete where.createdAt;
+    }
+
     const rows = await prisma.systemLog.findMany({
+      where,
       orderBy: { createdAt: 'desc' },
-      take: Math.min(500, Number(limit) || 100),
+      take: Math.min(2000, take * 3), // over-fetch then filter in memory for JSON details
     });
-    return rows.map((r) => ({
-      id: r.id,
-      userId: r.userId,
-      username: r.details?.username || null,
-      action: r.details?.action || r.message,
-      details: r.details || {},
-      timestamp: r.createdAt.toISOString(),
-    }));
+
+    const q = String(opts.q || '').trim().toLowerCase();
+    const username = String(opts.username || '').trim().toLowerCase();
+    const country = String(opts.country || '').trim().toUpperCase();
+
+    const mapped = [];
+    for (const r of rows) {
+      const details = r.details && typeof r.details === 'object' ? r.details : {};
+      const row = {
+        id: r.id,
+        userId: r.userId,
+        username: details.username || null,
+        action: details.action || r.message,
+        details,
+        country: details.country || null,
+        ip: details.ip || null,
+        timestamp: r.createdAt.toISOString(),
+        createdAt: r.createdAt.toISOString(),
+      };
+      if (username) {
+        const un = String(row.username || '').toLowerCase();
+        if (!un.includes(username) && un !== username) continue;
+      }
+      if (country && country !== 'ALL') {
+        const c = String(row.country || '').toUpperCase();
+        if (c !== country) continue;
+      }
+      if (q) {
+        const hay = [
+          row.username,
+          row.action,
+          row.country,
+          row.ip,
+          row.userId,
+          JSON.stringify(row.details || {}),
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
+      mapped.push(row);
+      if (mapped.length >= take) break;
+    }
+    return mapped;
+  }
+
+  /** Distinct countries seen on end users (from lastCountry meta). */
+  async listUserCountries() {
+    await this.ready();
+    const map = await getUserMetaMap();
+    const set = new Set();
+    for (const meta of Object.values(map || {})) {
+      const c = String(meta?.lastCountry || meta?.country || '')
+        .trim()
+        .toUpperCase();
+      if (c && c !== 'XX') set.add(c);
+    }
+    return [...set].sort();
   }
 
   async getUserCreditHistory(userId, limit = 50) {
@@ -1552,12 +1681,6 @@ class Database {
                     equals: username,
                   },
                 },
-                {
-                  details: {
-                    path: ['username'],
-                    equals: username,
-                  },
-                },
               ]
             : []),
         ],
@@ -1577,99 +1700,27 @@ class Database {
   /**
    * Users owned by an admin: directly added + users added by their resellers.
    */
-  async ownedCustomerWhereForAdmin(adminId) {
+  async countOwnedUsersForAdmin(adminId) {
+    await this.ready();
+    if (!adminId) return 0;
     const resellerProfiles = await prisma.resellerProfile.findMany({
       where: { parentAdminId: adminId },
       select: { id: true, userId: true },
     });
     const resellerUserIds = resellerProfiles.map((r) => r.userId);
-    return {
-      role: 'CUSTOMER',
-      OR: [
-        { ownedByAdminId: adminId },
-        { createdByAdminId: adminId },
-        ...(resellerUserIds.length
-          ? [{ createdByResellerId: { in: resellerUserIds } }]
-          : []),
-      ],
-    };
-  }
-
-  async countOwnedUsersForAdmin(adminId) {
-    await this.ready();
-    if (!adminId) return 0;
-    return prisma.user.count({ where: await this.ownedCustomerWhereForAdmin(adminId) });
-  }
-
-  async ownedCustomerIdsForAdmin(adminId) {
-    await this.ready();
-    if (!adminId) return [];
-    const rows = await prisma.user.findMany({
-      where: await this.ownedCustomerWhereForAdmin(adminId),
-      select: { id: true },
+    const count = await prisma.user.count({
+      where: {
+        role: 'CUSTOMER',
+        OR: [
+          { ownedByAdminId: adminId },
+          { createdByAdminId: adminId },
+          ...(resellerUserIds.length
+            ? [{ createdByResellerId: { in: resellerUserIds } }]
+            : []),
+        ],
+      },
     });
-    return rows.map((r) => r.id);
-  }
-
-  /**
-   * Per-admin plan counts, sorted by plan name then user count desc.
-   * @param {Array<{id:string,username:string,displayName?:string}>} admins
-   */
-  async adminPlanBreakdown(admins = []) {
-    await this.ready();
-    const rows = [];
-    const planTotals = new Map();
-
-    for (const admin of admins || []) {
-      if (!admin?.id) continue;
-      const customers = await prisma.user.findMany({
-        where: await this.ownedCustomerWhereForAdmin(admin.id),
-        select: {
-          id: true,
-          subscriptions: {
-            where: { status: 'ACTIVE' },
-            orderBy: { createdAt: 'desc' },
-            take: 1,
-            include: { plan: { select: { id: true, name: true } } },
-          },
-        },
-      });
-
-      const counts = new Map();
-      for (const c of customers) {
-        const plan = c.subscriptions?.[0]?.plan;
-        const planName = plan?.name || 'Standard';
-        const planId = plan?.id || null;
-        const key = planId || `name:${planName}`;
-        const cur = counts.get(key) || { planId, planName, count: 0 };
-        cur.count += 1;
-        counts.set(key, cur);
-      }
-
-      for (const v of counts.values()) {
-        rows.push({
-          planId: v.planId,
-          planName: v.planName,
-          adminId: admin.id,
-          adminUsername: admin.username,
-          adminDisplayName: admin.displayName || '',
-          userCount: v.count,
-        });
-        planTotals.set(v.planName, (planTotals.get(v.planName) || 0) + v.count);
-      }
-    }
-
-    rows.sort((a, b) => {
-      const byPlan = String(a.planName).localeCompare(String(b.planName));
-      if (byPlan) return byPlan;
-      return b.userCount - a.userCount;
-    });
-
-    const byPlan = [...planTotals.entries()]
-      .map(([planName, userCount]) => ({ planName, userCount }))
-      .sort((a, b) => b.userCount - a.userCount || a.planName.localeCompare(b.planName));
-
-    return { rows, byPlan };
+    return count;
   }
 
   async ownedUserCountsByAdmin() {
@@ -1683,167 +1734,6 @@ class Database {
       out[a.id] = await this.countOwnedUsersForAdmin(a.id);
     }
     return out;
-  }
-
-  async findUsersByDeviceId(deviceId) {
-    await this.ready();
-    const needle = String(deviceId || '').trim();
-    if (!needle) return [];
-    try {
-      const users = await prisma.user.findMany({
-        where: {
-          role: 'CUSTOMER',
-          OR: [
-            { meta: { path: ['lastDeviceId'], equals: needle } },
-            { meta: { path: ['deviceIds'], array_contains: needle } },
-          ],
-        },
-      });
-      return users.map(toEndUser);
-    } catch (err) {
-      console.warn('findUsersByDeviceId JSON filter failed, scanning:', err.message);
-      const all = await this.getUsers();
-      return all.filter((u) => {
-        if (u.lastDeviceId === needle) return true;
-        return Array.isArray(u.deviceIds) && u.deviceIds.includes(needle);
-      });
-    }
-  }
-
-  /**
-   * Ban every CUSTOMER sharing this Device ID (skip already banned).
-   * Returns list of newly banned users.
-   */
-  async cascadeBanByDeviceId(deviceId, { reason = '', sourceUserId = null, sourceUsername = null } = {}) {
-    const needle = String(deviceId || '').trim();
-    if (!needle) return [];
-    const peers = await this.findUsersByDeviceId(needle);
-    const cascaded = [];
-    for (const peer of peers) {
-      if (peer.banned) continue;
-      await this.updateUser(peer.id, {
-        banned: true,
-        banReason: reason || `Cascade ban via Device ID ${needle}`,
-      });
-      await this.forceLogoutAndWipe(peer.id);
-      cascaded.push({ id: peer.id, username: peer.username, deviceId: needle });
-      await this.addLog(peer.id, peer.username, 'cascade_ban_device', {
-        ip: null,
-        deviceId: needle,
-        reason: reason || `Cascade ban via Device ID ${needle}`,
-        sourceUserId,
-        sourceUsername,
-        targetUserId: peer.id,
-        targetUsername: peer.username,
-        autoBanned: true,
-      });
-    }
-    return cascaded;
-  }
-
-  /** True if any other banned CUSTOMER already used this Device ID. */
-  async isDeviceLinkedToBannedAccount(deviceId, exceptUserId = null) {
-    const peers = await this.findUsersByDeviceId(deviceId);
-    return peers.some((p) => p.banned && p.id !== exceptUserId);
-  }
-
-  async adminPeriodStats(adminIds = []) {
-    await this.ready();
-    const { periodWindow10th } = require('./deviceSecurity');
-    const { from, to } = periodWindow10th(new Date());
-    const createGrants = await prisma.creditLedger.findMany({
-      where: {
-        OR: [
-          { reason: 'admin_create_user' },
-          { reason: 'reseller_create_user' },
-          { reason: 'create_user' },
-        ],
-        createdAt: { gte: from, lt: to },
-      },
-      select: { userId: true },
-    });
-    const createUserIds = new Set(createGrants.map((g) => g.userId).filter(Boolean));
-    // Also count CUSTOMER end-users created in-window (covers rows without ledger create reason).
-    const createdUsers = await prisma.user.findMany({
-      where: {
-        role: 'CUSTOMER',
-        createdAt: { gte: from, lt: to },
-      },
-      select: { id: true },
-    });
-    for (const u of createdUsers) createUserIds.add(u.id);
-    const createdInPeriod = createUserIds.size;
-
-    // Renewals: admin credit/plan adjustments in-window for users not created this period.
-    const renewRows = await prisma.creditLedger.findMany({
-      where: {
-        createdAt: { gte: from, lt: to },
-        type: 'ADMIN_ADJUSTMENT',
-        AND: [
-          {
-            NOT: {
-              OR: [
-                { reason: 'admin_create_user' },
-                { reason: 'reseller_create_user' },
-                { reason: 'create_user' },
-              ],
-            },
-          },
-          ...(createUserIds.size
-            ? [{ NOT: { userId: { in: [...createUserIds] } } }]
-            : []),
-        ],
-      },
-      select: { userId: true },
-    });
-    const renewalUserIds = new Set(renewRows.map((r) => r.userId).filter(Boolean));
-    const renewals = renewalUserIds.size;
-
-    const byAdmin = [];
-    for (const adminId of adminIds || []) {
-      if (!adminId) continue;
-      const ownedIds = await this.ownedCustomerIdsForAdmin(adminId);
-      const ownedSet = new Set(ownedIds);
-      let newUsers = 0;
-      for (const id of createUserIds) if (ownedSet.has(id)) newUsers += 1;
-      let renewCount = 0;
-      for (const id of renewalUserIds) if (ownedSet.has(id)) renewCount += 1;
-      byAdmin.push({
-        id: adminId,
-        newUsers,
-        renewals: renewCount,
-        total: newUsers + renewCount,
-      });
-    }
-
-    return {
-      periodStart: from.toISOString(),
-      periodEnd: to.toISOString(),
-      newUsers: createdInPeriod,
-      renewals,
-      total: createdInPeriod + renewals,
-      byAdmin,
-    };
-  }
-
-  async recordDeviceTouch(userId, { deviceId, ip, country, client } = {}) {
-    await this.ready();
-    const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (!user) return null;
-    const meta = { ...(user.meta && typeof user.meta === 'object' ? user.meta : {}) };
-    const deviceIds = Array.isArray(meta.deviceIds) ? [...meta.deviceIds] : [];
-    if (deviceId && !deviceIds.includes(deviceId)) deviceIds.push(deviceId);
-    const patch = {
-      lastLoginAt: new Date().toISOString(),
-    };
-    if (ip) patch.lastIp = ip;
-    if (country) patch.lastCountry = country;
-    if (deviceId) {
-      patch.lastDeviceId = deviceId;
-      patch.deviceIds = deviceIds.slice(-20);
-    }
-    if (client) patch.lastClient = client;
-    return this.updateUser(userId, patch);
   }
 }
 

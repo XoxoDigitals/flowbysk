@@ -12,6 +12,7 @@ const { openFromStorage } = require('../secretsCrypto');
 const credChannel = require('../credChannel');
 const { allowExtensionStep } = credChannel;
 const { requireAppDeviceAttestation } = require('../deviceSecurity');
+const { lookupCountry, clientIpFromReq } = require('../geoIp');
 
 async function jwtSecret() {
   const admin = await db.getAdmin();
@@ -147,6 +148,8 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
   }
 
   const requireDevice = opts.requireDeviceAttestation !== false;
+  const clientIp = clientIpFromReq(req) || String(ip || '').trim();
+  const country = await lookupCountry(clientIp);
   const attestation = requireDevice
     ? requireAppDeviceAttestation(req || { headers: {}, body: {} })
     : { ok: true, skipped: true, deviceId: null, client: null };
@@ -222,12 +225,17 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
     };
   }
 
-  await db.updateUser(user.id, { lastLoginAt: new Date().toISOString() });
+  await db.updateUser(user.id, {
+    lastLoginAt: new Date().toISOString(),
+    lastIp: clientIp || null,
+    country: country || null,
+  });
   const sessionVersion = await db.bumpSessionVersion(user.id);
   await db.clearPendingGoogleWipe(user.id);
   let freshUser = await db.getUserById(user.id);
   await db.addLog(user.id, user.username, 'client_login', {
-    ip: ip || '',
+    ip: clientIp || '',
+    country: country || null,
     sessionVersion,
     channelId: channel?.channelId || null,
     deviceId: attestation.deviceId || null,

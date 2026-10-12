@@ -36,7 +36,7 @@ const TITLES: Record<string, string> = {
   '/admin/resellers': 'Resellers',
   '/admin/system-users': 'System Users',
   '/admin/plans': 'Plans',
-  '/admin/logs': 'Logs',
+  '/admin/logs': 'Activity Logs',
   '/admin/settings': 'Settings',
 };
 
@@ -53,7 +53,7 @@ const NAV = [
   { name: 'Resellers', href: '/admin/resellers', icon: ShoppingBag },
   { name: 'System Users', href: '/admin/system-users', icon: ShieldAlert },
   { name: 'Plans', href: '/admin/plans', icon: Layers },
-  { name: 'Logs', href: '/admin/logs', icon: ScrollText },
+  { name: 'Activity Logs', href: '/admin/logs', icon: ScrollText },
   { name: 'Settings', href: '/admin/settings', icon: Settings },
 ];
 

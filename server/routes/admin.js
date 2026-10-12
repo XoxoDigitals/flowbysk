@@ -41,12 +41,17 @@ function currentTotp(secret) {
 
 function sanitizeServerForAdmin(server, assignedUserCount = 0) {
   if (!server) return server;
-  const { totpSecret, ...rest } = server;
+  const { totpSecret, cookieExportEnc, password, ...rest } = server;
   return {
     ...rest,
+    // Keep password available in edit form for v4 accounts; never expose sealed cookie blob
+    password: password || '',
     hasTotp: !!(totpSecret && String(totpSecret).trim()),
     totpSecret: totpSecret || '',
     ...currentTotp(totpSecret),
+    hasCookies: !!server.hasCookies,
+    cookieVersion: Number(server.cookieVersion) || 0,
+    cookieMeta: server.cookieMeta || null,
     assignedUserCount,
   };
 }
@@ -327,30 +332,6 @@ router.get('/metrics', requireAdminAuth, async (req, res) => {
     ];
   }
 
-  let period = null;
-  try {
-    period = await db.adminPeriodStats(adminUserCounts.map((a) => a.id));
-    const byAdminMap = Object.fromEntries((period.byAdmin || []).map((r) => [r.id, r]));
-    adminUserCounts = adminUserCounts.map((a) => {
-      const p = byAdminMap[a.id] || {};
-      return {
-        ...a,
-        periodNew: p.newUsers ?? 0,
-        periodRenewals: p.renewals ?? 0,
-        periodTotal: p.total ?? 0,
-      };
-    });
-  } catch (err) {
-    period = { error: err.message || 'period_stats_failed' };
-  }
-
-  let planBreakdown = { rows: [], byPlan: [] };
-  try {
-    planBreakdown = await db.adminPlanBreakdown(adminUserCounts);
-  } catch (err) {
-    planBreakdown = { rows: [], byPlan: [], error: err.message || 'plan_breakdown_failed' };
-  }
-
   res.json({
     success: true,
     metrics: {
@@ -363,8 +344,6 @@ router.get('/metrics', requireAdminAuth, async (req, res) => {
       resellers: resellers.length,
       systemUsers: (await db.getSystemUsers()).length + 1,
       adminUserCounts,
-      period,
-      planBreakdown,
       servers: servers.map((s) => ({
         id: s.id,
         name: s.name,
@@ -437,6 +416,11 @@ function applyUserFilters(users, query) {
     out = out.filter((u) => u.acquiredVia === 'SIGNUP' || (!u.createdByAdminId && !u.createdByResellerId));
   }
 
+  const country = String(query.country || 'all').trim().toUpperCase();
+  if (country && country !== 'ALL') {
+    out = out.filter((u) => String(u.country || '').toUpperCase() === country);
+  }
+
   return out;
 }
 
@@ -477,6 +461,10 @@ async function buildFilterOptions(actor) {
       { id: 'ADMIN_MANUAL', label: 'Admin added' },
       { id: 'RESELLER', label: 'Reseller added' },
       { id: 'SIGNUP', label: 'Signup' },
+    ],
+    countries: [
+      { id: 'all', label: 'All' },
+      ...(await db.listUserCountries()).map((c) => ({ id: c, label: c })),
     ],
   };
 }
@@ -606,52 +594,20 @@ router.put('/users/:id/ban', requireAdminAuth, async (req, res) => {
   const owned = await ownedUserOr404(req, res);
   if (!owned) return;
   const banned = !!req.body?.banned;
-  const reason = req.body?.reason || '';
-  const cascade = req.body?.cascadeByDevice !== false; // default on for bans
   const updated = await db.updateUser(req.params.id, {
     banned,
-    banReason: reason,
+    banReason: req.body?.reason || '',
   });
   if (!updated) return res.status(404).json({ success: false, error: 'User not found' });
   // Ban must revoke session + wipe Google so the EXE logs out on next poll / credit call
   if (banned) {
     await db.forceLogoutAndWipe(owned.user.id);
   }
-
-  const cascaded = [];
-  if (banned && cascade) {
-    const deviceIds = [
-      ...(Array.isArray(owned.user.deviceIds) ? owned.user.deviceIds : []),
-      owned.user.lastDeviceId,
-    ].filter(Boolean);
-    const seen = new Set([owned.user.id]);
-    for (const deviceId of [...new Set(deviceIds)]) {
-      const peers = await db.findUsersByDeviceId(deviceId);
-      for (const peer of peers) {
-        if (seen.has(peer.id)) continue;
-        seen.add(peer.id);
-        if (peer.banned) continue;
-        const visible = owned.actor.isSuperAdmin
-          ? true
-          : (await usersVisibleTo(owned.actor)).some((u) => u.id === peer.id);
-        if (!visible) continue;
-        await db.updateUser(peer.id, {
-          banned: true,
-          banReason: reason || `Cascade ban via Device ID ${deviceId}`,
-        });
-        await db.forceLogoutAndWipe(peer.id);
-        cascaded.push({ id: peer.id, username: peer.username, deviceId });
-      }
-    }
-  }
-
   await db.addLog(owned.actor.id, req.admin.username, banned ? 'ban_user' : 'unban_user', {
     targetUserId: updated.id,
     targetUsername: updated.username,
-    cascaded: cascaded.map((c) => c.username),
-    cascadeCount: cascaded.length,
   });
-  res.json({ success: true, user: await publicEndUser(updated), cascaded });
+  res.json({ success: true, user: await publicEndUser(updated) });
 });
 
 router.post('/users/bulk-delete', requireAdminAuth, async (req, res) => {
@@ -811,6 +767,91 @@ router.delete('/servers/:id', requireAdminAuth, async (req, res) => {
   res.json({ success: true, message: 'Server deleted' });
 });
 
+// ── v5 cookie export management (additive; v4 credential login unchanged) ──
+const CookieCoreV5 = require('../../shared/cookie-core-v5');
+const { sealForStorage } = require('../secretsCrypto');
+
+router.put('/servers/:id/cookies', requireAdminAuth, async (req, res) => {
+  try {
+    const server = await db.getServerById(req.params.id);
+    if (!server) return res.status(404).json({ success: false, error: 'Server not found' });
+
+    const raw = req.body?.cookies !== undefined ? req.body.cookies : req.body;
+    const prepared = CookieCoreV5.prepareFromInput(
+      typeof raw === 'string' ? raw : JSON.stringify(raw)
+    );
+    const nextVersion = (Number(server.cookieVersion) || 0) + 1;
+    const sealed = sealForStorage(JSON.stringify(prepared.cookies.map((c) => {
+      const { valueHash, expected, ...details } = c;
+      return {
+        name: details.name,
+        value: details.value,
+        domain: details.domain || (expected?.hostOnly ? expected.domain : `.${expected.domain}`),
+        path: details.path,
+        secure: details.secure,
+        httpOnly: details.httpOnly,
+        sameSite: details.sameSite,
+        expirationDate: details.expirationDate,
+        hostOnly: expected?.hostOnly,
+        session: details.expirationDate === undefined,
+        partitionKey: details.partitionKey,
+      };
+    })));
+
+    const updated = await db.setServerCookies(req.params.id, {
+      cookieExportEnc: sealed,
+      cookieMeta: prepared.meta,
+      cookieVersion: nextVersion,
+    });
+    if (!updated) return res.status(500).json({ success: false, error: 'Could not store cookies' });
+
+    await db.addLog('admin', 'admin', 'upload_server_cookies', {
+      serverId: req.params.id,
+      serverName: server.name,
+      cookieVersion: nextVersion,
+      count: prepared.meta.count,
+      earliestExpiry: prepared.meta.earliestExpiry,
+      skippedExpired: prepared.meta.skippedExpired,
+    });
+
+    res.json({
+      success: true,
+      server: sanitizeServerForAdmin(updated),
+      meta: prepared.meta,
+      message: `${prepared.meta.count} cookies stored (v${nextVersion}).`,
+    });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message || 'Invalid cookie export' });
+  }
+});
+
+router.get('/servers/:id/cookies/meta', requireAdminAuth, async (req, res) => {
+  const server = await db.getServerById(req.params.id);
+  if (!server) return res.status(404).json({ success: false, error: 'Server not found' });
+  res.json({
+    success: true,
+    serverId: server.id,
+    hasCookies: !!server.hasCookies,
+    cookieVersion: Number(server.cookieVersion) || 0,
+    meta: server.cookieMeta || null,
+  });
+});
+
+router.delete('/servers/:id/cookies', requireAdminAuth, async (req, res) => {
+  const server = await db.getServerById(req.params.id);
+  if (!server) return res.status(404).json({ success: false, error: 'Server not found' });
+  const updated = await db.clearServerCookies(req.params.id);
+  await db.addLog('admin', 'admin', 'clear_server_cookies', {
+    serverId: req.params.id,
+    serverName: server.name,
+  });
+  res.json({
+    success: true,
+    server: sanitizeServerForAdmin(updated || server),
+    message: 'Cookie export cleared',
+  });
+});
+
 router.get('/settings', requireAdminAuth, async (req, res) => {
   res.json({ success: true, settings: await db.getSettings() });
 });
@@ -897,7 +938,37 @@ router.put('/downloads/:platform/url', requireAdminAuth, async (req, res) => {
 });
 
 router.get('/logs', requireAdminAuth, async (req, res) => {
-  res.json({ success: true, logs: await db.getLogs(200) });
+  try {
+    const q = req.query || {};
+    const logs = await db.searchLogs({
+      q: q.q || q.search || '',
+      username: q.username || q.user || '',
+      userId: q.userId || '',
+      country: q.country || '',
+      from: q.from || q.since || '',
+      to: q.to || q.until || '',
+      limit: q.limit || 300,
+    });
+    const countries = await db.listUserCountries();
+    // Also include countries seen only in recent log details
+    const fromLogs = new Set(countries);
+    for (const row of logs) {
+      const c = String(row.country || '').trim().toUpperCase();
+      if (c && c !== 'XX') fromLogs.add(c);
+    }
+    res.json({
+      success: true,
+      logs,
+      filters: {
+        countries: [
+          { id: 'all', label: 'All' },
+          ...[...fromLogs].sort().map((c) => ({ id: c, label: c })),
+        ],
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message || 'Failed to load logs' });
+  }
 });
 
 router.put('/password', requireAdminAuth, async (req, res) => {

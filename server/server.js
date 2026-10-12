@@ -12,6 +12,9 @@ const PORT = process.env.PORT || 8000;
 
 downloads.ensureDirs();
 
+// Trust reverse proxy so req.ip / geo lookup see real client IPs
+app.set('trust proxy', true);
+
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));

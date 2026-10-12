@@ -24,6 +24,8 @@ type FlowUser = {
   activeServerName?: string | null;
   acquiredVia?: string;
   createdAt?: string;
+  country?: string | null;
+  lastIp?: string | null;
 };
 
 type PlanRow = {
@@ -52,16 +54,19 @@ export default function AdminUsersPage() {
   const [owner, setOwner] = useState('all');
   const [plan, setPlan] = useState('all');
   const [source, setSource] = useState('all');
+  const [country, setCountry] = useState('all');
   const [filterOpts, setFilterOpts] = useState<{
     statuses: FilterOpt[];
     owners: FilterOpt[];
     plans: FilterOpt[];
     sources: FilterOpt[];
+    countries: FilterOpt[];
   }>({
     statuses: [],
     owners: [],
     plans: [],
     sources: [],
+    countries: [],
   });
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -89,6 +94,7 @@ export default function AdminUsersPage() {
       if (owner !== 'all') params.set('owner', owner);
       if (plan !== 'all') params.set('plan', plan);
       if (source !== 'all') params.set('source', source);
+      if (country !== 'all') params.set('country', country);
       const qs = params.toString();
       const [usersRes, plansRes] = await Promise.all([
         flowFetch(`/api/admin/users${qs ? `?${qs}` : ''}`),
@@ -103,7 +109,15 @@ export default function AdminUsersPage() {
         return new Set([...prev].filter((id) => ids.has(id)));
       });
       if (usersData.hardcodedStd) setHardStd(usersData.hardcodedStd);
-      if (usersData.filters) setFilterOpts(usersData.filters);
+      if (usersData.filters) {
+        setFilterOpts({
+          statuses: usersData.filters.statuses || [],
+          owners: usersData.filters.owners || [],
+          plans: usersData.filters.plans || [],
+          sources: usersData.filters.sources || [],
+          countries: usersData.filters.countries || [],
+        });
+      }
 
       if (plansRes.ok) {
         const plansData = await plansRes.json();
@@ -122,7 +136,7 @@ export default function AdminUsersPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, owner, plan, source]);
+  }, [status, owner, plan, source, country]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -309,6 +323,9 @@ export default function AdminUsersPage() {
         { id: 'RESELLER', label: 'Reseller added' },
         { id: 'SIGNUP', label: 'Signup' },
       ];
+  const countries = filterOpts.countries.length
+    ? filterOpts.countries
+    : [{ id: 'all', label: 'All' }];
 
   return (
     <div className="flex flex-col gap-5">
@@ -357,6 +374,13 @@ export default function AdminUsersPage() {
           {sources.map((s) => (
             <option key={s.id} value={s.id}>
               Source: {s.label}
+            </option>
+          ))}
+        </select>
+        <select className={selectClass} value={country} onChange={(e) => setCountry(e.target.value)}>
+          {countries.map((c) => (
+            <option key={c.id} value={c.id}>
+              Country: {c.label}
             </option>
           ))}
         </select>
@@ -509,6 +533,7 @@ export default function AdminUsersPage() {
                 />
               </th>
               <th className="px-4 py-3 font-medium">User</th>
+              <th className="px-4 py-3 font-medium">Country</th>
               <th className="px-4 py-3 font-medium">Owner</th>
               <th className="px-4 py-3 font-medium">Credits</th>
               <th className="px-4 py-3 font-medium">Expiry</th>
@@ -520,13 +545,13 @@ export default function AdminUsersPage() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={8} className="px-4 py-8 text-center text-[var(--ink3)]">
+                <td colSpan={9} className="px-4 py-8 text-center text-[var(--ink3)]">
                   Loading…
                 </td>
               </tr>
             ) : users.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-4 py-8 text-center text-[var(--ink3)]">
+                <td colSpan={9} className="px-4 py-8 text-center text-[var(--ink3)]">
                   No users
                 </td>
               </tr>
@@ -553,6 +578,9 @@ export default function AdminUsersPage() {
                       <div className="text-[11px] text-[var(--ink3)]">
                         {u.displayName || u.plan || u.notes || '—'}
                       </div>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-[13px]" title={u.lastIp || undefined}>
+                      {u.country || '—'}
                     </td>
                     <td className="px-4 py-3 text-[13px] text-[var(--ink2)]">
                       {u.ownerLabel || u.resellerUsername || '—'}
