@@ -1681,6 +1681,36 @@ class Database {
 
       if (row.action === 'extension_login_start') {
         attemptId = attemptId || `start-${row.id}`;
+        // Collapse rapid empty restarts (client retry spam) into one open session.
+        const openId = openByUser.get(userKey);
+        const openSession = openId ? byAttempt.get(openId) : null;
+        const openStartMs = openSession?.startedAt
+          ? new Date(openSession.startedAt).getTime()
+          : NaN;
+        const rowMs = new Date(row.createdAt || row.timestamp).getTime();
+        const emptyOpen =
+          openSession &&
+          !openSession.finishedAt &&
+          !(openSession.steps && openSession.steps.length) &&
+          Number.isFinite(openStartMs) &&
+          Number.isFinite(rowMs) &&
+          rowMs - openStartMs < 120000 &&
+          (!details.serverId ||
+            !openSession.serverId ||
+            String(details.serverId) === String(openSession.serverId));
+        if (emptyOpen) {
+          openSession.startRetries = (openSession.startRetries || 0) + 1;
+          openSession.attemptId = attemptId; // keep newest attempt id for finish attach
+          byAttempt.delete(openId);
+          byAttempt.set(attemptId, openSession);
+          openByUser.set(userKey, attemptId);
+          openSession.events.push({
+            at: row.createdAt || row.timestamp,
+            action: 'extension_login_start',
+            label: `Retry start (#${openSession.startRetries})`,
+          });
+          continue;
+        }
         const session = {
           attemptId,
           userId: row.userId || null,
@@ -1695,6 +1725,7 @@ class Database {
           channelId: details.channelId || null,
           clientLoginAt: null,
           deviceId: null,
+          startRetries: 0,
           steps: [],
           stepCounts: { email: 0, password: 0, otp: 0, other: 0 },
           events: [],

@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { ArrowLeft, Trash2 } from 'lucide-react';
@@ -10,6 +10,12 @@ import { formatLogDetails } from '@/lib/adminLogFormat';
 import { AdminTablePager } from '@/components/AdminTablePager';
 
 const ACTIVITY_PAGE_SIZE = 10;
+const LOGIN_NOISE = new Set([
+  'client_login',
+  'extension_login_start',
+  'extension_step',
+  'extension_login_finish',
+]);
 
 type FlowUser = {
   id: string;
@@ -52,8 +58,58 @@ type ActivityRow = {
   details?: Record<string, unknown> | null;
 };
 
+type LoginEvent = {
+  at?: string;
+  action?: string;
+  label?: string;
+  stage?: string;
+  outcome?: string;
+};
+
+type LoginSession = {
+  attemptId: string;
+  startedAt?: string;
+  finishedAt?: string | null;
+  outcome?: string;
+  ip?: string | null;
+  country?: string | null;
+  serverName?: string | null;
+  deviceId?: string | null;
+  lockedUntil?: string | null;
+  durationMs?: number | null;
+  totalSteps?: number;
+  startRetries?: number;
+  stepCounts?: { email?: number; password?: number; otp?: number; other?: number };
+  events?: LoginEvent[];
+};
+
 const inputClass =
   'w-full rounded-[11px] border border-[var(--line)] bg-[var(--bg2)] px-3 py-2 text-sm text-[var(--ink)] outline-none focus:border-[var(--a1)]';
+
+function formatWhen(iso?: string | null) {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
+}
+
+function formatDuration(ms?: number | null) {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+function outcomeBadge(outcome?: string) {
+  const o = String(outcome || 'unknown').toLowerCase();
+  if (o === 'success') return 'bg-emerald-500/15 text-emerald-400';
+  if (o === 'in_progress' || o === 'api_login_only') return 'bg-amber-500/15 text-amber-400';
+  if (o === 'cancelled' || o === 'failed') return 'bg-rose-500/15 text-rose-400';
+  return 'bg-[var(--bg2)] text-[var(--ink3)]';
+}
 
 function Card({
   label,
@@ -82,7 +138,9 @@ export default function AdminUserDetailPage() {
   const [hardStd, setHardStd] = useState<Record<string, number>>(HARDCODED_STD_CREDITS);
   const [creditHistory, setCreditHistory] = useState<CreditRow[]>([]);
   const [activity, setActivity] = useState<ActivityRow[]>([]);
+  const [loginSessions, setLoginSessions] = useState<LoginSession[]>([]);
   const [activityPage, setActivityPage] = useState(1);
+  const [expandedAttempt, setExpandedAttempt] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
@@ -108,7 +166,9 @@ export default function AdminUserDetailPage() {
     setUser(u);
     setCreditHistory(data.creditHistory || []);
     setActivity(data.activity || []);
+    setLoginSessions(data.loginSessions || []);
     setActivityPage(1);
+    setExpandedAttempt(null);
     if (data.hardcodedStd) setHardStd(data.hardcodedStd);
     setForm({
       password: '',
@@ -206,6 +266,15 @@ export default function AdminUserDetailPage() {
     }
     router.push('/admin/users');
   };
+
+  const otherActivity = useMemo(
+    () => activity.filter((a) => !LOGIN_NOISE.has(String(a.action || ''))),
+    [activity]
+  );
+  const otherPageRows = otherActivity.slice(
+    (activityPage - 1) * ACTIVITY_PAGE_SIZE,
+    activityPage * ACTIVITY_PAGE_SIZE
+  );
 
   if (!user && !error) {
     return <p className="text-sm text-[var(--ink3)]">Loading…</p>;
@@ -422,63 +491,132 @@ export default function AdminUserDetailPage() {
               <div>
                 <h3 className="text-sm font-semibold">Activity</h3>
                 <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
-                  Logins, Device ID, IP / country, bans, and credit actions
+                  One row per Google login (start → steps → finish). Bans and credit actions below.
                 </p>
               </div>
               <span className="font-mono text-[11px] text-[var(--ink3)]">
-                {activity.length} event{activity.length === 1 ? '' : 's'}
+                {loginSessions.length} login
+                {loginSessions.length === 1 ? '' : 's'}
+                {otherActivity.length
+                  ? ` · ${otherActivity.length} other`
+                  : ''}
               </span>
             </div>
-            <div className="overflow-hidden rounded-xl border border-[var(--line)]">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-[var(--bg2)] text-[11px] uppercase tracking-wider text-[var(--ink3)]">
-                  <tr>
-                    <th className="px-4 py-3 font-medium">When</th>
-                    <th className="px-4 py-3 font-medium">Action</th>
-                    <th className="px-4 py-3 font-medium">IP / Country / Device / Client</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {activity.length === 0 ? (
-                    <tr>
-                      <td colSpan={3} className="px-4 py-8 text-center text-[var(--ink3)]">
-                        No activity yet
-                      </td>
-                    </tr>
-                  ) : (
-                    activity
-                      .slice(
-                        (activityPage - 1) * ACTIVITY_PAGE_SIZE,
-                        activityPage * ACTIVITY_PAGE_SIZE
-                      )
-                      .map((a) => (
+
+            <div className="flex flex-col gap-3">
+              {loginSessions.length === 0 ? (
+                <p className="rounded-xl border border-[var(--line)] px-4 py-6 text-center text-sm text-[var(--ink3)]">
+                  No Google login sessions yet
+                </p>
+              ) : (
+                loginSessions.map((s) => {
+                  const open = expandedAttempt === s.attemptId;
+                  const meta = [s.ip, s.country, s.serverName, s.deviceId ? `device ${s.deviceId}` : null]
+                    .filter(Boolean)
+                    .join(' · ');
+                  return (
+                    <div
+                      key={s.attemptId}
+                      className="overflow-hidden rounded-xl border border-[var(--line)]"
+                    >
+                      <button
+                        type="button"
+                        className="flex w-full flex-wrap items-start justify-between gap-3 bg-[var(--bg2)] px-4 py-3 text-left"
+                        onClick={() =>
+                          setExpandedAttempt(open ? null : s.attemptId)
+                        }
+                      >
+                        <div>
+                          <div className="text-[12px] text-[var(--ink3)]">
+                            {formatWhen(s.startedAt)}
+                            {s.finishedAt ? ` → ${formatWhen(s.finishedAt)}` : ''}
+                            {' · '}
+                            {formatDuration(s.durationMs)}
+                            {(s.startRetries || 0) > 0
+                              ? ` · ${s.startRetries} start retries collapsed`
+                              : ''}
+                          </div>
+                          <div className="mt-1 text-sm text-[var(--ink)]">
+                            Google login
+                            <span className="text-[var(--ink3)]">
+                              {' '}
+                              · email {s.stepCounts?.email || 0} · password{' '}
+                              {s.stepCounts?.password || 0} · otp {s.stepCounts?.otp || 0}
+                            </span>
+                          </div>
+                          <div className="mt-1 font-mono text-[11px] text-[var(--ink3)]">
+                            {meta || '—'}
+                          </div>
+                        </div>
+                        <span
+                          className={`rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide ${outcomeBadge(
+                            s.outcome
+                          )}`}
+                        >
+                          {s.outcome || 'unknown'}
+                        </span>
+                      </button>
+                      {open ? (
+                        <ol className="space-y-2 border-t border-[var(--line)] px-4 py-3 pl-8">
+                          {(s.events || []).map((ev, i) => (
+                            <li key={`${s.attemptId}-${i}`} className="relative text-sm">
+                              <span className="absolute -left-4 top-1.5 h-2 w-2 rounded-full bg-[var(--a1)]" />
+                              <div className="text-[11px] text-[var(--ink3)]">
+                                {formatWhen(ev.at)}
+                              </div>
+                              <div>{ev.label || ev.action}</div>
+                            </li>
+                          ))}
+                          {s.lockedUntil ? (
+                            <li className="text-[12px] text-[var(--ink3)]">
+                              Lock until {formatWhen(s.lockedUntil)}
+                            </li>
+                          ) : null}
+                        </ol>
+                      ) : null}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {otherActivity.length > 0 ? (
+              <>
+                <h4 className="mb-2 mt-5 text-[12px] font-semibold uppercase tracking-wider text-[var(--ink3)]">
+                  Other (bans, credits, devices)
+                </h4>
+                <div className="overflow-hidden rounded-xl border border-[var(--line)]">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-[var(--bg2)] text-[11px] uppercase tracking-wider text-[var(--ink3)]">
+                      <tr>
+                        <th className="px-4 py-3 font-medium">When</th>
+                        <th className="px-4 py-3 font-medium">Action</th>
+                        <th className="px-4 py-3 font-medium">IP / Country / Device / Client</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {otherPageRows.map((a) => (
                         <tr key={a.id} className="border-t border-[var(--line)] align-top">
                           <td className="whitespace-nowrap px-4 py-3 text-[12px] text-[var(--ink3)]">
-                            {new Date(a.createdAt).toLocaleString()}
+                            {formatWhen(a.createdAt)}
                           </td>
-                          <td className="px-4 py-3 font-mono text-[12px]">
-                            {a.action}
-                            {a.username ? (
-                              <span className="mt-0.5 block text-[10px] text-[var(--ink3)]">
-                                {a.username}
-                              </span>
-                            ) : null}
-                          </td>
+                          <td className="px-4 py-3 font-mono text-[12px]">{a.action}</td>
                           <td className="break-all px-4 py-3 font-mono text-[11px] text-[var(--ink2)]">
                             {formatLogDetails(a.details || null) || '—'}
                           </td>
                         </tr>
-                      ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-            <AdminTablePager
-              page={activityPage}
-              pageSize={ACTIVITY_PAGE_SIZE}
-              total={activity.length}
-              onPageChange={setActivityPage}
-            />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <AdminTablePager
+                  page={activityPage}
+                  pageSize={ACTIVITY_PAGE_SIZE}
+                  total={otherActivity.length}
+                  onPageChange={setActivityPage}
+                />
+              </>
+            ) : null}
           </section>
         </>
       )}

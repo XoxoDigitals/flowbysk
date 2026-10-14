@@ -487,15 +487,17 @@ router.get('/users/:id', requireAdminAuth, async (req, res) => {
   const owned = await ownedUserOr404(req, res);
   if (!owned) return;
   const user = await publicEndUser(owned.user);
-  const [creditHistory, activity] = await Promise.all([
+  const [creditHistory, activity, loginSessions] = await Promise.all([
     db.getUserCreditHistory(owned.user.id, 100),
     db.getUserActivity(owned.user.id, owned.user.username, 100),
+    db.buildLoginSessions({ userId: owned.user.id, limit: 50 }),
   ]);
   res.json({
     success: true,
     user,
     creditHistory,
     activity,
+    loginSessions,
     hardcodedStd: HARDCODED_STD_CREDITS,
   });
 });

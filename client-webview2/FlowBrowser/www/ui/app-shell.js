@@ -1850,6 +1850,8 @@ class FlowBrowserApp {
     }
     await window.FlowCredChannel.establish(data.channel.channelId, data.channel.serverPublicKey);
     this._credAttemptId = null;
+    this._credUsedStages = new Set();
+    this._googlePasswordMem = null;
   }
 
   async ensureCredAttempt() {
@@ -1873,8 +1875,11 @@ class FlowBrowserApp {
   async fetchGoogleCredential(stage) {
     if (!this.config?.authToken || !this.config?.serverUrl) return '';
     try {
+      // Same stage already sealed in this attempt ? do not spam extension-start.
       if (this._credUsedStages?.has(stage)) {
-        this._credAttemptId = null;
+        if (stage === 'email' && this._googleEmailMem) return this._googleEmailMem;
+        if (stage === 'password' && this._googlePasswordMem) return this._googlePasswordMem;
+        return '';
       }
       const attemptId = await this.ensureCredAttempt();
       const { ts, mac } = await window.FlowCredChannel.mac(attemptId, stage);
@@ -1893,10 +1898,13 @@ class FlowBrowserApp {
         })
       });
       const data = await res.json().catch(() => ({}));
-      if (this._credUsedStages) this._credUsedStages.add(stage);
       if (data && data.sealed && data.ciphertext) {
         const plain = await window.FlowCredChannel.decryptSealed(data);
-        return String(plain || '');
+        const value = String(plain || '');
+        if (this._credUsedStages) this._credUsedStages.add(stage);
+        if (stage === 'email' && value) this._googleEmailMem = value;
+        if (stage === 'password' && value) this._googlePasswordMem = value;
+        return value;
       }
       // Legacy plaintext must never be accepted
       if (data && data.value) {
@@ -1905,7 +1913,12 @@ class FlowBrowserApp {
       console.warn('[AppShell] credential not available:', stage, (data && data.error) || res.status);
     } catch (err) {
       console.warn('[AppShell] credential fetch failed:', stage, err.message);
-      this._credAttemptId = null;
+      // Back off before opening a new attempt (avoids 1/sec start spam in Activity).
+      const now = Date.now();
+      if (!this._credFailUntil || now > this._credFailUntil) {
+        this._credFailUntil = now + 8000;
+        this._credAttemptId = null;
+      }
     }
     return '';
   }
