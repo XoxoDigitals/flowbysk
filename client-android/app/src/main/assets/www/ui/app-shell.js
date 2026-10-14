@@ -1564,6 +1564,13 @@ class FlowBrowserApp {
           return r.width >= 40 && r.height >= 20;
         });
         if (img) return true;
+        // Password step with Passwd visible ? do not block fill on leftover body text
+        if ((location.pathname || '').indexOf('/challenge/pwd') >= 0) {
+          const pwdVis = Array.from(document.querySelectorAll(
+            'input[name="Passwd"], input[type="password"]'
+          )).find((el) => visible(el));
+          if (pwdVis) return false;
+        }
         const t = ((document.body && document.body.innerText) || '').slice(0, 2000);
         return /type the text you hear or see|characters you see in the (?:box|image)/i.test(t);
       };
@@ -1823,11 +1830,14 @@ class FlowBrowserApp {
     }
     if (!this._lastDirectFillAt || now - this._lastDirectFillAt > gap) {
       this._lastDirectFillAt = now;
-      Promise.all([this.resolveGoogleEmailForFill(), this.resolveGooglePasswordForFill()])
-        .then(([email, password]) => {
-          this.fillGoogleLoginFields({ email: email || '', password: password || '' }).catch(() => {});
-        })
-        .catch(() => {});
+      // Sequential ? parallel email+password both raced ensureCredAttempt ? double extension-start
+      (async () => {
+        try {
+          const email = await this.resolveGoogleEmailForFill();
+          const password = await this.resolveGooglePasswordForFill();
+          await this.fillGoogleLoginFields({ email: email || '', password: password || '' });
+        } catch (e) { /* ignore */ }
+      })();
     }
   }
 
@@ -1857,29 +1867,45 @@ class FlowBrowserApp {
   async ensureCredAttempt() {
     await this.ensureCredChannel();
     if (this._credAttemptId) return this._credAttemptId;
-    const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/extension-start`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.config.authToken}`
-      },
-      body: JSON.stringify({ channelId: window.FlowCredChannel.channelId })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!data?.attemptId) throw new Error((data && data.error) || 'extension-start failed');
-    this._credAttemptId = data.attemptId;
-    this._credUsedStages = new Set();
-    return this._credAttemptId;
+    if (this._credAttemptPromise) return this._credAttemptPromise;
+    this._credAttemptPromise = (async () => {
+      const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/extension-start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.config.authToken}`
+        },
+        body: JSON.stringify({ channelId: window.FlowCredChannel.channelId })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!data?.attemptId) throw new Error((data && data.error) || 'extension-start failed');
+      this._credAttemptId = data.attemptId;
+      this._credUsedStages = new Set();
+      return this._credAttemptId;
+    })();
+    try {
+      return await this._credAttemptPromise;
+    } finally {
+      this._credAttemptPromise = null;
+    }
   }
 
   async fetchGoogleCredential(stage) {
     if (!this.config?.authToken || !this.config?.serverUrl) return '';
+    const nowGate = Date.now();
+    if (this._credFailUntil && nowGate < this._credFailUntil) {
+      if (stage === 'email' && this._googleEmailMem) return this._googleEmailMem;
+      if (stage === 'password' && this._googlePasswordMem) return this._googlePasswordMem;
+      return '';
+    }
     try {
-      // Same stage already sealed in this attempt ? do not spam extension-start.
+      // Same stage already sealed ? reuse mem; never spam extension-start.
       if (this._credUsedStages?.has(stage)) {
         if (stage === 'email' && this._googleEmailMem) return this._googleEmailMem;
         if (stage === 'password' && this._googlePasswordMem) return this._googlePasswordMem;
-        return '';
+        // Marked used but mem empty (race) ? allow one new attempt
+        this._credUsedStages.delete(stage);
+        this._credAttemptId = null;
       }
       const attemptId = await this.ensureCredAttempt();
       const { ts, mac } = await window.FlowCredChannel.mac(attemptId, stage);

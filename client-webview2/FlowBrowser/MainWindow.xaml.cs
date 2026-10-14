@@ -617,8 +617,13 @@ public partial class MainWindow : Window
             }
             _authLoginActive = true;
             _onGoogleAuth = true;
-            // Do NOT clear _captchaActive on /identifier|/pwd — classic text captcha
-            // lives on those URLs. Clearing here re-covered the page and blocked the user.
+            // After recaptcha, Google lands on /challenge/pwd — clear sticky captcha so
+            // AuthCover + host autofill resume. Live text-captcha probe can re-lift.
+            if (IsGooglePasswordOrIdentifierUrl(url) && !IsGoogleRecaptchaChallengeUrl(url))
+            {
+                _captchaActive = false;
+                _textCaptchaMisses = 0;
+            }
             ApplyAuthOverlayState();
             _ = ProbeGoogleTextCaptchaAsync(url);
             return;
@@ -786,6 +791,22 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Password or email step — resume cover/autofill after CAPTCHA solve.</summary>
+    static bool IsGooglePasswordOrIdentifierUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        try
+        {
+            var path = new Uri(url).AbsolutePath.ToLowerInvariant();
+            return path.Contains("/challenge/pwd") || path.Contains("/identifier");
+        }
+        catch
+        {
+            var u = url.ToLowerInvariant();
+            return u.Contains("/challenge/pwd") || u.Contains("/identifier");
+        }
+    }
+
     static bool IsGoogleLogoutUrl(string? url)
     {
         if (string.IsNullOrWhiteSpace(url)) return false;
@@ -877,9 +898,19 @@ public partial class MainWindow : Window
             ApplyAuthOverlayState();
             return;
         }
-        // Keep cover lifted if a text captcha is still on the page (probe confirms)
         _onGoogleAuth = true;
         _authLoginActive = true;
+        // Shell says captcha:false (e.g. landed on /challenge/pwd). Clear sticky flag
+        // immediately so overlay + autofill resume; probe re-lifts if text captcha remains.
+        if (_captchaActive && IsGooglePasswordOrIdentifierUrl(live))
+        {
+            _captchaActive = false;
+            _textCaptchaMisses = 0;
+            ApplyAuthOverlayState();
+            _ = ProbeGoogleTextCaptchaAsync(live);
+            _ = TryHostGoogleAutofillAsync(live);
+            return;
+        }
         if (_captchaActive)
         {
             _ = ProbeGoogleTextCaptchaAsync(live);
@@ -888,6 +919,8 @@ public partial class MainWindow : Window
         }
         _captchaActive = false;
         ApplyAuthOverlayState();
+        if (IsGooglePasswordOrIdentifierUrl(live))
+            _ = TryHostGoogleAutofillAsync(live);
     }
 
     void SyncOverlayMargins()
@@ -1274,13 +1307,17 @@ public partial class MainWindow : Window
             }
             else if (_captchaActive && !IsGoogleRecaptchaChallengeUrl(u))
             {
+                // On /challenge/pwd after CAPTCHA solve, restore cover on first miss.
+                // Elsewhere keep a short debounce so SPA flicker does not re-cover mid-type.
                 _textCaptchaMisses++;
-                // Require a few misses so SPA flicker does not re-cover mid-type
-                if (_textCaptchaMisses >= 4)
+                var need = IsGooglePasswordOrIdentifierUrl(u) ? 1 : 3;
+                if (_textCaptchaMisses >= need)
                 {
                     _captchaActive = false;
                     _textCaptchaMisses = 0;
                     ApplyAuthOverlayState();
+                    if (IsGooglePasswordOrIdentifierUrl(u))
+                        _ = TryHostGoogleAutofillAsync(u);
                 }
             }
         }
@@ -1299,14 +1336,15 @@ public partial class MainWindow : Window
             var u = url ?? FlowView.CoreWebView2.Source ?? "";
             if (!u.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase)) return;
             // Never autofill / inject page overlays on recaptcha — blanks the challenge
-            if (_captchaActive || IsGoogleRecaptchaChallengeUrl(u)) return;
+            if (IsGoogleRecaptchaChallengeUrl(u)) return;
 
             // Debounce — HistoryChanged fires often on Google SPA and was spawning fill loops
             var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (nowMs - _lastAutofillKickMs < 1200) return;
             _lastAutofillKickMs = nowMs;
 
-            // Probe first — text captcha on /identifier has no special URL
+            // Probe first — sticky recaptcha flag is cleared on /pwd navigation; this
+            // only keeps fill paused when a live text captcha is still on the page.
             await ProbeGoogleTextCaptchaAsync(u);
             if (_captchaActive) return;
 
