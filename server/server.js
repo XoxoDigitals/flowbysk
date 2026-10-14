@@ -31,8 +31,8 @@ const forceUpdatePayload = {
   error: 'Please download the latest Flow Browser.',
 };
 
-/** Only /api/v7/client is live (traditional login). v2–v6 → FORCE_UPDATE. */
-const clientV7Routes = require('./routes/client-v7');
+/** Only /api/v8/client is live (traditional login). v2–v7 → FORCE_UPDATE. */
+const clientV8Routes = require('./routes/client-v8');
 app.use('/api/v2/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -48,7 +48,10 @@ app.use('/api/v5/client', (req, res) => {
 app.use('/api/v6/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
-app.use('/api/v7/client', clientV7Routes);
+app.use('/api/v7/client', (req, res) => {
+  res.status(410).json(forceUpdatePayload);
+});
+app.use('/api/v8/client', clientV8Routes);
 app.use('/api/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -80,7 +83,7 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
-        clientApiVersion: 'v7',
+        clientApiVersion: 'v8',
       },
     });
   } catch (err) {
@@ -155,22 +158,22 @@ app.get('*', (req, res) => {
 
 db.ready()
   .then(async () => {
-    // Permanently lock client API to v7 (v2–v6 always return 410)
+    // Permanently lock client API to v8 (v2–v7 always return 410)
     try {
       const cur = await db.getSettings();
-      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v7') {
-        await db.updateSettings({ clientApiVersion: 'v7' });
-        console.log('[boot] Locked clientApiVersion → v7 (v2–v6 permanently stopped)');
+      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v8') {
+        await db.updateSettings({ clientApiVersion: 'v8' });
+        console.log('[boot] Locked clientApiVersion → v8 (v2–v7 permanently stopped)');
       }
     } catch (err) {
-      console.warn('[boot] could not lock clientApiVersion v7:', err.message);
+      console.warn('[boot] could not lock clientApiVersion v8:', err.message);
     }
     app.listen(PORT, () => {
       console.log(`====================================================`);
       console.log(`Flow Creator Ai API server on port ${PORT}`);
       console.log(`Admin UI:   http://localhost:3100/admin`);
       console.log(`Demo Flow:  http://localhost:${PORT}/demo-flow`);
-      console.log(`Client API: /api/v7/client only (traditional login); v2–v6 → 410 FORCE_UPDATE`);
+      console.log(`Client API: /api/v8/client only (traditional login); v2–v7 → 410 FORCE_UPDATE`);
       console.log(`Data store: PostgreSQL (Prisma) — data.json is not live`);
       console.log(`====================================================`);
     });

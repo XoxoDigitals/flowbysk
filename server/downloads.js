@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const db = require('./db');
 
 const UPLOADS_ROOT = path.join(__dirname, 'uploads', 'downloads');
@@ -50,6 +51,12 @@ async function getDownloadsMeta() {
   };
 }
 
+function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  hash.update(fs.readFileSync(filePath));
+  return hash.digest('hex');
+}
+
 function publicMeta(entry) {
   if (!entry) return null;
   const externalUrl = String(entry.externalUrl || '').trim() || null;
@@ -62,6 +69,7 @@ function publicMeta(entry) {
     contentType: entry.contentType || null,
     externalUrl,
     source: externalUrl ? 'url' : 'file',
+    sha256: entry.sha256 || null,
   };
 }
 
@@ -142,6 +150,7 @@ async function saveUploadedFile(platform, file) {
     originalName,
     storedName,
     size,
+    sha256: sha256File(dest),
     updatedAt: new Date().toISOString(),
     contentType: contentTypeFor(ext, platform),
     externalUrl: null,

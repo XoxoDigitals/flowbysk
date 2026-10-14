@@ -5,7 +5,7 @@ const STORAGE_KEY = 'flowbro_session';
 const CLIENT_API_VERSION_KEY = 'flowbro_client_api_version';
 
 export type FlowRole = 'admin' | 'reseller' | 'user';
-export type ClientApiVersion = 'v7';
+export type ClientApiVersion = 'v8';
 
 export type FlowSession = {
   token: string;
@@ -44,15 +44,15 @@ export function downloadFlowAndroidUrl() {
 
 function normalizeClientApiVersion(value: unknown): ClientApiVersion {
   void value;
-  return 'v7';
+  return 'v8';
 }
 
 function readCachedClientApiVersion(): ClientApiVersion {
-  if (typeof window === 'undefined') return 'v7';
+  if (typeof window === 'undefined') return 'v8';
   try {
-    return normalizeClientApiVersion(localStorage.getItem(CLIENT_API_VERSION_KEY) || 'v7');
+    return normalizeClientApiVersion(localStorage.getItem(CLIENT_API_VERSION_KEY) || 'v8');
   } catch {
-    return 'v7';
+    return 'v8';
   }
 }
 
@@ -87,7 +87,7 @@ export async function resolveClientApiVersion(force = false): Promise<ClientApiV
   }
 }
 
-/** Build `/api/v7/client/...` from a suffix like `/me`. */
+/** Build `/api/v8/client/...` from a suffix like `/me`. */
 export function clientApiPath(suffix = '', version?: ClientApiVersion) {
   const ver = version || readCachedClientApiVersion();
   const path = String(suffix || '');
@@ -103,11 +103,11 @@ export async function flowFetch(path: string, init: RequestInit = {}) {
     headers.set('Content-Type', 'application/json');
   }
 
-  const isClientApi = /^\/api\/v[2-7]\/client(?:\/|$)/i.test(path);
+  const isClientApi = /^\/api\/v[2-8]\/client(?:\/|$)/i.test(path);
   let urlPath = path;
   if (isClientApi) {
     await resolveClientApiVersion(false);
-    urlPath = path.replace(/^\/api\/v[2-7]\/client/i, `/api/${readCachedClientApiVersion()}/client`);
+    urlPath = path.replace(/^\/api\/v[2-8]\/client/i, `/api/${readCachedClientApiVersion()}/client`);
   }
 
   let res = await fetch(`${FLOW_API}${urlPath}`, { ...init, headers });
@@ -118,7 +118,7 @@ export async function flowFetch(path: string, init: RequestInit = {}) {
       const data = await clone.json();
       if (data?.code === 'FORCE_UPDATE') {
         const next = await resolveClientApiVersion(true);
-        const retryPath = path.replace(/^\/api\/v[2-7]\/client/i, `/api/${next}/client`);
+        const retryPath = path.replace(/^\/api\/v[2-8]\/client/i, `/api/${next}/client`);
         if (retryPath !== urlPath) {
           res = await fetch(`${FLOW_API}${retryPath}`, { ...init, headers });
         }

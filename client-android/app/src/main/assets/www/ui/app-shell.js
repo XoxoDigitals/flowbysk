@@ -1,25 +1,11 @@
 // Flow Browser App Shell Controller
 
-/** Active client API base — v7 traditional login only. */
-let CLIENT_API = '/api/v7/client';
+/** Active client API base � v7 traditional login only. */
+let CLIENT_API = '/api/v8/client';
 
 function normalizeClientApiVersion(value) {
-  const v = String(value || '').toLowerCase();
-  if (v === 'v7') return 'v7';
-  // Older branding / cached settings still force the live API.
-  return 'v7';
-}
-
-function applyBrandingText(settings) {
-  const name = String(settings?.appName || settings?.siteName || 'Flow Creator Ai').trim() || 'Flow Creator Ai';
-  try {
-    const title = document.getElementById('login-app-title');
-    if (title) title.textContent = name;
-    const toolbar = document.getElementById('toolbar-app-name');
-    if (toolbar) toolbar.textContent = name;
-    document.title = name;
-  } catch (e) {}
-  return name;
+  void value;
+  return 'v8';
 }
 
 async function resolveClientApiBase(serverUrl, force = false) {
@@ -31,7 +17,6 @@ async function resolveClientApiBase(serverUrl, force = false) {
       data?.settings?.clientApiVersion ?? data?.clientApiVersion
     );
     CLIENT_API = `/api/${ver}/client`;
-    applyBrandingText(data?.settings || data);
     console.log('[ClientAPI] active:', CLIENT_API);
     return CLIENT_API;
   } catch (err) {
@@ -64,11 +49,9 @@ function sanitizeServerForStorage(server) {
 
 /** Production: restore session when token is valid. */
 const DEBUG_ALWAYS_ASK_LOGIN = false;
-/** Production: host CDP owns Next — shell fills only (no auto-click race). */
+/** Production: autofill + auto-click Next / 2FA. */
 const DEBUG_SKIP_GOOGLE_NEXT = false;
-/** Shell must not click Next/2FA — host owns CDP. Fill-only path in fillGoogleLoginFields. */
-const SHELL_FILL_ONLY_NO_NEXT = true;
-/** Production: WPF auth cover / captcha banner enabled during Google login. */
+/** Production: auth overlay/cover enabled. */
 const DEBUG_DISABLE_AUTH_OVERLAY = false;
 
 class FlowBrowserApp {
@@ -224,7 +207,11 @@ class FlowBrowserApp {
       this.btnToggleExtension.addEventListener('click', () => {
         this.extensionDrawer.classList.toggle('hidden');
         if (!this.extensionDrawer.classList.contains('hidden')) {
-          const url = 'http://flowbrowser.local/extensions/veo-shio-auto-login/popup.html';
+          const base =
+            typeof location !== 'undefined' && location.origin && location.origin !== 'null'
+              ? location.origin
+              : 'https://app.flowbrowser.localhost';
+          const url = base + '/extensions/veo-shio-auto-login/popup.html';
           if (this.extensionWebview.src !== url) this.extensionWebview.src = url;
           window.electronAPI.setShellMode?.('full');
         } else {
@@ -244,7 +231,11 @@ class FlowBrowserApp {
       this.btnToggleVeoAuto.addEventListener('click', () => {
         this.veoAutoDrawer.classList.toggle('hidden');
         if (!this.veoAutoDrawer.classList.contains('hidden')) {
-          const url = 'http://flowbrowser.local/extensions/veo-auto/src/ui/side-panel/index.html';
+          const base =
+            typeof location !== 'undefined' && location.origin && location.origin !== 'null'
+              ? location.origin
+              : 'https://app.flowbrowser.localhost';
+          const url = base + '/extensions/veo-auto/src/ui/side-panel/index.html';
           // Bust cache so chrome-polyfill + panel reload after updates
           const bust = url + '?v=' + Date.now();
           this.veoAutoWebview.src = bust;
@@ -283,10 +274,6 @@ class FlowBrowserApp {
       console.log('[Webview Console]', e.message);
     });
 
-    this.webview.addEventListener('console-log', (e) => {
-      console.log('[Host Auth]', (e && e.message) || e);
-    });
-
     this.webview.addEventListener('ipc-message', (event) => {
       if (event.channel === 'credit:deduct') {
         this.handleCreditDeduction(event.args[0]);
@@ -296,9 +283,19 @@ class FlowBrowserApp {
         this.fetchAndSendOtp();
       } else if (event.channel === 'auth:need-otp') {
         this.pushTotpFromBackend();
-      } else if (event.channel === 'auth:stuck-pwd' || event.channel === 'auth:stuck-selection') {
-        // Host owns stuck reload (MaybeReloadStuckAuthAsync) — avoid double reload loop
-        console.warn('[AppShell] stuck auth deferred to host:', event.channel);
+      } else if (event.channel === 'auth:stuck-pwd') {
+        if (document.documentElement.classList.contains('platform-android')) {
+          console.warn('[AppShell] stuck-pwd on Android — skip cache reload');
+          return;
+        }
+        // Google SPA stuck: URL is /challenge/pwd but email UI still showing
+        console.warn('[AppShell] Stuck password UI — reloadIgnoringCache');
+        try {
+          if (typeof this.webview.reloadIgnoringCache === 'function') this.webview.reloadIgnoringCache();
+          else this.webview.reload();
+        } catch (err) {
+          console.warn('[AppShell] Stuck reload failed:', err.message);
+        }
       } else if (event.channel === 'auth:captcha') {
         this.onCaptchaState(event.args && event.args[0]);
       } else if (event.channel === 'auth:auto-login') {
@@ -323,14 +320,13 @@ class FlowBrowserApp {
       if (u && u !== 'about:blank' && !onGoogle && !this._captchaActive) {
         this.hideLoadingOverlay();
       }
-      if (!this._captchaActive || DEBUG_DISABLE_AUTH_OVERLAY) this.kickSealedAutofill(u);
+      this.sendCredentialsToWebview();
       this.tryGoogleAutoFill(u);
       this.maybeStartFreshLoginAfterFlow(u);
     });
 
     this.webview.addEventListener('did-navigate', (e) => {
       this.updateDebugUrl(e.url);
-      if (!this._captchaActive || DEBUG_DISABLE_AUTH_OVERLAY) this.kickSealedAutofill(e.url);
       this.tryGoogleAutoFill(e.url);
       this.maybeStartFreshLoginAfterFlow(e.url);
       this.maybeFinishGoogleCheckCookie(e.url);
@@ -338,7 +334,6 @@ class FlowBrowserApp {
 
     this.webview.addEventListener('did-navigate-in-page', (e) => {
       this.updateDebugUrl(e.url);
-      if (!this._captchaActive || DEBUG_DISABLE_AUTH_OVERLAY) this.kickSealedAutofill(e.url);
       this.tryGoogleAutoFill(e.url);
       this.maybeFinishGoogleCheckCookie(e.url);
     });
@@ -461,20 +456,6 @@ class FlowBrowserApp {
         this.currentServers = data.servers;
         this.settings = data.settings;
         this.activeServer = sanitizeServerForStorage(data.activeServer);
-        if (this.config) {
-          this.config.user = data.user;
-          this.config.activeServer = this.activeServer;
-        }
-        // Persist assignment so next cold start does not treat API id as "reassigned"
-        try {
-          await window.electronAPI.saveSession({
-            token: this.config.authToken,
-            user: this.currentUser,
-            activeServer: this.activeServer
-          });
-        } catch (e) {
-          console.warn('[VerifySession] saveSession failed:', e?.message || e);
-        }
         this.updateToolbarUserInfo();
         this.populateServerSelect(data.servers);
         this.hideLoginScreen();
@@ -543,7 +524,7 @@ class FlowBrowserApp {
       } catch (err) {
         console.warn('[AppShell] getDeviceId failed', err);
       }
-      if (!deviceId) throw new Error('Device ID unavailable — update Flow Browser.');
+      if (!deviceId) throw new Error('Device ID unavailable � update Flow Browser.');
       const loginBody = { username, password, clientPublicKey, deviceId };
       const loginHeaders = {
         'Content-Type': 'application/json',
@@ -575,20 +556,21 @@ class FlowBrowserApp {
         await window.FlowCredChannel.establish(data.channel.channelId, data.channel.serverPublicKey);
         this._credAttemptId = null;
 
-        // Snapshot BEFORE overwriting — used to detect removed Google assignments
+        // Snapshot BEFORE overwriting � used to detect removed Google assignments
         const prevAssignment = this.config?.activeServer || this.activeServer;
 
         this.currentUser = data.user;
         this.currentServers = data.servers;
         this.settings = data.settings;
         this.activeServer = sanitizeServerForStorage(data.activeServer);
-        applyBrandingText(data.settings);
+        this._flowLoginPassword = password; // memory only � seals session.bin (Phase 4)
 
-        // Save session — never persist Google password
+        // Save session � never persist Google password
         await window.electronAPI.saveSession({
           token: data.token,
           user: data.user,
-          activeServer: sanitizeServerForStorage(data.activeServer)
+          activeServer: sanitizeServerForStorage(data.activeServer),
+          vaultPassword: password
         });
         this.config.authToken = data.token;
         this.config.activeServer = sanitizeServerForStorage(data.activeServer);
@@ -682,7 +664,9 @@ class FlowBrowserApp {
     this.stopAssignmentWatch();
     this.postAuthOverlay?.({ show: false, done: true });
     this._captchaActive = false;
-    await this.wipeGooglePartition(message ? `force-logout:${String(message).slice(0, 80)}` : 'force-logout');
+    try {
+      await window.electronAPI.clearPartitionSession();
+    } catch (e) {}
     try {
       await window.electronAPI.clearSession();
     } catch (e) {}
@@ -723,7 +707,7 @@ class FlowBrowserApp {
     this._captchaActive = false;
     this._pendingFreshLogin = false;
     try {
-      await this.wipeGooglePartition('user-clear-cookies');
+      await window.electronAPI.clearPartitionSession();
       this._lastAutoFillKey = null;
 
       const loggedIn = !!(this.currentUser && this.config?.authToken);
@@ -804,63 +788,43 @@ class FlowBrowserApp {
     });
   }
 
-  /** Previous shared Google account id from memory or saved config (always string). */
+  /** Previous shared Google account id from memory or saved config */
   getSavedAssignedAccountId() {
     const cur = this.activeServer;
-    if (cur && typeof cur === 'object' && cur.id != null && cur.id !== '') return String(cur.id);
+    if (cur && typeof cur === 'object' && cur.id) return cur.id;
     const cfg = this.config?.activeServer;
-    if (!cfg) return '';
-    const id = typeof cfg === 'object' ? cfg.id : cfg;
-    return id != null && id !== '' ? String(id) : '';
+    if (!cfg) return null;
+    return typeof cfg === 'object' ? cfg.id : cfg;
   }
 
   getAssignmentEmail(assignment) {
     if (!assignment || typeof assignment !== 'object') return '';
-    // Plain email is sealed now; emailMasked is enough to detect reassignment
-    return String(assignment.email || assignment.emailMasked || '').trim().toLowerCase();
-  }
-
-  /** Single gate for Google cookie wipe — always log reason (never wipe on EXE close). */
-  async wipeGooglePartition(reason) {
-    console.warn('[AppShell] Google wipe reason:', reason);
-    this._googleWipedThisCycle = true;
-    try {
-      await window.electronAPI.clearPartitionSession();
-    } catch (e) {
-      console.warn('[AppShell] clearPartitionSession failed:', e?.message || e);
-    }
+    return String(assignment.email || '').trim().toLowerCase();
   }
 
   /**
-   * At login/restore: wipe only when saved assignment id is gone or reassigned.
-   * Do NOT wipe on email vs emailMasked mismatch (that forced AddSession every reopen).
+   * At login: if previously saved Google account is gone from the server list,
+   * or the assigned Google email changed, wipe cookies so old Google sessions
+   * cannot stick around in the exe.
    */
   async ensureFreshGoogleSessionOnLogin(prevAssignment, servers, activeServer) {
     const list = Array.isArray(servers) ? servers : [];
-    const prevId = prevAssignment == null
-      ? ''
-      : String(typeof prevAssignment === 'object' ? (prevAssignment.id ?? '') : prevAssignment);
-    const nextId = activeServer?.id != null && activeServer.id !== ''
-      ? String(activeServer.id)
-      : '';
+    const prevId = prevAssignment && (typeof prevAssignment === 'object' ? prevAssignment.id : prevAssignment);
+    const prevEmail = this.getAssignmentEmail(prevAssignment);
+    const nextId = activeServer?.id || null;
+    const nextEmail = this.getAssignmentEmail(activeServer);
 
-    // No prior assignment — keep cookies (cold restore / first assign)
-    if (!prevId) {
-      console.log('[AppShell] ensureFresh keep', { reason: 'no-prev-id', nextId });
-      return false;
-    }
+    const prevIdMissing = !!(prevId && !list.some((s) => s.id === prevId));
+    const reassigned = !!(prevId && nextId && prevId !== nextId);
+    const emailChanged = !!(prevEmail && nextEmail && prevEmail !== nextEmail);
+    // Do NOT wipe solely because there was no prior assignment — that forced
+    // AddSession on every cold login and fought OAuth return (Google login loop).
 
-    const prevIdMissing = !list.some((s) => s && String(s.id) === prevId);
-    const reassigned = !!(nextId && prevId !== nextId);
-    const mustWipe = prevIdMissing || reassigned;
+    const mustWipe = prevIdMissing || reassigned || emailChanged;
+    if (!mustWipe) return false;
 
-    if (!mustWipe) {
-      console.log('[AppShell] ensureFresh keep', { prevId, nextId });
-      return false;
-    }
-
-    console.warn('[AppShell] ensureFresh wipe', {
-      prevIdMissing, reassigned, prevId, nextId
+    console.warn('[AppShell] Wiping Google session on login', {
+      prevIdMissing, reassigned, emailChanged, prevId, nextId
     });
     this.notify(
       prevIdMissing
@@ -868,9 +832,9 @@ class FlowBrowserApp {
         : 'Refreshing Google session for your assigned account…',
       true
     );
-    await this.wipeGooglePartition(
-      prevIdMissing ? 'assignment-id-removed' : 'assignment-reassigned'
-    );
+    try {
+      await window.electronAPI.clearPartitionSession();
+    } catch (e) {}
     this._pendingFreshLogin = true;
     this._pendingFreshLoginAt = Date.now();
     this._freshLoginStarted = false;
@@ -891,15 +855,17 @@ class FlowBrowserApp {
   async purgeStaleAssignedAccount(servers, activeServer) {
     const list = Array.isArray(servers) ? servers : [];
     const prevId = this.getSavedAssignedAccountId();
-    const prevStillListed = !!(prevId && list.some((s) => s && String(s.id) === prevId));
-    const activeOk = !!(activeServer && list.some((s) => s && String(s.id) === String(activeServer.id)));
+    const prevStillListed = prevId && list.some((s) => s.id === prevId);
+    const activeOk = activeServer && list.some((s) => s.id === activeServer.id);
 
     if (prevId && !prevStillListed) {
       console.warn('[AppShell] Assigned Google account removed:', prevId);
       this.notify('Shared Google account was removed — switching…', true);
-      await this.wipeGooglePartition('assignment-purged-stale');
+      try {
+        await window.electronAPI.clearPartitionSession();
+      } catch (e) {}
       this._pendingFreshLogin = true;
-      this.activeServer = activeOk ? sanitizeServerForStorage(activeServer) : null;
+      this.activeServer = activeOk ? activeServer : null;
       if (this.config) this.config.activeServer = this.activeServer;
       try {
         await window.electronAPI.saveSession({
@@ -985,20 +951,7 @@ class FlowBrowserApp {
       }
       const purged = await this.purgeStaleAssignedAccount(data.servers, data.activeServer);
       if (!purged) {
-        if (data.activeServer) {
-          this.activeServer = sanitizeServerForStorage(data.activeServer);
-          if (this.config) {
-            this.config.activeServer = this.activeServer;
-            this.config.user = this.currentUser || this.config.user;
-          }
-          try {
-            await window.electronAPI.saveSession({
-              token: this.config?.authToken,
-              user: this.currentUser || this.config?.user,
-              activeServer: this.activeServer
-            });
-          } catch (e) {}
-        }
+        if (data.activeServer) this.activeServer = sanitizeServerForStorage(data.activeServer);
         this.populateServerSelect(data.servers || []);
         return;
       }
@@ -1175,6 +1128,15 @@ class FlowBrowserApp {
         body: JSON.stringify({})
       });
       const data = await res.json();
+      if (data && data.code === 'GOOGLE_SESSION_LOCKED') {
+        if (fromButton) {
+          this.notify(
+            `${data.error || 'Locked'} (${data.retryAfterSeconds || '?'}s left)`,
+            true
+          );
+        }
+        return;
+      }
       if (data && data.success && data.server) {
         console.log('[AppShell] Load-balanced server:', data.server.name, data.server.email, data.load);
         if (fromButton && this.activeServer && data.server.id === this.activeServer.id) {
@@ -1224,10 +1186,6 @@ class FlowBrowserApp {
         this.setAccountName(data.server.name);
         this._lastAutoFillKey = null;
         this._lastAutoFillAt = 0;
-        this._googleEmailMem = null;
-        this._googlePasswordMem = null;
-        this._credAttemptId = null;
-        this._credSendAt = 0;
 
         if (this.config?.authToken && this.config?.user) {
           await window.electronAPI.saveSession({
@@ -1237,13 +1195,9 @@ class FlowBrowserApp {
           });
         }
 
-        // Clear Google cookies only when fresh login was requested — skip if already wiped this cycle
+        // Clear Google cookies only when the user asks to change account
         if (resetGoogle) {
-          if (this._googleWipedThisCycle) {
-            console.log('[AppShell] launchServerWorkspace skip second wipe (already wiped this cycle)');
-          } else {
-            await this.wipeGooglePartition('launch-reset-google');
-          }
+          await window.electronAPI.clearPartitionSession();
           this._pendingFreshLogin = true;
           this._pendingFreshLoginAt = Date.now();
           this._freshLoginStarted = false;
@@ -1252,19 +1206,20 @@ class FlowBrowserApp {
         }
 
         const targetUrl = (data.server.targetUrl || 'https://flow.google.com').replace(/\/$/, '') + '/';
-        console.log('[AppShell] Open Flow for', data.server.emailMasked || data.server.email || data.server.id,
-          resetGoogle ? '(fresh Google login)' : '(keep Google session)');
+        console.log('[AppShell] Open Flow for', data.server.email, resetGoogle ? '(fresh Google login)' : '(keep Google session)');
         this.loadTargetInWebview(targetUrl);
       } else {
-        this.notify((data && data.error) || 'Failed to switch server node', true);
+        const locked =
+          data && data.code === 'GOOGLE_SESSION_LOCKED'
+            ? `${data.error || 'Locked'} (${data.retryAfterSeconds || '?'}s left)`
+            : (data && data.error) || 'Failed to switch server node';
+        this.notify(locked, true);
         this.hideLoadingOverlay();
       }
     } catch (err) {
       console.error('Server switch error:', err);
       this.notify('Error communicating with server: ' + err.message, true);
       this.hideLoadingOverlay();
-    } finally {
-      this._googleWipedThisCycle = false;
     }
   }
 
@@ -1314,27 +1269,9 @@ class FlowBrowserApp {
       const googleLoginUrl =
         'https://accounts.google.com/AddSession?hl=en&continue=' +
         encodeURIComponent(continueUrl);
-      console.log('[AppShell] Fresh Google login in webview for', this.activeServer?.emailMasked || this.activeServer?.id, '→', googleLoginUrl);
+      console.log('[AppShell] Fresh Google login in webview for', this.activeServer?.email, '→', googleLoginUrl);
       this.loadTargetInWebview(googleLoginUrl);
-      // Sealed autofill after Google identifier paints
-      setTimeout(() => this.kickSealedAutofill(googleLoginUrl, true), 1000);
-      setTimeout(() => this.kickSealedAutofill(googleLoginUrl, true), 2500);
-      setTimeout(() => this.kickSealedAutofill(googleLoginUrl, false), 4500);
     }, 700);
-  }
-
-  /**
-   * On Google auth URLs, pull sealed email/password and fill.
-   * Safe no-op on Flow / non-auth pages.
-   */
-  kickSealedAutofill(url, forceReset = false) {
-    const href = String(url || '');
-    if (!/accounts\.google\.com|accounts\.youtube\.com/i.test(href)) return;
-    if (/challenge\/recaptcha|\/recaptcha/i.test(href)) return;
-    if (!this.activeServer?.id || !this.config?.authToken) return;
-    this.sendCredentialsToWebview(!!forceReset).catch((err) => {
-      console.warn('[AppShell] kickSealedAutofill failed', err?.message || err);
-    });
   }
 
   navigateFromSearchBar() {
@@ -1402,65 +1339,52 @@ class FlowBrowserApp {
 
   startDebugUrlPolling() {
     if (this._urlPollTimer) return;
-    this._urlPollTimer = setInterval(async () => {
+    this._urlPollTimer = setInterval(() => {
       try {
         if (!this.webview) return;
         const live = this.webview.getURL ? this.webview.getURL() : this.webview.src;
         if (!live) return;
         this.updateDebugUrl(live);
         if (!/accounts\.google\.com|accounts\.youtube\.com/i.test(live)) return;
-        if (DEBUG_DISABLE_AUTH_OVERLAY) {
-          this.postAuthOverlay({ show: false, captcha: false });
+        if (DEBUG_SKIP_GOOGLE_NEXT) {
+          // Keep URL live; do not drive overlay or auto-Next from the poller
+          if (DEBUG_DISABLE_AUTH_OVERLAY) this.postAuthOverlay({ show: false, captcha: false });
+          return;
         }
 
-        // Left captcha behind — password step must autofill
-        if (/challenge\/pwd/i.test(live)) this._captchaActive = false;
-
-        // Recaptcha challenge — no fills (unless overlay debug: still allow manual view)
+        // Recaptcha challenge — no fills, no overlays, keep cover lifted
         if (/challenge\/recaptcha|\/recaptcha/i.test(live)) {
           this._captchaActive = true;
-          if (!DEBUG_DISABLE_AUTH_OVERLAY) {
-            this.showGoogleAuthBanner('Please solve the captcha below', true);
-            this.postAuthOverlay({ show: false, captcha: true });
-          }
-          return;
-        }
-
-        // Keep cover lifted while captcha active — but still fill when overlay debug is on
-        if (this._captchaActive && !DEBUG_DISABLE_AUTH_OVERLAY) {
           this.showGoogleAuthBanner('Please solve the captcha below', true);
           this.postAuthOverlay({ show: false, captcha: true });
+          try {
+            this.webview.executeJavaScript(`(() => {
+              try {
+                document.getElementById('__flow_host_ol__')?.remove();
+                document.getElementById('__flow_auto_login_overlay__')?.remove();
+              } catch (e) {}
+              return true;
+            })()`).catch(() => {});
+          } catch (e) {}
           return;
         }
 
-        // Probe DOM captcha FIRST (await) — lift cover; do not block fill in overlay-debug mode
-        try {
-          const probe = await this.webview.executeJavaScript(`(() => {
-            try {
-              if (typeof syncGoogleAuthChrome === 'function') {
-                const r = syncGoogleAuthChrome();
-                return !!(r && r.captcha);
-              }
-              if (typeof detectGoogleCaptcha === 'function' && detectGoogleCaptcha()) return true;
-            } catch (e) {}
-            return false;
-          })()`);
-          if (probe) {
-            this._captchaActive = true;
-            if (!DEBUG_DISABLE_AUTH_OVERLAY) {
-              this.showGoogleAuthBanner('Please solve the captcha below', true);
-              this.postAuthOverlay({ show: false, captcha: true });
-              return;
-            }
-          }
-        } catch (e) {}
-
-        if (!DEBUG_DISABLE_AUTH_OVERLAY) {
+        // Keep Google loading overlay visible (except captcha)
+        if (!this._captchaActive) {
           this.showGoogleAuthBanner('Signing you in automatically…', false);
+          try {
+            this.webview.executeJavaScript(`(() => {
+              try {
+                if (typeof syncGoogleAuthChrome === 'function') syncGoogleAuthChrome();
+                else if (typeof ensureAutoLoginOverlay === 'function') ensureAutoLoginOverlay();
+              } catch (e) {}
+              return true;
+            })()`).catch(() => {});
+          } catch (e) {}
         }
 
         if (!this.activeServer?.id) return;
-        // Selection / skotp — Try another way + Authenticator pick
+        // Selection / sk must run even if a sticky _totpFilling flag was left on
         if (/challenge\/(selection|skotp|sk|iap|dp|ootp)/i.test(live) && !/challenge\/totp/i.test(live)) {
           this._totpFilling = false;
           this.tryGoogleAutoFill(live);
@@ -1468,13 +1392,17 @@ class FlowBrowserApp {
         }
         if (/challenge\/totp|accounts\.youtube\.com\/accounts\/SetSID/i.test(live)) {
           this._totpFilling = true;
-          if (!DEBUG_DISABLE_AUTH_OVERLAY) this.postAuthOverlay({ show: true, captcha: false });
-          if (!DEBUG_SKIP_GOOGLE_NEXT) this.pushTotpFromBackend();
+          this.postAuthOverlay({ show: true, captcha: false });
+          this.pushTotpFromBackend();
           return;
         }
         // Do not re-fill email/password while OTP autofill is in progress
         if (this._totpFilling) return;
-        this.sendCredentialsToWebview(false).catch(() => {});
+        Promise.all([this.resolveGoogleEmailForFill(), this.resolveGooglePasswordForFill()])
+          .then(([email, password]) => {
+            this.fillGoogleLoginFields({ email: email || '', password: password || '' }).catch(() => {});
+          })
+          .catch(() => {});
         this.tryGoogleAutoFill(live);
       } catch (e) {}
     }, 900);
@@ -1564,67 +1492,34 @@ class FlowBrowserApp {
   }
 
   async sendCredentialsToWebview(forceReset = false) {
-    // activeServer no longer carries plaintext email — only id + emailMasked.
-    // Email/password must come from the sealed credential channel.
-    if (!(this.activeServer && this.activeServer.id)) {
-      console.warn('[AppShell] No activeServer id to send for auto-login');
-      return;
-    }
-    const now = Date.now();
-    if (!forceReset && this._credSendAt && now - this._credSendAt < 1600) {
-      // Re-fill with cached sealed creds if we already fetched this session
-      if (this._googleEmailMem && this._googlePasswordMem) {
-        this.fillGoogleLoginFields({
-          email: this._googleEmailMem,
-          password: this._googlePasswordMem
-        }).catch(() => {});
-        return;
-      }
-      // Missing password mem — fall through and fetch sealed password
-    }
-    if (this._credSendInFlight) return this._credSendInFlight;
-    this._credSendInFlight = (async () => {
+    if (this.activeServer && this.activeServer.id) {
+      const email = await this.resolveGoogleEmailForFill();
+      const password = await this.resolveGooglePasswordForFill();
+      const payload = {
+        email: email || '',
+        password: password || '',
+        targetUrl: this.activeServer.targetUrl || 'https://flow.google.com',
+        forceReset: !!forceReset
+      };
+      this._captchaActive = false;
       try {
-        if (forceReset) {
-          this._credAttemptId = null;
-          this._credUsedStages = new Set();
-        }
-        // Sequential stages (parallel email+password races the one-shot attempt)
-        const email = await this.resolveGoogleEmailForFill();
-        const password = await this.resolveGooglePasswordForFill();
-        if (!email) {
-          console.warn('[AppShell] Sealed email unavailable — cannot autofill');
-          return;
-        }
-        this._googleEmailMem = email;
-        this._googlePasswordMem = password || '';
-        this._credSendAt = Date.now();
-        const payload = {
-          email,
-          password: password || '',
-          targetUrl: this.activeServer.targetUrl || 'https://flow.google.com',
-          forceReset: !!forceReset
-        };
-        this._captchaActive = false;
-        try {
-          console.log('[AppShell] Sending sealed credentials to webview', forceReset ? '(forceReset)' : '');
-          window.chrome?.webview?.postMessage(JSON.stringify({
-            type: 'cmd',
-            cmd: 'setFlowCreds',
-            email: payload.email,
-            password: payload.password,
-            targetUrl: payload.targetUrl
-          }));
-          this.webview.send('apply-credentials', payload);
-        } catch (err) {
-          console.warn('[AppShell] Could not send credentials to webview:', err.message);
-        }
-        await this.fillGoogleLoginFields(payload).catch((e) => console.warn('[AppShell] fillGoogle:', e.message));
-      } finally {
-        this._credSendInFlight = null;
+        console.log('[AppShell] Sending credentials to webview (sealed)', forceReset ? '(forceReset)' : '');
+        window.chrome?.webview?.postMessage(JSON.stringify({
+          type: 'cmd',
+          cmd: 'setFlowCreds',
+          email: payload.email,
+          password: payload.password,
+          targetUrl: payload.targetUrl
+        }));
+        this.webview.send('apply-credentials', payload);
+      } catch (err) {
+        console.warn('[AppShell] Could not send credentials to webview:', err.message);
       }
-    })();
-    return this._credSendInFlight;
+      // Proven path: fill Google fields directly (host/inject postMessage was not sticking)
+      this.fillGoogleLoginFields(payload).catch((e) => console.warn('[AppShell] fillGoogle:', e.message));
+    } else {
+      console.warn('[AppShell] No activeServer email to send for auto-login');
+    }
   }
 
   async fillGoogleLoginFields(payload) {
@@ -1645,13 +1540,39 @@ class FlowBrowserApp {
       const path = location.pathname || '';
       if (!/accounts\\.google\\.com|accounts\\.youtube\\.com/i.test(location.hostname || '')) return { ok:false, reason:'not-google' };
       if (/recaptcha/i.test(path)) return { ok:false, reason:'recaptcha' };
-      // Do not call __flowApplyCreds — host owns fill+Next; apply-creds reset caused pwd loops
+      try { if (typeof window.__flowApplyCreds === 'function') window.__flowApplyCreds({ email, password, forceReset: false }); } catch (e) {}
 
       const visible = (el) => {
         if (!el) return false;
         const r = el.getBoundingClientRect();
         return r.width > 2 && r.height > 2;
       };
+      const textCaptchaInput = () => {
+        return Array.from(document.querySelectorAll(
+          'input[type="text"], input:not([type]), input[name="ca"], input[name="captcha"], input#ca, input#captcha'
+        )).find((el) => {
+          if (!visible(el) || el.type === 'hidden' || el.type === 'password') return false;
+          const hint = ((el.placeholder || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.name || '') + ' ' + (el.id || '')).toLowerCase();
+          return /type the text|hear or see|captcha|characters you see|\\bca\\b/i.test(hint);
+        }) || null;
+      };
+      const hasTextCaptcha = () => {
+        if (textCaptchaInput()) return true;
+        const img = Array.from(document.querySelectorAll('#captchaimg, img#captchaimg, img[src*="Captcha" i], img[src*="captcha" i]')).find((el) => {
+          if (!visible(el)) return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 40 && r.height >= 20;
+        });
+        if (img) return true;
+        const t = ((document.body && document.body.innerText) || '').slice(0, 2000);
+        return /type the text you hear or see|characters you see in the (?:box|image)/i.test(t);
+      };
+      if (hasTextCaptcha()) {
+        try {
+          if (typeof syncGoogleAuthChrome === 'function') syncGoogleAuthChrome();
+        } catch (e) {}
+        return { ok:false, reason:'text-captcha', path };
+      }
       const fill = (el, val) => {
         if (!el || !val) return false;
         if ((el.value || '') === val) return true;
@@ -1664,8 +1585,24 @@ class FlowBrowserApp {
         try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Unidentified' })); } catch (e) {}
         return (el.value || '') === val;
       };
-      // Host CDP owns Next — shell fills fields only
-      const shellFillOnly = ${SHELL_FILL_ONLY_NO_NEXT ? 'true' : 'false'};
+      const skipAutoNext = ${DEBUG_SKIP_GOOGLE_NEXT ? 'true' : 'false'};
+      const clickNext = (kind) => {
+        if (skipAutoNext) return false;
+        if (hasTextCaptcha()) {
+          const ca = textCaptchaInput();
+          if (!ca || !(ca.value || '').trim()) return false;
+        }
+        let next = null;
+        if (kind === 'password') next = document.querySelector('#passwordNext button, #passwordNext');
+        else if (kind === 'identifier') next = document.querySelector('#identifierNext button, #identifierNext');
+        else if (kind === 'totp') next = document.querySelector('#totpNext button, #totpNext');
+        if (!next) {
+          next = Array.from(document.querySelectorAll('button')).find(b => /^\\s*next\\s*$/i.test((b.innerText || '').trim()));
+        }
+        if (!next) return false;
+        try { next.removeAttribute('disabled'); next.click(); } catch (e) {}
+        return true;
+      };
 
       const pageTxt = ((document.body && document.body.innerText) || '').slice(0, 1500);
       const totpEl = document.querySelector('input[name="totpPin"], input#totpPin, input[autocomplete="one-time-code"]');
@@ -1673,11 +1610,8 @@ class FlowBrowserApp {
         (totpEl && visible(totpEl)) ||
         (/Authenticator|2-Step Verification/i.test(pageTxt) && /Enter code|verification code/i.test(pageTxt));
       if (onTotpUi) return { ok:true, step:'totp-wait' };
-      if (/challenge\\/(selection|skotp|sk|iap|dp|ootp)/i.test(path)) {
-        return { ok:false, reason:'post-password-chooser', path };
-      }
 
-      // Password only on /challenge/pwd
+      // Prefer visible Passwd; only on password challenge (never on totp/skotp)
       const onPwdPath = path.indexOf('/challenge/pwd') >= 0;
       const pwd = onPwdPath ? Array.from(document.querySelectorAll(
         'input[name="Passwd"], input[type="password"], input[autocomplete*="current-password"]'
@@ -1685,13 +1619,26 @@ class FlowBrowserApp {
       if (pwd && password) {
         const key = 'pwd:' + path;
         if (st[key] === 'done' && (pwd.value || '').length > 0) return { ok:true, step:'password-done' };
+        if (st[key] === 'done') delete st[key];
         const ok = fill(pwd, password);
         if (!ok) return { ok:false, step:'password', reason:'fill-failed', valLen:(pwd.value||'').length };
-        st[key] = 'done';
-        return { ok:true, step:'password-filled-host-next', valLen:(pwd.value||'').length, shellFillOnly };
+        if (st[key] !== 'clicked') {
+          st[key] = 'clicked';
+          if (!skipAutoNext) {
+            setTimeout(() => {
+              if (document.querySelector('input[name="totpPin"], input#totpPin')) return;
+              if ((pwd.value || '') === password) { clickNext('password'); st[key] = 'done'; }
+              else delete st[key];
+            }, 1600);
+          } else {
+            st[key] = 'done';
+          }
+        }
+        return { ok:true, step: skipAutoNext ? 'password-filled-manual-next' : 'password', valLen:(pwd.value||'').length };
       }
 
-      if (onPwdPath) return { ok:false, reason:'awaiting-password', path };
+      // SPA lag: URL already /challenge/pwd but password input not mounted yet — do not re-submit email
+      if (path.indexOf('/challenge/pwd') >= 0) return { ok:false, reason:'awaiting-password', path };
 
       const emailEl = Array.from(document.querySelectorAll(
         'input#identifierId, input[type="email"], input[name="identifier"], input[autocomplete="username"]'
@@ -1699,17 +1646,28 @@ class FlowBrowserApp {
       if (emailEl && email) {
         const key = 'email:' + path;
         if (st[key] === 'done' && (emailEl.value || '').toLowerCase() === email.toLowerCase()) return { ok:true, step:'email-done' };
+        if (st[key] === 'done') delete st[key];
         const ok = fill(emailEl, email);
         if (!ok) return { ok:false, step:'email', reason:'fill-failed' };
-        st[key] = 'done';
-        return { ok:true, step:'email-filled-host-next', value:(emailEl.value||'').slice(0,24), shellFillOnly };
+        if (st[key] !== 'clicked') {
+          st[key] = 'clicked';
+          if (!skipAutoNext) {
+            setTimeout(() => {
+              if (/\\/challenge\\/pwd/i.test(location.pathname)) return;
+              if ((emailEl.value || '').toLowerCase() === email.toLowerCase()) { clickNext('identifier'); st[key] = 'done'; }
+              else delete st[key];
+            }, 1600);
+          } else {
+            st[key] = 'done';
+          }
+        }
+        return { ok:true, step: skipAutoNext ? 'email-filled-manual-next' : 'email', value:(emailEl.value||'').slice(0,24) };
       }
       return { ok:false, reason:'no-field', path };
     })()`;
     try {
       const result = await this.webview.executeJavaScript(code);
       console.log('[AppShell] fillGoogleLoginFields', result);
-      // CDP Next is owned by host CdpClickGoogleNextAsync (waits for page ready)
       return result;
     } catch (err) {
       console.warn('[AppShell] fillGoogleLoginFields failed', err.message);
@@ -1737,15 +1695,19 @@ class FlowBrowserApp {
     if (href.includes('flow.google.com') || href.includes('labs.google')) {
       this.hideGoogleAuthBanner();
       this._totpFilling = false;
-      // Do not end overlay during Flow→Google bounce (fresh login) — that flickers the cover.
-      // Host clears overlay on auth:auto-login done from workspace, or when shell posts done after settle.
+      // Do not end overlay immediately during Flow?Google bounce (fresh login).
+      // Always force-finish within 10s once we are on the Flow workspace.
+      this.scheduleFlowOverlayMaxDone();
       if (!this._pendingFreshLogin) {
         this.postAuthOverlay({ show: false, done: true });
+        this.hideLoadingOverlay();
+        this.cancelFlowOverlayMaxDone();
       }
       this._pwdCredPushed = false;
       return;
     }
     if (!href.includes('accounts.google.com') && !href.includes('accounts.youtube.com')) return;
+    this.cancelFlowOverlayMaxDone();
     if (/challenge\/recaptcha|\/recaptcha/i.test(href)) {
       this._captchaActive = true;
       this._totpFilling = false;
@@ -1753,21 +1715,12 @@ class FlowBrowserApp {
       if (!DEBUG_DISABLE_AUTH_OVERLAY) this.postAuthOverlay({ show: false, captcha: true });
       return;
     }
-    // Password step — captcha is done; always allow sealed fill
-    if (/challenge\/pwd/i.test(href)) this._captchaActive = false;
-
-    // Image/text captcha on /identifier — keep cover lifted; skip autofill (unless overlay debug)
-    if (this._captchaActive && !DEBUG_DISABLE_AUTH_OVERLAY) {
-      this._totpFilling = false;
-      this.showGoogleAuthBanner('Please solve the captcha below', true);
-      this.postAuthOverlay({ show: false, captcha: true });
-      return;
-    }
-    // TOTP / authenticator — keep cover on (auto-fill).
+    // TOTP / authenticator — keep cover on (auto-fill). Do not clear captcha flag
+    // just because SPA URL still says /identifier or /pwd (that caused overlay flicker).
     const onTotpPath = /challenge\/totp/i.test(href);
     if (onTotpPath) this._totpFilling = true;
     if (/signin\/identifier|\/identifier|challenge\/pwd/i.test(href) && !this._totpFilling) {
-      this.kickSealedAutofill(href, !this._googleEmailMem || !this._googlePasswordMem);
+      this._captchaActive = false;
     }
 
     if (!DEBUG_DISABLE_AUTH_OVERLAY) {
@@ -1782,17 +1735,12 @@ class FlowBrowserApp {
     const now = Date.now();
     // 2FA method chooser / security-key — MUST run before _totpFilling early-return
     // (otherwise challenge/selection stays stuck forever)
-    // Host DriveAuthenticatorSelectionAsync owns 2FA CDP — shell must not race
-    const on2faNav = !SHELL_FILL_ONLY_NO_NEXT && !DEBUG_SKIP_GOOGLE_NEXT &&
+    const on2faNav = !DEBUG_SKIP_GOOGLE_NEXT &&
       /challenge\/(selection|skotp|sk|iap|dp|ootp)(?:\/|$|\?)/i.test(href) &&
       !/challenge\/totp/i.test(href);
     if (on2faNav) {
       // Clear sticky TOTP flag if Google bounced us back to the chooser
       this._totpFilling = false;
-      // Keep cover on — auto-pick Authenticator only
-      if (!DEBUG_DISABLE_AUTH_OVERLAY) {
-        this.postAuthOverlay({ show: true, captcha: false });
-      }
       try {
         const twoFa = await this.webview.executeJavaScript(`(() => {
           const visible = (el) => {
@@ -1809,47 +1757,26 @@ class FlowBrowserApp {
           const isAuth = (raw) => {
             const t = String(raw || '').replace(/\\s+/g, ' ').trim().toLowerCase();
             if (!t || t.length > 220) return false;
-            if (/one-time security code|tap yes|use your passkey|can.?t find an eligible|g\\.co\\/sc|text message|backup code/i.test(t) &&
+            if (/one-time security code|tap yes|use your passkey|can.?t find an eligible|g\\.co\\/sc/i.test(t) &&
                 !/authenticator/i.test(t)) return false;
             return /google authenticator/i.test(t) ||
-              /^authenticator$/i.test(t) ||
-              (/authenticator/i.test(t) && /app|code|verification|google/i.test(t)) ||
+              (/authenticator app/i.test(t) && /code|verification|get/i.test(t)) ||
               (/verification code/i.test(t) && /authenticator/i.test(t)) ||
               (/get a verification code/i.test(t) && /authenticator/i.test(t)) ||
               (/authentication app/i.test(t));
           };
           const text = (document.body && document.body.innerText || '');
-          const path = location.pathname || '';
           const onChooser = /choose how you want to sign in|choose a way/i.test(text);
-          const onSecurityCode =
-            /\\/challenge\\/skotp/i.test(path) ||
-            /\\/challenge\\/sk(?:\\/|$)/i.test(path) ||
-            ((/g\\.co\\/sc|get a code to sign in|enter security code/i.test(text) ||
-              !!document.querySelector('input[placeholder*="security code" i], input[aria-label*="security code" i]')) &&
-              !onChooser && !/authenticator app/i.test(text));
-          const pwd = document.querySelector('input[name="Passwd"], input[type="password"], input[autocomplete="current-password"]');
-          const pwdVisible = !!(pwd && visible(pwd));
+          const onSecurityCode = /g\\.co\\/sc|get a code to sign in/i.test(text) && !onChooser && !/authenticator app/i.test(text);
 
-          if (onSecurityCode) {
-            const tryAnother = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], span, div')).find(el =>
+          if (onSecurityCode || /\\/challenge\\/sk/i.test(location.pathname || '')) {
+            const tryAnother = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], span')).find(el =>
               /^try another way$/i.test((el.innerText || '').replace(/\\s+/g, ' ').trim()) && visible(el)
             );
-            if (tryAnother) return { action: 'try-another', ...center(tryAnother), path };
-            return { action: 'await-try-another', path };
+            if (tryAnother) return { action: 'try-another', ...center(tryAnother) };
           }
 
-          // Prefer machine challenge type (6 / totp)
-          const byType = Array.from(document.querySelectorAll('[data-challengetype], [data-challengeid]')).find(el => {
-            if (!visible(el)) return false;
-            const typ = String(el.getAttribute('data-challengetype') || el.getAttribute('data-challengeid') || '').toLowerCase();
-            return typ === '6' || typ === 'totp' || /totp|authenticator/.test(typ);
-          });
-          if (byType) {
-            const el = byType.closest('[data-challengeid], [data-challengetype], li, [role="link"], [role="button"], button, a') || byType;
-            return { action: 'auth-app', ...center(el), text: (el.innerText || '').slice(0, 80), via: 'type' };
-          }
-
-          if (onChooser || /authenticator/i.test(text) || /\\/challenge\\/selection/i.test(path)) {
+          if (onChooser || /authenticator/i.test(text) || /\\/challenge\\/selection/i.test(location.pathname || '')) {
             const cands = Array.from(document.querySelectorAll(
               '[data-challengeid], [data-challengetype], [data-action="selectchallenge"], li, div[role="link"], div[role="button"], button, a'
             )).filter(el => visible(el) && isAuth(el.getAttribute('aria-label') || el.innerText || ''));
@@ -1859,28 +1786,12 @@ class FlowBrowserApp {
               return { action: 'auth-app', ...center(el), text: (el.innerText || '').slice(0, 80) };
             }
           }
-          // SPA lag: selection URL but password card still painted
-          if (/\\/challenge\\/selection/i.test(path) && pwdVisible && !onChooser) {
-            return { action: 'stuck-selection', path, pwdVisible, onChooser };
-          }
-          return { action: 'none', path };
+          return { action: 'none', path: location.pathname };
         })()`);
         console.log('[AppShell] 2FA helper:', twoFa);
-        if (twoFa && twoFa.action === 'stuck-selection') {
-          if (!this._selectionStuckReloadAt || Date.now() - this._selectionStuckReloadAt > 8000) {
-            this._selectionStuckReloadAt = Date.now();
-            console.warn('[AppShell] Selection SPA lag — reloadIgnoringCache');
-            try {
-              window.chrome?.webview?.postMessage(JSON.stringify({
-                type: 'cmd', cmd: 'reload', ignoreCache: true
-              }));
-            } catch (e) {}
-          }
-          return;
-        }
         if (twoFa && (twoFa.action === 'try-another' || twoFa.action === 'auth-app') && twoFa.x > 0 && twoFa.y > 0) {
           const clickKey = 'cdp|' + twoFa.action + '|' + href.split('?')[0];
-          if (this._lastCdpClickKey !== clickKey || Date.now() - (this._lastCdpClickAt || 0) > 1200) {
+          if (this._lastCdpClickKey !== clickKey || Date.now() - (this._lastCdpClickAt || 0) > 1400) {
             this._lastCdpClickKey = clickKey;
             this._lastCdpClickAt = Date.now();
             window.chrome?.webview?.postMessage(JSON.stringify({
@@ -1912,8 +1823,11 @@ class FlowBrowserApp {
     }
     if (!this._lastDirectFillAt || now - this._lastDirectFillAt > gap) {
       this._lastDirectFillAt = now;
-      // Sequential sealed stages — avoid racing extension-start / attempt id
-      this.sendCredentialsToWebview(false).catch(() => {});
+      Promise.all([this.resolveGoogleEmailForFill(), this.resolveGooglePasswordForFill()])
+        .then(([email, password]) => {
+          this.fillGoogleLoginFields({ email: email || '', password: password || '' }).catch(() => {});
+        })
+        .catch(() => {});
     }
   }
 
@@ -1984,6 +1898,7 @@ class FlowBrowserApp {
         const plain = await window.FlowCredChannel.decryptSealed(data);
         return String(plain || '');
       }
+      // Legacy plaintext must never be accepted
       if (data && data.value) {
         console.warn('[AppShell] Rejected plaintext credential response');
       }
@@ -2004,12 +1919,8 @@ class FlowBrowserApp {
 
   /** Fetch Google password from API into memory only (never from activeServer JSON). */
   async resolveGooglePasswordForFill() {
-    if (this._googlePasswordMem) return this._googlePasswordMem;
     const fromApi = await this.fetchGoogleCredential('password');
-    if (fromApi) {
-      this._googlePasswordMem = fromApi;
-      return fromApi;
-    }
+    if (fromApi) return fromApi;
     return '';
   }
 
@@ -2018,7 +1929,6 @@ class FlowBrowserApp {
     if (this._otpPushAt && now - this._otpPushAt < 2500) return;
     this._otpPushAt = now;
     this._totpFilling = true;
-    // Keep cover while auto-OTP runs — do not lift overlay
     this.postAuthOverlay({ show: true, captcha: false });
     if (!this.config?.authToken) return;
     const otp = await this.fetchGoogleCredential('otp');
@@ -2235,6 +2145,27 @@ class FlowBrowserApp {
     this._totpFilling = false;
   }
 
+  /** Max 10s sticky overlay after landing on Flow workspace post-login. */
+  scheduleFlowOverlayMaxDone() {
+    if (this._flowOverlayMaxTimer) return;
+    this._flowOverlayMaxTimer = setTimeout(() => {
+      this._flowOverlayMaxTimer = null;
+      this._pendingFreshLogin = false;
+      this._freshLoginStarted = true;
+      this._totpFilling = false;
+      this.hideGoogleAuthBanner();
+      this.hideLoadingOverlay();
+      this.postAuthOverlay({ show: false, done: true });
+      console.log('[AppShell] Flow page held 10s ? forcing overlay done');
+    }, 10000);
+  }
+
+  cancelFlowOverlayMaxDone() {
+    if (!this._flowOverlayMaxTimer) return;
+    clearTimeout(this._flowOverlayMaxTimer);
+    this._flowOverlayMaxTimer = null;
+  }
+
   /** Drive native WPF/Android auth cover (WebView2 page overlays cannot mask Google login). */
   postAuthOverlay(opts = {}) {
     if (DEBUG_DISABLE_AUTH_OVERLAY) {
@@ -2252,6 +2183,7 @@ class FlowBrowserApp {
     } catch (e) {}
     // Persist Google cookies to disk when sign-in finishes (critical on Android phones)
     if (opts && opts.done) {
+      this.cancelFlowOverlayMaxDone();
       try {
         window.chrome?.webview?.postMessage(JSON.stringify({ type: 'cmd', cmd: 'flushCookies' }));
       } catch (e) {}
@@ -2266,22 +2198,16 @@ class FlowBrowserApp {
       this.showGoogleAuthBanner('Please solve the captcha below', true);
       this.postAuthOverlay({ show: false, captcha: true });
     } else {
-      // Captcha cleared — restore cover and resume sealed autofill once
       this.showGoogleAuthBanner('Captcha done — continuing sign-in…', false);
       this.postAuthOverlay({ show: true, captcha: false });
-      let live = '';
-      try { live = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || ''); } catch (e) {}
-      setTimeout(() => {
-        this.sendCredentialsToWebview(false).catch(() => {});
-        this.kickSealedAutofill(live || this.webview?.src, true);
-        this.tryGoogleAutoFill(live || this.webview?.src);
-      }, 400);
+      setTimeout(() => this.sendCredentialsToWebview(false), 400);
     }
   }
 
   onAutoLoginState(data) {
     if (!data) return;
     if (data.done) {
+      this.cancelFlowOverlayMaxDone();
       this.hideGoogleAuthBanner();
       this.hideLoadingOverlay();
       this._totpFilling = false;
@@ -2299,14 +2225,12 @@ class FlowBrowserApp {
       return;
     }
     if (data.overlay) {
-      // Do not re-cover while captcha is active (inject/host probe owns clear)
-      if (this._captchaActive) return;
+      this._captchaActive = false;
       this.showGoogleAuthBanner('Signing you in automatically…', false);
       this.postAuthOverlay({ show: true, captcha: false });
       return;
     }
     if (data.watching) {
-      if (this._captchaActive) return;
       this.showGoogleAuthBanner('Watching Google sign-in — automation still running', false);
       this.postAuthOverlay({ show: true, captcha: false });
     }

@@ -21,7 +21,7 @@ type SiteForm = {
   ticketSystemEnabled: boolean;
   contactPageEnabled: boolean;
   maintenanceMode: boolean;
-  clientApiVersion: 'v7';
+  clientApiVersion: 'v8';
 };
 
 type DownloadPackage = {
@@ -31,6 +31,7 @@ type DownloadPackage = {
   contentType?: string | null;
   externalUrl?: string | null;
   source?: 'url' | 'file';
+  sha256?: string | null;
 } | null;
 
 type DownloadsState = {
@@ -49,7 +50,7 @@ const emptySite: SiteForm = {
   ticketSystemEnabled: true,
   contactPageEnabled: true,
   maintenanceMode: false,
-  clientApiVersion: 'v7',
+  clientApiVersion: 'v8',
 };
 
 function formatBytes(n: number) {
@@ -137,7 +138,7 @@ export default function AdminSettingsPage() {
       ticketSystemEnabled: row.ticketSystemEnabled !== false,
       contactPageEnabled: row.contactPageEnabled !== false,
       maintenanceMode: row.maintenanceMode === true,
-      clientApiVersion: 'v7',
+      clientApiVersion: 'v8',
     });
     setSocial(row.socialLinks || {});
     if (noticesRes.ok) setNotices(noticesData.notices || []);
@@ -356,6 +357,12 @@ export default function AdminSettingsPage() {
                     {formatBytes(pkg.size)}
                   </div>
                 )}
+                {pkg.sha256 ? (
+                  <div className="break-all font-mono text-[11px]">
+                    <span className="text-[var(--ink3)]">SHA-256: </span>
+                    {pkg.sha256}
+                  </div>
+                ) : null}
                 {pkg.externalUrl && (
                   <div className="break-all">
                     <span className="text-[var(--ink3)]">URL: </span>
@@ -491,16 +498,16 @@ export default function AdminSettingsPage() {
           style={{ borderColor: 'var(--a1)' }}
         >
           <div>
-            <div className="text-sm font-medium">Client API v7</div>
+            <div className="text-sm font-medium">Client API v8</div>
             <p className="text-xs text-[var(--ink3)]">
-              Locked on. /api/v2–/api/v6 always return 410 FORCE_UPDATE. Only /api/v7/client is live.
+              Locked on. /api/v2–/api/v7 always return 410 FORCE_UPDATE. Only /api/v8/client is live.
             </p>
           </div>
           <Toggle
             on={true}
-            onLabel="v7 ON"
-            offLabel="v7 ON"
-            onChange={() => setSite({ ...site, clientApiVersion: 'v7' })}
+            onLabel="v8 ON"
+            offLabel="v8 ON"
+            onChange={() => setSite({ ...site, clientApiVersion: 'v8' })}
           />
         </div>
 

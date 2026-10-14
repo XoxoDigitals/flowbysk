@@ -1330,15 +1330,15 @@ class MainActivity : AppCompatActivity() {
         flushWebViewCookies("auth-cover-cleared")
     }
 
-    /** After login lands on Flow, drop the sticky cover once the page has settled. */
+    /** After login lands on Flow, drop the sticky cover (max 10s so overlay never sticks). */
     private fun scheduleAuthCoverClearOnFlow() {
         flowSettleClearJob?.cancel()
         flowSettleClearJob = scope.launch {
-            delay(1600)
+            delay(10_000)
             val cur = flowView.url ?: return@launch
             if (!isFlowWorkspaceUrl(cur)) return@launch
             if (isGoogleAuthRelatedUrl(cur)) return@launch
-            Log.i(TAG, "Flow settled after login — clearing sticky auth cover")
+            Log.i(TAG, "Flow page held 10s after login — clearing sticky auth cover")
             clearAuthCoverSession()
         }
     }

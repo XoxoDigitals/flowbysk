@@ -10,7 +10,10 @@
     <RootNamespace>FlowBrowser</RootNamespace>
     <ApplicationTitle>Flow Browser</ApplicationTitle>
     <ApplicationIcon>FlowBrowser.ico</ApplicationIcon>
-    <Version>7.0.0</Version>
+    <Version>8.0.0</Version>
+    <!-- Release ship: no PDB beside portable EXE -->
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+    <DebugSymbols Condition="'$(Configuration)' == 'Release'">false</DebugSymbols>
   </PropertyGroup>
 
   <ItemGroup>

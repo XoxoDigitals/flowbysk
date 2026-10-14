@@ -41,7 +41,10 @@ public partial class MainWindow : Window
     int _authUiMode = -1;
     Window? _authCoverWindow;
     DispatcherTimer? _authCoverPinTimer;
+    DispatcherTimer? _flowOverlayMaxTimer;
     readonly CredChannelHost _credChannel = new();
+    /// <summary>Max time sticky cover may stay up after landing on Flow workspace.</summary>
+    static readonly TimeSpan FlowOverlayMaxHold = TimeSpan.FromSeconds(10);
 
     const int AuthUiOff = 0;
     const int AuthUiCover = 1;
@@ -171,6 +174,7 @@ public partial class MainWindow : Window
         var core = ShellView.CoreWebView2;
         core.Settings.AreDefaultContextMenusEnabled = false;
         core.Settings.AreDevToolsEnabled = false;
+        core.Settings.AreBrowserAcceleratorKeysEnabled = false;
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
         // Suppress native alert/confirm — clipped in frameless window (use in-app modal instead)
@@ -204,7 +208,9 @@ public partial class MainWindow : Window
     {
         var core = FlowView.CoreWebView2;
         core.Settings.AreDefaultContextMenusEnabled = false;
-        core.Settings.AreDevToolsEnabled = true;
+        // Never allow F12 / DevTools on the Google/Flow view (password leak).
+        core.Settings.AreDevToolsEnabled = false;
+        core.Settings.AreBrowserAcceleratorKeysEnabled = false;
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
 
@@ -627,20 +633,24 @@ public partial class MainWindow : Window
 
         if (IsFlowWorkspaceUrl(url))
         {
-            // Do NOT clear sticky cover on Flow URL alone — fresh-login bounce and
-            // continue redirects flicker the overlay if we drop it here.
-            // Cover ends only via HandleAuthOverlayCommand(done: true).
+            // Keep cover briefly (avoids flicker on Flow→Google bounce), then force-clear
+            // after FlowOverlayMaxHold so login never leaves the user stuck under overlay.
             if (_authLoginActive)
             {
                 _onGoogleAuth = true;
                 ApplyAuthOverlayState();
+                ScheduleFlowOverlayMaxClear();
                 return;
             }
+            CancelFlowOverlayMaxClear();
             _onGoogleAuth = false;
             _captchaActive = false;
             ApplyAuthOverlayState();
             return;
         }
+
+        // Left Flow workspace — cancel the max-hold timer (still mid-auth elsewhere)
+        CancelFlowOverlayMaxClear();
 
         // about:blank / blocked / other during sticky login — keep covering
         if (_authLoginActive)
@@ -703,6 +713,7 @@ public partial class MainWindow : Window
         catch { /* keep dest */ }
 
         Debug.WriteLine("[AuthOverlay] CheckCookie/LoginDone → " + dest);
+        CancelFlowOverlayMaxClear();
         _captchaActive = false;
         _onGoogleAuth = false;
         _authLoginActive = false;
@@ -796,6 +807,32 @@ public partial class MainWindow : Window
         }
     }
 
+    void ScheduleFlowOverlayMaxClear()
+    {
+        if (_flowOverlayMaxTimer != null) return;
+        _flowOverlayMaxTimer = new DispatcherTimer { Interval = FlowOverlayMaxHold };
+        _flowOverlayMaxTimer.Tick += (_, _) =>
+        {
+            CancelFlowOverlayMaxClear();
+            var cur = FlowView.CoreWebView2?.Source ?? "";
+            if (!IsFlowWorkspaceUrl(cur) || IsGoogleAuthRelatedUrl(cur)) return;
+            if (!_authLoginActive && !_onGoogleAuth) return;
+            Debug.WriteLine("[AuthOverlay] Flow page held 10s — forcing overlay done");
+            _captchaActive = false;
+            _onGoogleAuth = false;
+            _authLoginActive = false;
+            ApplyAuthOverlayState();
+        };
+        _flowOverlayMaxTimer.Start();
+    }
+
+    void CancelFlowOverlayMaxClear()
+    {
+        if (_flowOverlayMaxTimer == null) return;
+        _flowOverlayMaxTimer.Stop();
+        _flowOverlayMaxTimer = null;
+    }
+
     void HandleAuthOverlayCommand(bool show, bool captcha, bool done)
     {
         if (done)
@@ -812,6 +849,7 @@ public partial class MainWindow : Window
                 ApplyAuthOverlayState();
                 return;
             }
+            CancelFlowOverlayMaxClear();
             _captchaActive = false;
             _onGoogleAuth = false;
             _authLoginActive = false;
@@ -820,6 +858,7 @@ public partial class MainWindow : Window
         }
         if (captcha)
         {
+            CancelFlowOverlayMaxClear();
             _captchaActive = true;
             _textCaptchaMisses = 0;
             _onGoogleAuth = true;
@@ -1866,7 +1905,7 @@ public partial class MainWindow : Window
                 _credChannel.Clear();
                 return new { success = true };
             case "getDeviceId":
-                return new { deviceId = GetStableDeviceId(), client = "windows-exe/7.0.0" };
+                return new { deviceId = GetStableDeviceId(), client = "windows-exe/8.0.0" };
             default:
                 throw new InvalidOperationException("Unknown command: " + cmd);
         }

@@ -980,6 +980,23 @@ router.get('/logs', requireAdminAuth, async (req, res) => {
   }
 });
 
+/** Login timelines: start → steps → finish (grouped by attemptId). */
+router.get('/logs/login-sessions', requireAdminAuth, async (req, res) => {
+  try {
+    const q = req.query || {};
+    const sessions = await db.buildLoginSessions({
+      username: q.username || q.user || '',
+      userId: q.userId || '',
+      from: q.from || q.since || '',
+      to: q.to || q.until || '',
+      limit: q.limit || 100,
+    });
+    res.json({ success: true, sessions });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message || 'Failed to load login sessions' });
+  }
+});
+
 router.put('/password', requireAdminAuth, async (req, res) => {
   const { currentPassword, newPassword } = req.body || {};
   if (!newPassword || String(newPassword).trim().length < 4) {

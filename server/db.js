@@ -56,9 +56,9 @@ async function setJsonSetting(key, value) {
 }
 
 function normalizeClientApiVersion(value) {
-  // Only v7 is live (traditional login + vault EXE). Older clients FORCE_UPDATE.
+  // Only v8 is live (traditional login + vault EXE). Older clients FORCE_UPDATE.
   void value;
-  return 'v7';
+  return 'v8';
 }
 
 async function getRuntime() {
@@ -70,7 +70,7 @@ async function getRuntime() {
     cssSelectorsToHide: [],
     customCss: '',
     downloads: { windows: null, android: null },
-    clientApiVersion: 'v7',
+    clientApiVersion: 'v8',
     jwtSecret: process.env.JWT_SECRET || 'flow_super_secret_jwt_key_2026',
   };
   const stored = (await getJsonSetting(RUNTIME_KEY, {})) || {};
@@ -211,6 +211,9 @@ async function mapCustomer(user, metaMap, ownerLookup) {
     lastDeviceId: meta.lastDeviceId || null,
     deviceIds: Array.isArray(meta.deviceIds) ? meta.deviceIds : [],
     lastClient: meta.lastClient || null,
+    googleSessionLockUntil: meta.googleSessionLockUntil || null,
+    lastGoogleLoginAt: meta.lastGoogleLoginAt || null,
+    lastGoogleAttemptId: meta.lastGoogleAttemptId || null,
     activeServerId: meta.activeServerId || null,
     maxParallel,
     sessionVersion: Number(meta.sessionVersion) || 0,
@@ -752,6 +755,15 @@ class Database {
     if (updates.lastDeviceId !== undefined) metaPatch.lastDeviceId = updates.lastDeviceId || '';
     if (updates.lastClient !== undefined) metaPatch.lastClient = updates.lastClient || '';
     if (updates.deviceIds !== undefined) metaPatch.deviceIds = Array.isArray(updates.deviceIds) ? updates.deviceIds : [];
+    if (updates.googleSessionLockUntil !== undefined) {
+      metaPatch.googleSessionLockUntil = updates.googleSessionLockUntil || null;
+    }
+    if (updates.lastGoogleLoginAt !== undefined) {
+      metaPatch.lastGoogleLoginAt = updates.lastGoogleLoginAt || null;
+    }
+    if (updates.lastGoogleAttemptId !== undefined) {
+      metaPatch.lastGoogleAttemptId = updates.lastGoogleAttemptId || null;
+    }
     if (Object.keys(metaPatch).length) await patchUserMeta(id, metaPatch);
 
     if (
@@ -1631,6 +1643,195 @@ class Database {
       if (mapped.length >= take) break;
     }
     return mapped;
+  }
+
+  /**
+   * Group login-related activity into timelines keyed by attemptId.
+   * @param {{ username?: string, userId?: string, from?: string, to?: string, limit?: number }} opts
+   */
+  async buildLoginSessions(opts = {}) {
+    const rows = await this.searchLogs({
+      username: opts.username || '',
+      userId: opts.userId || '',
+      from: opts.from || '',
+      to: opts.to || '',
+      limit: Math.min(1000, Number(opts.limit) || 500),
+      q: '',
+    });
+    const LOGIN_ACTIONS = new Set([
+      'client_login',
+      'extension_login_start',
+      'extension_step',
+      'extension_login_finish',
+    ]);
+    const relevant = rows.filter((r) => LOGIN_ACTIONS.has(String(r.action || '')));
+    // Chronological for grouping (searchLogs returns newest first)
+    const chrono = [...relevant].sort(
+      (a, b) => new Date(a.createdAt || a.timestamp).getTime() - new Date(b.createdAt || b.timestamp).getTime()
+    );
+
+    /** @type {Map<string, any>} */
+    const byAttempt = new Map();
+    const openByUser = new Map(); // userId -> last start without finish
+
+    for (const row of chrono) {
+      const details = row.details && typeof row.details === 'object' ? row.details : {};
+      const userKey = String(row.userId || row.username || 'unknown');
+      let attemptId = String(details.attemptId || '').trim();
+
+      if (row.action === 'extension_login_start') {
+        attemptId = attemptId || `start-${row.id}`;
+        const session = {
+          attemptId,
+          userId: row.userId || null,
+          username: row.username || null,
+          startedAt: row.createdAt || row.timestamp,
+          finishedAt: null,
+          outcome: 'in_progress',
+          ip: row.ip || details.ip || null,
+          country: row.country || details.country || null,
+          serverId: details.serverId || null,
+          serverName: details.serverName || null,
+          channelId: details.channelId || null,
+          clientLoginAt: null,
+          deviceId: null,
+          steps: [],
+          stepCounts: { email: 0, password: 0, otp: 0, other: 0 },
+          events: [],
+        };
+        byAttempt.set(attemptId, session);
+        openByUser.set(userKey, attemptId);
+        session.events.push({
+          at: session.startedAt,
+          action: 'extension_login_start',
+          label: 'Started Google login',
+        });
+        continue;
+      }
+
+      if (row.action === 'client_login') {
+        // Attach to nearest open session for user, or create prelude-only session
+        const openId = openByUser.get(userKey);
+        const session =
+          (openId && byAttempt.get(openId)) ||
+          (() => {
+            const id = `login-${row.id}`;
+            const s = {
+              attemptId: id,
+              userId: row.userId || null,
+              username: row.username || null,
+              startedAt: row.createdAt || row.timestamp,
+              finishedAt: null,
+              outcome: 'api_login_only',
+              ip: row.ip || details.ip || null,
+              country: row.country || details.country || null,
+              serverId: null,
+              serverName: null,
+              channelId: details.channelId || null,
+              clientLoginAt: row.createdAt || row.timestamp,
+              deviceId: details.deviceId || null,
+              steps: [],
+              stepCounts: { email: 0, password: 0, otp: 0, other: 0 },
+              events: [],
+            };
+            byAttempt.set(id, s);
+            return s;
+          })();
+        session.clientLoginAt = row.createdAt || row.timestamp;
+        session.deviceId = details.deviceId || session.deviceId;
+        session.ip = row.ip || details.ip || session.ip;
+        session.country = row.country || details.country || session.country;
+        session.events.push({
+          at: row.createdAt || row.timestamp,
+          action: 'client_login',
+          label: 'App API login',
+          deviceId: details.deviceId || null,
+          client: details.client || null,
+        });
+        continue;
+      }
+
+      if (!attemptId) {
+        attemptId = openByUser.get(userKey) || '';
+      }
+      let session = attemptId ? byAttempt.get(attemptId) : null;
+      if (!session) {
+        attemptId = attemptId || `orphan-${row.id}`;
+        session = {
+          attemptId,
+          userId: row.userId || null,
+          username: row.username || null,
+          startedAt: row.createdAt || row.timestamp,
+          finishedAt: null,
+          outcome: 'unknown',
+          ip: row.ip || details.ip || null,
+          country: row.country || details.country || null,
+          serverId: details.serverId || null,
+          serverName: details.serverName || null,
+          channelId: details.channelId || null,
+          clientLoginAt: null,
+          deviceId: null,
+          steps: [],
+          stepCounts: { email: 0, password: 0, otp: 0, other: 0 },
+          events: [],
+        };
+        byAttempt.set(attemptId, session);
+      }
+
+      if (row.action === 'extension_step') {
+        const stage = String(details.stage || 'other').toLowerCase();
+        session.steps.push({
+          at: row.createdAt || row.timestamp,
+          stage,
+          sealed: !!details.sealed,
+        });
+        if (stage === 'email' || stage === 'password' || stage === 'otp') {
+          session.stepCounts[stage] += 1;
+        } else {
+          session.stepCounts.other += 1;
+        }
+        session.events.push({
+          at: row.createdAt || row.timestamp,
+          action: 'extension_step',
+          label: `Credential step: ${stage}`,
+          stage,
+        });
+      } else if (row.action === 'extension_login_finish') {
+        session.finishedAt = row.createdAt || row.timestamp;
+        session.outcome = String(details.outcome || 'unknown').toLowerCase();
+        session.lockedUntil = details.lockedUntil || null;
+        session.events.push({
+          at: session.finishedAt,
+          action: 'extension_login_finish',
+          label:
+            session.outcome === 'success'
+              ? 'Login completed (success)'
+              : `Finished: ${session.outcome}`,
+          outcome: session.outcome,
+          lockedUntil: details.lockedUntil || null,
+        });
+        if (openByUser.get(userKey) === attemptId) openByUser.delete(userKey);
+      }
+    }
+
+    const sessions = [...byAttempt.values()].map((s) => {
+      const startMs = s.startedAt ? new Date(s.startedAt).getTime() : NaN;
+      const endMs = s.finishedAt ? new Date(s.finishedAt).getTime() : NaN;
+      const durationMs =
+        Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs ? endMs - startMs : null;
+      const totalSteps =
+        (s.stepCounts.email || 0) +
+        (s.stepCounts.password || 0) +
+        (s.stepCounts.otp || 0) +
+        (s.stepCounts.other || 0);
+      return { ...s, durationMs, totalSteps };
+    });
+
+    sessions.sort(
+      (a, b) =>
+        new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime()
+    );
+    return sessions.slice(0, Math.min(200, Number(opts.limit) || 100));
   }
 
   /** Distinct countries seen on end users (from lastCountry meta). */

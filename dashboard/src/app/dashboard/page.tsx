@@ -16,6 +16,7 @@ type DownloadMeta = {
   originalName: string;
   size: number;
   updatedAt: string | null;
+  sha256?: string | null;
 } | null;
 
 export default function DashboardPage() {
@@ -127,6 +128,12 @@ export default function DashboardPage() {
             </button>
           )}
         </div>
+        {(windowsPkg?.sha256 || androidPkg?.sha256) && (
+          <div className="mt-4 max-w-3xl space-y-2 font-mono text-[11px] text-[var(--ink3)] break-all">
+            {windowsPkg?.sha256 ? <div>Windows SHA-256: {windowsPkg.sha256}</div> : null}
+            {androidPkg?.sha256 ? <div>Android SHA-256: {androidPkg.sha256}</div> : null}
+          </div>
+        )}
       </div>
     </div>
   );
