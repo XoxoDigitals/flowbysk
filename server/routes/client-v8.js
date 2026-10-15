@@ -571,7 +571,18 @@ router.post('/extension-start', requireUserAuth, async (req, res) => {
 router.post('/extension-step', requireUserAuth, async (req, res) => {
   const { attemptId, stage, channelId, ts, mac } = req.body || {};
   const user = req.user;
-  if (!(await assertNotGoogleSessionLocked(user, res))) return;
+  const lockState = googleLockState(user);
+  if (lockState.locked) {
+    // Lock starts at login success; the SAME attempt may still finish its remaining
+    // stages (e.g. OTP) for a short grace window. Any other attempt is refused.
+    const sameAttempt =
+      !!attemptId && String(attemptId) === String(user.lastGoogleAttemptId || '');
+    const lastMs = user.lastGoogleLoginAt ? new Date(user.lastGoogleLoginAt).getTime() : 0;
+    const withinGrace = lastMs > 0 && Date.now() - lastMs < 10 * 60 * 1000;
+    if (!(sameAttempt && withinGrace)) {
+      return res.status(429).json(googleLockResponse(lockState));
+    }
+  }
   const stageKey = String(stage || '');
   if (!allowExtensionStep(user.id, stageKey)) {
     return res.status(429).json({ success: false, error: 'Too many credential requests. Try again shortly.' });
