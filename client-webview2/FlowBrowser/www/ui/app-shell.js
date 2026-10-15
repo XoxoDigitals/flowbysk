@@ -1702,6 +1702,8 @@ class FlowBrowserApp {
     if (href.includes('flow.google.com') || href.includes('labs.google')) {
       this.hideGoogleAuthBanner();
       this._totpFilling = false;
+      // Mark Google login complete so admin timeline shows success (not stuck in_progress).
+      this.reportGoogleLoginFinish('success');
       // Do not end overlay immediately during Flow?Google bounce (fresh login).
       // Always force-finish within 10s once we are on the Flow workspace.
       this.scheduleFlowOverlayMaxDone();
@@ -1881,6 +1883,7 @@ class FlowBrowserApp {
       if (!data?.attemptId) throw new Error((data && data.error) || 'extension-start failed');
       this._credAttemptId = data.attemptId;
       this._credUsedStages = new Set();
+      this._loginFinishReported = false;
       return this._credAttemptId;
     })();
     try {
@@ -2184,6 +2187,34 @@ class FlowBrowserApp {
     this._totpFilling = false;
   }
 
+  /** Tell server Google login finished so admin timeline shows success (once per attempt). */
+  async reportGoogleLoginFinish(outcome = 'success') {
+    if (this._loginFinishReported) return;
+    const attemptId = this._credAttemptId;
+    if (!attemptId || !this.config?.authToken || !this.config?.serverUrl) return;
+    this._loginFinishReported = true;
+    try {
+      const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/extension-finish`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.config.authToken}`
+        },
+        body: JSON.stringify({ attemptId, outcome })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        console.warn('[AppShell] extension-finish failed', res.status, data?.error || data?.code);
+        this._loginFinishReported = false;
+        return;
+      }
+      console.log('[AppShell] extension-finish', outcome, attemptId);
+    } catch (err) {
+      console.warn('[AppShell] extension-finish error', err?.message || err);
+      this._loginFinishReported = false;
+    }
+  }
+
   /** Max 10s sticky overlay after landing on Flow workspace post-login. */
   scheduleFlowOverlayMaxDone() {
     if (this._flowOverlayMaxTimer) return;
@@ -2192,10 +2223,11 @@ class FlowBrowserApp {
       this._pendingFreshLogin = false;
       this._freshLoginStarted = true;
       this._totpFilling = false;
+      this.reportGoogleLoginFinish('success');
       this.hideGoogleAuthBanner();
       this.hideLoadingOverlay();
       this.postAuthOverlay({ show: false, done: true });
-      console.log('[AppShell] Flow page held 10s ? forcing overlay done');
+      console.log('[AppShell] Flow page held 10s — forcing overlay done');
     }, 10000);
   }
 

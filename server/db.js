@@ -1672,7 +1672,30 @@ class Database {
 
     /** @type {Map<string, any>} */
     const byAttempt = new Map();
+    /** @type {Map<string, string>} old/new attemptId → canonical session key */
+    const attemptAlias = new Map();
     const openByUser = new Map(); // userId -> last start without finish
+    const SESSION_MERGE_MS = 15 * 60 * 1000;
+
+    const resolveSession = (id) => {
+      if (!id) return null;
+      let cur = id;
+      for (let i = 0; i < 8; i++) {
+        const next = attemptAlias.get(cur);
+        if (!next || next === cur) break;
+        cur = next;
+      }
+      return byAttempt.get(cur) || null;
+    };
+
+    const rekeySession = (session, newId) => {
+      const oldId = session.attemptId;
+      if (!newId || newId === oldId) return;
+      attemptAlias.set(oldId, newId);
+      byAttempt.delete(oldId);
+      session.attemptId = newId;
+      byAttempt.set(newId, session);
+    };
 
     for (const row of chrono) {
       const details = row.details && typeof row.details === 'object' ? row.details : {};
@@ -1681,28 +1704,27 @@ class Database {
 
       if (row.action === 'extension_login_start') {
         attemptId = attemptId || `start-${row.id}`;
-        // Collapse rapid empty restarts (client retry spam) into one open session.
+        // Collapse restarts into the same open session (even after steps) within 15m.
         const openId = openByUser.get(userKey);
-        const openSession = openId ? byAttempt.get(openId) : null;
+        const openSession = openId ? resolveSession(openId) : null;
         const openStartMs = openSession?.startedAt
           ? new Date(openSession.startedAt).getTime()
           : NaN;
         const rowMs = new Date(row.createdAt || row.timestamp).getTime();
-        const emptyOpen =
+        const sameServer =
+          !details.serverId ||
+          !openSession?.serverId ||
+          String(details.serverId) === String(openSession.serverId);
+        const mergeOpen =
           openSession &&
           !openSession.finishedAt &&
-          !(openSession.steps && openSession.steps.length) &&
           Number.isFinite(openStartMs) &&
           Number.isFinite(rowMs) &&
-          rowMs - openStartMs < 120000 &&
-          (!details.serverId ||
-            !openSession.serverId ||
-            String(details.serverId) === String(openSession.serverId));
-        if (emptyOpen) {
+          rowMs - openStartMs < SESSION_MERGE_MS &&
+          sameServer;
+        if (mergeOpen) {
           openSession.startRetries = (openSession.startRetries || 0) + 1;
-          openSession.attemptId = attemptId; // keep newest attempt id for finish attach
-          byAttempt.delete(openId);
-          byAttempt.set(attemptId, openSession);
+          rekeySession(openSession, attemptId);
           openByUser.set(userKey, attemptId);
           openSession.events.push({
             at: row.createdAt || row.timestamp,
@@ -1731,6 +1753,7 @@ class Database {
           events: [],
         };
         byAttempt.set(attemptId, session);
+        attemptAlias.set(attemptId, attemptId);
         openByUser.set(userKey, attemptId);
         session.events.push({
           at: session.startedAt,
@@ -1785,7 +1808,11 @@ class Database {
       if (!attemptId) {
         attemptId = openByUser.get(userKey) || '';
       }
-      let session = attemptId ? byAttempt.get(attemptId) : null;
+      let session = resolveSession(attemptId);
+      // Prefer open session for this user when attempt ids churn mid-login
+      if (!session && openByUser.get(userKey)) {
+        session = resolveSession(openByUser.get(userKey));
+      }
       if (!session) {
         attemptId = attemptId || `orphan-${row.id}`;
         session = {
@@ -1802,11 +1829,15 @@ class Database {
           channelId: details.channelId || null,
           clientLoginAt: null,
           deviceId: null,
+          startRetries: 0,
           steps: [],
           stepCounts: { email: 0, password: 0, otp: 0, other: 0 },
           events: [],
         };
         byAttempt.set(attemptId, session);
+        attemptAlias.set(attemptId, attemptId);
+      } else if (attemptId && attemptId !== session.attemptId) {
+        attemptAlias.set(attemptId, session.attemptId);
       }
 
       if (row.action === 'extension_step') {
@@ -1841,11 +1872,77 @@ class Database {
           outcome: session.outcome,
           lockedUntil: details.lockedUntil || null,
         });
-        if (openByUser.get(userKey) === attemptId) openByUser.delete(userKey);
+        const openId = openByUser.get(userKey);
+        if (openId && (openId === attemptId || openId === session.attemptId || resolveSession(openId) === session)) {
+          openByUser.delete(userKey);
+        }
       }
     }
 
-    const sessions = [...byAttempt.values()].map((s) => {
+    // Final pass: merge leftover adjacent unfinished sessions for the same user+server
+    let sessions = [...byAttempt.values()];
+    sessions.sort(
+      (a, b) =>
+        new Date(a.startedAt || 0).getTime() - new Date(b.startedAt || 0).getTime()
+    );
+    const merged = [];
+    for (const s of sessions) {
+      const prev = merged[merged.length - 1];
+      const prevMs = prev?.startedAt ? new Date(prev.startedAt).getTime() : NaN;
+      const curMs = s.startedAt ? new Date(s.startedAt).getTime() : NaN;
+      const sameUser =
+        prev &&
+        String(prev.userId || prev.username || '') === String(s.userId || s.username || '');
+      const sameServer =
+        prev &&
+        (!prev.serverId || !s.serverId || String(prev.serverId) === String(s.serverId));
+      const canMerge =
+        prev &&
+        !prev.finishedAt &&
+        !s.finishedAt &&
+        sameUser &&
+        sameServer &&
+        Number.isFinite(prevMs) &&
+        Number.isFinite(curMs) &&
+        curMs - prevMs < SESSION_MERGE_MS;
+      if (canMerge) {
+        prev.startRetries = (prev.startRetries || 0) + 1 + (s.startRetries || 0);
+        prev.steps = [...(prev.steps || []), ...(s.steps || [])];
+        prev.events = [...(prev.events || []), ...(s.events || [])];
+        for (const k of ['email', 'password', 'otp', 'other']) {
+          prev.stepCounts[k] = (prev.stepCounts[k] || 0) + (s.stepCounts?.[k] || 0);
+        }
+        prev.ip = s.ip || prev.ip;
+        prev.country = s.country || prev.country;
+        prev.serverName = s.serverName || prev.serverName;
+        prev.deviceId = s.deviceId || prev.deviceId;
+        prev.attemptId = s.attemptId || prev.attemptId;
+        continue;
+      }
+      // Attach a finish-only orphan onto previous open session
+      if (
+        prev &&
+        !prev.finishedAt &&
+        s.finishedAt &&
+        sameUser &&
+        sameServer &&
+        Number.isFinite(prevMs) &&
+        Number.isFinite(curMs) &&
+        curMs - prevMs < SESSION_MERGE_MS &&
+        !(s.steps && s.steps.length) &&
+        String(s.outcome || '') !== 'api_login_only'
+      ) {
+        prev.finishedAt = s.finishedAt;
+        prev.outcome = s.outcome;
+        prev.lockedUntil = s.lockedUntil || null;
+        prev.events = [...(prev.events || []), ...(s.events || [])];
+        prev.durationMs = null;
+        continue;
+      }
+      merged.push(s);
+    }
+
+    sessions = merged.map((s) => {
       const startMs = s.startedAt ? new Date(s.startedAt).getTime() : NaN;
       const endMs = s.finishedAt ? new Date(s.finishedAt).getTime() : NaN;
       const durationMs =

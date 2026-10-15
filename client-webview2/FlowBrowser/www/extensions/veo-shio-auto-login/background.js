@@ -2,9 +2,21 @@
 // Connects to the Flow Browser backend (https://flowcreatorai.site)
 
 const API_ORIGIN = "https://flowcreatorai.site";
-const API_BASE = `${API_ORIGIN}/api/v7/client`;
+/** Live client API only — v2–v7 return FORCE_UPDATE. */
+const API_BASE = `${API_ORIGIN}/api/v8/client`;
 const FLOW_URL = "https://flow.google.com/";
 const GOOGLE_LOGOUT = "https://accounts.google.com/Logout";
+
+function normalizeToV8ClientBase(value) {
+  let base = String(value || API_ORIGIN).replace(/\/$/, "");
+  if (/\/api\/v[0-9]+\/client$/i.test(base)) {
+    return base.replace(/\/api\/v[0-9]+\/client$/i, "/api/v8/client");
+  }
+  if (/\/api\/client$/i.test(base)) {
+    return base.replace(/\/api\/client$/i, "/api/v8/client");
+  }
+  return `${base}/api/v8/client`;
+}
 
 function isFlowUrl(value) {
   try { const url = new URL(value); return url.protocol === "https:" && url.hostname === "flow.google.com"; }
@@ -94,12 +106,8 @@ const isConnected = async () => {
 // â”€â”€â”€ API Client â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function api(path, body, anonymous = false) {
   const saved = await localState();
-  let baseUrl = saved.flowBrowserServerUrl || API_BASE;
-  // Electron may sync origin-only URL; normalize to /api/client
-  baseUrl = String(baseUrl || "").replace(/\/$/, "");
-  if (!/\/api\/client$/i.test(baseUrl)) {
-    baseUrl = `${baseUrl}/api/v2/client`;
-  }
+  // Always hit /api/v8/client (old stored v2–v7 bases are rewritten).
+  let baseUrl = normalizeToV8ClientBase(saved.flowBrowserServerUrl || API_BASE);
   const token = saved.flowBrowserToken;
 
   if (!anonymous && !token) throw new Error("Not connected. Log in to Flow Browser first.");

@@ -553,7 +553,9 @@ export default function AdminUserDetailPage() {
                             s.outcome
                           )}`}
                         >
-                          {s.outcome || 'unknown'}
+                          {String(s.outcome || 'unknown').toLowerCase() === 'success'
+                            ? 'session complete'
+                            : s.outcome || 'unknown'}
                         </span>
                       </button>
                       {open ? (
