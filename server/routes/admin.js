@@ -56,12 +56,25 @@ function sanitizeServerForAdmin(server, assignedUserCount = 0) {
   };
 }
 
+/** Server-clock view of the 60 min Google lock (admin never trusts the browser clock). */
+function googleLockForAdmin(user) {
+  const until = user?.googleSessionLockUntil ? new Date(user.googleSessionLockUntil) : null;
+  const ms = until && !Number.isNaN(until.getTime()) ? until.getTime() - Date.now() : 0;
+  return {
+    googleSessionLocked: ms > 0,
+    googleSessionLockUntil: ms > 0 ? until.toISOString() : null,
+    googleSessionRetryAfterSeconds: ms > 0 ? Math.ceil(ms / 1000) : 0,
+    serverTime: new Date().toISOString(),
+  };
+}
+
 async function publicEndUser(user) {
   const reseller = user.resellerId ? await db.getResellerById(user.resellerId) : null;
   const server = user.activeServerId ? await db.getServerById(user.activeServerId) : null;
   const { passwordHash, ...safe } = user;
   return {
     ...safe,
+    ...googleLockForAdmin(user),
     displayName: safe.displayName || '',
     maxParallel: safe.maxParallel || 1,
     plan: safe.planName || 'Standard',
@@ -590,6 +603,35 @@ router.put('/users/:id', requireAdminAuth, async (req, res) => {
   } catch (err) {
     res.status(400).json({ success: false, error: err.message });
   }
+});
+
+/** Clear the 60 min Google login lock so the user can sign in to Google right away. */
+router.post('/users/:id/reset-google-lock', requireAdminAuth, async (req, res) => {
+  const owned = await ownedUserOr404(req, res);
+  if (!owned) return;
+  await db.updateUser(owned.user.id, { googleSessionLockUntil: null });
+  await db.addLog('admin', 'admin', 'admin_reset_google_lock', {
+    targetUserId: owned.user.id,
+    targetUsername: owned.user.username,
+    by: owned.actor.username,
+  });
+  const fresh = await db.getUserById(owned.user.id);
+  res.json({ success: true, user: await publicEndUser(fresh || owned.user) });
+});
+
+/** Reset login statistics: login timeline for this user restarts from now (logs are kept). */
+router.post('/users/:id/reset-login-stats', requireAdminAuth, async (req, res) => {
+  const owned = await ownedUserOr404(req, res);
+  if (!owned) return;
+  const at = new Date().toISOString();
+  await db.updateUser(owned.user.id, { loginStatsResetAt: at });
+  await db.addLog('admin', 'admin', 'admin_reset_login_stats', {
+    targetUserId: owned.user.id,
+    targetUsername: owned.user.username,
+    by: owned.actor.username,
+    resetAt: at,
+  });
+  res.json({ success: true, resetAt: at });
 });
 
 router.put('/users/:id/ban', requireAdminAuth, async (req, res) => {

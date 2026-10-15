@@ -212,6 +212,7 @@ async function mapCustomer(user, metaMap, ownerLookup) {
     deviceIds: Array.isArray(meta.deviceIds) ? meta.deviceIds : [],
     lastClient: meta.lastClient || null,
     googleSessionLockUntil: meta.googleSessionLockUntil || null,
+    loginStatsResetAt: meta.loginStatsResetAt || null,
     lastGoogleLoginAt: meta.lastGoogleLoginAt || null,
     lastGoogleAttemptId: meta.lastGoogleAttemptId || null,
     activeServerId: meta.activeServerId || null,
@@ -757,6 +758,9 @@ class Database {
     if (updates.deviceIds !== undefined) metaPatch.deviceIds = Array.isArray(updates.deviceIds) ? updates.deviceIds : [];
     if (updates.googleSessionLockUntil !== undefined) {
       metaPatch.googleSessionLockUntil = updates.googleSessionLockUntil || null;
+    }
+    if (updates.loginStatsResetAt !== undefined) {
+      metaPatch.loginStatsResetAt = updates.loginStatsResetAt || null;
     }
     if (updates.lastGoogleLoginAt !== undefined) {
       metaPatch.lastGoogleLoginAt = updates.lastGoogleLoginAt || null;
@@ -1664,7 +1668,19 @@ class Database {
       'extension_step',
       'extension_login_finish',
     ]);
-    const relevant = rows.filter((r) => LOGIN_ACTIONS.has(String(r.action || '')));
+    // Admin "reset login statistics": hide a user's login rows older than their reset marker.
+    const metaMap = await getUserMetaMap();
+    const resetMs = (userId) => {
+      const t = metaMap?.[userId]?.loginStatsResetAt;
+      const ms = t ? new Date(t).getTime() : NaN;
+      return Number.isFinite(ms) ? ms : 0;
+    };
+    const relevant = rows.filter((r) => {
+      if (!LOGIN_ACTIONS.has(String(r.action || ''))) return false;
+      const cut = r.userId ? resetMs(r.userId) : 0;
+      if (!cut) return true;
+      return new Date(r.createdAt || r.timestamp).getTime() >= cut;
+    });
     // Chronological for grouping (searchLogs returns newest first)
     const chrono = [...relevant].sort(
       (a, b) => new Date(a.createdAt || a.timestamp).getTime() - new Date(b.createdAt || b.timestamp).getTime()
@@ -1676,6 +1692,7 @@ class Database {
     const attemptAlias = new Map();
     const openByUser = new Map(); // userId -> last start without finish
     const SESSION_MERGE_MS = 15 * 60 * 1000;
+    const ATTEMPT_STALE_MS = 6 * 60 * 1000; // attempt TTL is 5 min
 
     const resolveSession = (id) => {
       if (!id) return null;
@@ -1952,7 +1969,22 @@ class Database {
         (s.stepCounts.password || 0) +
         (s.stepCounts.otp || 0) +
         (s.stepCounts.other || 0);
-      return { ...s, durationMs, totalSteps };
+      // A Google login that never finished (user closed the app / logged out) is
+      // CANCELLED once its attempt has expired, never "in progress" forever.
+      let outcome = s.outcome;
+      let cancelledReason = null;
+      if (!s.finishedAt && (outcome === 'in_progress' || outcome === 'unknown')) {
+        let lastMs = Number.isFinite(startMs) ? startMs : 0;
+        for (const ev of s.events || []) {
+          const t = new Date(ev.at || 0).getTime();
+          if (Number.isFinite(t) && t > lastMs) lastMs = t;
+        }
+        if (lastMs && Date.now() - lastMs > ATTEMPT_STALE_MS) {
+          outcome = 'cancelled';
+          cancelledReason = 'abandoned';
+        }
+      }
+      return { ...s, outcome, cancelledReason, durationMs, totalSteps };
     });
 
     sessions.sort(

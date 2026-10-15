@@ -37,7 +37,38 @@ function googleLockResponse(state) {
     error: 'Wait before changing server or starting a new Google login.',
     lockedUntil: state.lockedUntil,
     retryAfterSeconds: state.retryAfterSeconds,
+    serverTime: new Date().toISOString(),
   };
+}
+
+/** Keep admin "last IP / country / device / client" current on every app contact. */
+async function touchDevice(user, req) {
+  try {
+    const client = parseFlowClientHeader(req);
+    const deviceId = String(req?.body?.deviceId || req?.headers?.['x-flow-device-id'] || '').trim();
+    const ip = clientIpFromReq(req) || '';
+    const patch = {};
+    if (client && client !== user.lastClient) patch.lastClient = client;
+    if (ip && ip !== user.lastIp) {
+      patch.lastIp = ip;
+      const country = await lookupCountry(ip);
+      if (country) patch.country = country;
+    }
+    if (deviceId && deviceId !== user.lastDeviceId) {
+      patch.lastDeviceId = deviceId;
+      const ids = Array.isArray(user.deviceIds) ? [...user.deviceIds] : [];
+      if (!ids.includes(deviceId)) ids.push(deviceId);
+      patch.deviceIds = ids.slice(-20);
+    }
+    if (Object.keys(patch).length) await db.updateUser(user.id, patch);
+  } catch (err) {
+    console.warn('[touchDevice]', err.message);
+  }
+}
+
+function parseFlowClientHeader(req) {
+  const h = String(req?.headers?.['x-flow-client'] || '').trim();
+  return /^(windows-exe|android)\//i.test(h) ? h : '';
 }
 
 async function assertNotGoogleSessionLocked(user, res) {
@@ -121,6 +152,7 @@ function publicUser(user) {
     googleSessionLockUntil: lock.locked ? lock.lockedUntil : null,
     googleSessionLocked: !!lock.locked,
     googleSessionRetryAfterSeconds: lock.retryAfterSeconds || 0,
+    serverTime: new Date().toISOString(),
   };
 }
 
@@ -263,10 +295,18 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
     };
   }
 
+  const knownDevices = Array.isArray(user.deviceIds) ? [...user.deviceIds] : [];
+  if (attestation.deviceId && !knownDevices.includes(attestation.deviceId)) {
+    knownDevices.push(attestation.deviceId);
+  }
   await db.updateUser(user.id, {
     lastLoginAt: new Date().toISOString(),
     lastIp: clientIp || null,
     country: country || null,
+    ...(attestation.deviceId
+      ? { lastDeviceId: attestation.deviceId, deviceIds: knownDevices.slice(-20) }
+      : {}),
+    ...(attestation.client ? { lastClient: attestation.client } : {}),
   });
   const sessionVersion = await db.bumpSessionVersion(user.id);
   await db.clearPendingGoogleWipe(user.id);
@@ -331,6 +371,7 @@ router.post('/login', async (req, res) => {
 /** Re-key secure channel for an existing session (after EXE restart with saved JWT). */
 router.post('/channel-open', requireUserAuth, async (req, res) => {
   try {
+    await touchDevice(req.user, req);
     const channel = credChannel.createChannel(req.user.id, req.body?.clientPublicKey, req);
     res.json({
       success: true,
@@ -347,6 +388,7 @@ router.post('/channel-open', requireUserAuth, async (req, res) => {
 
 router.post('/verify-session', requireUserAuth, async (req, res) => {
   const user = req.user;
+  await touchDevice(user, req);
   const expiry = new Date(user.planExpiry);
   if (expiry <= new Date()) {
     return res.status(403).json({
@@ -375,6 +417,9 @@ router.post('/verify-session', requireUserAuth, async (req, res) => {
       username: user.username,
       credits: effectiveCredits(user),
       planExpiry: user.planExpiry,
+      googleSessionLocked: googleLockState(user).locked,
+      googleSessionRetryAfterSeconds: googleLockState(user).retryAfterSeconds || 0,
+      serverTime: new Date().toISOString(),
     },
     servers: availableServers.map((s) => ({
       id: s.id,
@@ -526,6 +571,7 @@ router.post('/extension-start', requireUserAuth, async (req, res) => {
 router.post('/extension-step', requireUserAuth, async (req, res) => {
   const { attemptId, stage, channelId, ts, mac } = req.body || {};
   const user = req.user;
+  if (!(await assertNotGoogleSessionLocked(user, res))) return;
   const stageKey = String(stage || '');
   if (!allowExtensionStep(user.id, stageKey)) {
     return res.status(429).json({ success: false, error: 'Too many credential requests. Try again shortly.' });
