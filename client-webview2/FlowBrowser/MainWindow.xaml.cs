@@ -169,14 +169,27 @@ public partial class MainWindow : Window
         }
     }
 
-    void ConfigureShell()
+    void ApplyLockedBrowserSettings(CoreWebView2 core)
     {
-        var core = ShellView.CoreWebView2;
         core.Settings.AreDefaultContextMenusEnabled = false;
         core.Settings.AreDevToolsEnabled = false;
         core.Settings.AreBrowserAcceleratorKeysEnabled = false;
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
+        // Cancel any residual context-menu request (Inspect / Open DevTools).
+        core.ContextMenuRequested -= Core_ContextMenuRequestedBlock;
+        core.ContextMenuRequested += Core_ContextMenuRequestedBlock;
+    }
+
+    void Core_ContextMenuRequestedBlock(object? sender, CoreWebView2ContextMenuRequestedEventArgs e)
+    {
+        e.Handled = true;
+    }
+
+    void ConfigureShell()
+    {
+        var core = ShellView.CoreWebView2;
+        ApplyLockedBrowserSettings(core);
         // Suppress native alert/confirm — clipped in frameless window (use in-app modal instead)
         core.ScriptDialogOpening += (_, e) =>
         {
@@ -193,6 +206,18 @@ public partial class MainWindow : Window
             }
         };
         core.WebMessageReceived += Shell_WebMessageReceived;
+        // Belt-and-suspenders: block right-click + common DevTools shortcuts in shell DOM.
+        _ = core.AddScriptToExecuteOnDocumentCreatedAsync(@"
+(() => {
+  const block = (e) => { try { e.preventDefault(); e.stopPropagation(); } catch (_) {} return false; };
+  document.addEventListener('contextmenu', block, true);
+  document.addEventListener('keydown', (e) => {
+    const k = (e.key || '').toLowerCase();
+    if (k === 'f12') return block(e);
+    if (e.ctrlKey && e.shiftKey && (k === 'i' || k === 'j' || k === 'c')) return block(e);
+    if (e.ctrlKey && k === 'u') return block(e);
+  }, true);
+})();");
         core.SetVirtualHostNameToFolderMapping(
             "app.flowbrowser.localhost",
             _wwwRoot,
@@ -207,15 +232,27 @@ public partial class MainWindow : Window
     void ConfigureFlow()
     {
         var core = FlowView.CoreWebView2;
-        core.Settings.AreDefaultContextMenusEnabled = false;
-        // Never allow F12 / DevTools on the Google/Flow view (password leak).
-        core.Settings.AreDevToolsEnabled = false;
-        core.Settings.AreBrowserAcceleratorKeysEnabled = false;
-        core.Settings.IsStatusBarEnabled = false;
-        core.Settings.IsZoomControlEnabled = false;
+        // Never allow F12 / right-click Inspect on the Google/Flow view (password leak).
+        ApplyLockedBrowserSettings(core);
 
         // Real Edge WebView2 — no Electron UA spoofing needed
         core.WebMessageReceived += Flow_WebMessageReceived;
+        _ = core.AddScriptToExecuteOnDocumentCreatedAsync(@"
+(() => {
+  const block = (e) => { try { e.preventDefault(); e.stopPropagation(); } catch (_) {} return false; };
+  document.addEventListener('contextmenu', block, true);
+  document.addEventListener('keydown', (e) => {
+    const k = (e.key || '').toLowerCase();
+    if (k === 'f12') return block(e);
+    if (e.ctrlKey && e.shiftKey && (k === 'i' || k === 'j' || k === 'c')) return block(e);
+    if (e.ctrlKey && k === 'u') return block(e);
+  }, true);
+})();");
+        // Re-lock settings after navigations (some Edge builds re-enable menus).
+        core.NavigationCompleted += (_, __) =>
+        {
+            try { ApplyLockedBrowserSettings(core); } catch { /* ignore */ }
+        };
 
         // Port of Electron webRequest.onCompleted — drives credit deduction
         core.WebResourceResponseReceived += (_, e) =>

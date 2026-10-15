@@ -149,6 +149,18 @@
     </div>
   </div>
 
+  <!-- In-app confirm (native confirm is blocked in WebView2 shell) -->
+  <div id="app-confirm-modal" class="app-confirm-modal hidden" role="dialog" aria-modal="true">
+    <div class="app-confirm-card">
+      <h3 id="app-confirm-title">Confirm</h3>
+      <p id="app-confirm-body"></p>
+      <div class="app-confirm-actions">
+        <button type="button" id="app-confirm-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="app-confirm-ok" class="btn btn-primary">OK</button>
+      </div>
+    </div>
+  </div>
+
   <script src="../scripts/shell-bridge.js"></script>
   <script src="../scripts/cred-channel.js"></script>
   <script src="app-shell.js"></script>

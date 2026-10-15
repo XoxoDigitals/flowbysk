@@ -755,13 +755,32 @@ class FlowBrowserApp {
 
   showConfirmDialog({ title, body, confirmLabel = 'OK', cancelLabel = 'Cancel' } = {}) {
     return new Promise((resolve) => {
-      const modal = document.getElementById('app-confirm-modal');
-      const titleEl = document.getElementById('app-confirm-title');
-      const bodyEl = document.getElementById('app-confirm-body');
-      const okBtn = document.getElementById('app-confirm-ok');
-      const cancelBtn = document.getElementById('app-confirm-cancel');
+      let modal = document.getElementById('app-confirm-modal');
+      let titleEl = document.getElementById('app-confirm-title');
+      let bodyEl = document.getElementById('app-confirm-body');
+      let okBtn = document.getElementById('app-confirm-ok');
+      let cancelBtn = document.getElementById('app-confirm-cancel');
+      // Cache button used to no-op when modal markup was missing — build it on demand.
       if (!modal || !okBtn || !cancelBtn) {
-        resolve(false);
+        modal = document.createElement('div');
+        modal.id = 'app-confirm-modal';
+        modal.className = 'app-confirm-modal hidden';
+        modal.innerHTML =
+          '<div class="app-confirm-card">' +
+          '<h3 id="app-confirm-title">Confirm</h3>' +
+          '<p id="app-confirm-body"></p>' +
+          '<div class="app-confirm-actions">' +
+          '<button type="button" id="app-confirm-cancel" class="btn btn-secondary">Cancel</button>' +
+          '<button type="button" id="app-confirm-ok" class="btn btn-primary">OK</button>' +
+          '</div></div>';
+        document.body.appendChild(modal);
+        titleEl = document.getElementById('app-confirm-title');
+        bodyEl = document.getElementById('app-confirm-body');
+        okBtn = document.getElementById('app-confirm-ok');
+        cancelBtn = document.getElementById('app-confirm-cancel');
+      }
+      if (!modal || !okBtn || !cancelBtn) {
+        resolve(true);
         return;
       }
       if (titleEl) titleEl.textContent = title || 'Confirm';
