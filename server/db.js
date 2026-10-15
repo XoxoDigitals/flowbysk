@@ -93,11 +93,19 @@ async function getUserMetaMap() {
   return (await getJsonSetting(USER_META_KEY, {})) || {};
 }
 
+let userMetaQueue = Promise.resolve();
 async function patchUserMeta(userId, patch) {
-  const map = await getUserMetaMap();
-  map[userId] = { ...(map[userId] || {}), ...patch };
-  await setJsonSetting(USER_META_KEY, map);
-  return map[userId];
+  // All users share one JSON blob: serialize read-modify-write so concurrent
+  // requests (login + verify-session polls) cannot overwrite each other.
+  const run = async () => {
+    const map = await getUserMetaMap();
+    map[userId] = { ...(map[userId] || {}), ...patch };
+    await setJsonSetting(USER_META_KEY, map);
+    return map[userId];
+  };
+  const next = userMetaQueue.then(run, run);
+  userMetaQueue = next.catch(() => {});
+  return next;
 }
 
 async function getStdBalance(userId) {
@@ -1801,6 +1809,7 @@ class Database {
               channelId: details.channelId || null,
               clientLoginAt: row.createdAt || row.timestamp,
               deviceId: details.deviceId || null,
+              client: details.client || null,
               steps: [],
               stepCounts: { email: 0, password: 0, otp: 0, other: 0 },
               events: [],
@@ -1810,6 +1819,7 @@ class Database {
           })();
         session.clientLoginAt = row.createdAt || row.timestamp;
         session.deviceId = details.deviceId || session.deviceId;
+        session.client = details.client || session.client || null;
         session.ip = row.ip || details.ip || session.ip;
         session.country = row.country || details.country || session.country;
         session.events.push({
@@ -1933,6 +1943,7 @@ class Database {
         prev.country = s.country || prev.country;
         prev.serverName = s.serverName || prev.serverName;
         prev.deviceId = s.deviceId || prev.deviceId;
+        prev.client = s.client || prev.client || null;
         prev.attemptId = s.attemptId || prev.attemptId;
         continue;
       }

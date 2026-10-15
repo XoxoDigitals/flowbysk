@@ -37,6 +37,10 @@ type FlowUser = {
   lastDeviceId?: string | null;
   lastClient?: string | null;
   deviceIds?: string[];
+  googleSessionLocked?: boolean;
+  googleSessionLockUntil?: string | null;
+  googleSessionRetryAfterSeconds?: number;
+  serverTime?: string;
 };
 
 type PlanRow = { id: string; name: string; maxParallel?: number; standardCreditsCycle?: number };
@@ -75,7 +79,9 @@ type LoginSession = {
   country?: string | null;
   serverName?: string | null;
   deviceId?: string | null;
+  client?: string | null;
   lockedUntil?: string | null;
+  cancelledReason?: string | null;
   durationMs?: number | null;
   totalSteps?: number;
   startRetries?: number;
@@ -111,6 +117,16 @@ function outcomeBadge(outcome?: string) {
   return 'bg-[var(--bg2)] text-[var(--ink3)]';
 }
 
+function formatCountdown(totalSec: number) {
+  const s = Math.max(0, Math.floor(totalSec));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(sec).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
 function Card({
   label,
   value,
@@ -143,6 +159,11 @@ export default function AdminUserDetailPage() {
   const [expandedAttempt, setExpandedAttempt] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  // Google lock: server gives seconds left; we count down locally on a monotonic clock.
+  const [lockEndsAt, setLockEndsAt] = useState(0);
+  const [, setTick] = useState(0);
+  const [busy, setBusy] = useState('');
+  const [lastSync, setLastSync] = useState<Date | null>(null);
   const [form, setForm] = useState({
     password: '',
     credits: '0',
@@ -189,11 +210,104 @@ export default function AdminUserDetailPage() {
     }
   };
 
+  /** Silent refresh: updates cards, lock and activity but never touches the edit form. */
+  const refresh = async () => {
+    if (!id) return;
+    try {
+      const res = await flowFetch(`/api/admin/users/${id}`);
+      const data = await res.json();
+      if (!res.ok || !data.success) return;
+      const u = data.user as FlowUser;
+      setUser(u);
+      setCreditHistory(data.creditHistory || []);
+      setActivity(data.activity || []);
+      setLoginSessions(data.loginSessions || []);
+      const secs = Number(u.googleSessionRetryAfterSeconds) || 0;
+      setLockEndsAt(secs > 0 ? performance.now() + secs * 1000 : 0);
+      setLastSync(new Date());
+    } catch {
+      /* keep last good data */
+    }
+  };
+
   useEffect(() => {
     if (!id) return;
-    load().catch((e) => setError(e.message));
+    load()
+      .then(() => refresh())
+      .catch((e) => setError(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // Always fresh: poll every 5s while the tab is visible, and on focus.
+  useEffect(() => {
+    if (!id) return;
+    const tick = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    const timer = setInterval(tick, 5000);
+    window.addEventListener('focus', tick);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', tick);
+      document.removeEventListener('visibilitychange', tick);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // 1s ticker only while a lock is running; refresh once when it ends.
+  useEffect(() => {
+    if (lockEndsAt <= 0) return;
+    const timer = setInterval(() => {
+      setTick((n) => n + 1);
+      if (performance.now() >= lockEndsAt) {
+        setLockEndsAt(0);
+        void refresh();
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lockEndsAt]);
+
+  const resetGoogleLock = async () => {
+    if (!user) return;
+    if (!confirm(`Reset the Google login lock for ${user.username}? They can sign in to Google immediately.`)) return;
+    setBusy('lock');
+    setError('');
+    try {
+      const res = await flowFetch(`/api/admin/users/${user.id}/reset-google-lock`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Reset failed');
+      await refresh();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Reset failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const resetLoginStats = async () => {
+    if (!user) return;
+    if (!confirm(`Reset login statistics for ${user.username}? The timeline restarts from now (logs are kept).`)) return;
+    setBusy('stats');
+    setError('');
+    try {
+      const res = await flowFetch(`/api/admin/users/${user.id}/reset-login-stats`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Reset failed');
+      await refresh();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Reset failed');
+    } finally {
+      setBusy('');
+    }
+  };
 
   const applyPlanDefaults = (planId: string) => {
     const p = plans.find((x) => x.id === planId);
@@ -280,6 +394,8 @@ export default function AdminUserDetailPage() {
     return <p className="text-sm text-[var(--ink3)]">Loading…</p>;
   }
 
+  const lockRemaining =
+    lockEndsAt > 0 ? Math.max(0, Math.ceil((lockEndsAt - performance.now()) / 1000)) : 0;
   const expired = user?.planExpiry && new Date(user.planExpiry) <= new Date();
   const statusLabel = user?.banned
     ? 'Banned'
@@ -336,7 +452,7 @@ export default function AdminUserDetailPage() {
             <Card label="OWNER" value={user.ownerLabel || '—'} hint={user.acquiredVia || undefined} />
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             <Card label="LAST IP" value={user.lastIp || '—'} />
             <Card label="COUNTRY" value={user.lastCountry || '—'} />
             <Card
@@ -349,6 +465,37 @@ export default function AdminUserDetailPage() {
               }
             />
             <Card label="CLIENT" value={user.lastClient || '—'} />
+            <div
+              className={`flex flex-col gap-1 rounded-2xl border p-4 ${
+                lockRemaining > 0
+                  ? 'border-amber-500/40 bg-amber-500/10'
+                  : 'border-[var(--line)] bg-[var(--card)]'
+              }`}
+            >
+              <span className="font-mono text-[10px] tracking-[0.1em] text-[var(--ink3)]">
+                GOOGLE LOCK
+              </span>
+              <span
+                className={`text-lg font-semibold tracking-tight tabular-nums ${
+                  lockRemaining > 0 ? 'text-amber-400' : 'text-emerald-400'
+                }`}
+              >
+                {lockRemaining > 0 ? formatCountdown(lockRemaining) : 'Unlocked'}
+              </span>
+              <span className="text-xs text-[var(--ink3)]">
+                {lockRemaining > 0
+                  ? `Ends ${formatWhen(user.googleSessionLockUntil)}`
+                  : 'No login lock active'}
+              </span>
+              <button
+                type="button"
+                disabled={busy === 'lock' || lockRemaining <= 0}
+                onClick={resetGoogleLock}
+                className="btn-secondary mt-2 !px-3 !py-1.5 !text-xs disabled:opacity-40"
+              >
+                {busy === 'lock' ? 'Resetting…' : 'Reset lock'}
+              </button>
+            </div>
           </div>
 
           <div className="grid gap-5 lg:grid-cols-2">
@@ -494,13 +641,24 @@ export default function AdminUserDetailPage() {
                   One row per Google login (start → steps → finish). Bans and credit actions below.
                 </p>
               </div>
-              <span className="font-mono text-[11px] text-[var(--ink3)]">
-                {loginSessions.length} login
-                {loginSessions.length === 1 ? '' : 's'}
-                {otherActivity.length
-                  ? ` · ${otherActivity.length} other`
-                  : ''}
-              </span>
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="font-mono text-[11px] text-[var(--ink3)]">
+                  {loginSessions.length} login
+                  {loginSessions.length === 1 ? '' : 's'}
+                  {otherActivity.length
+                    ? ` · ${otherActivity.length} other`
+                    : ''}
+                  {lastSync ? ` · live ${lastSync.toLocaleTimeString()}` : ''}
+                </span>
+                <button
+                  type="button"
+                  disabled={busy === 'stats'}
+                  onClick={resetLoginStats}
+                  className="btn-secondary !px-3 !py-1.5 !text-xs"
+                >
+                  {busy === 'stats' ? 'Resetting…' : 'Reset login stats'}
+                </button>
+              </div>
             </div>
 
             <div className="flex flex-col gap-3">
@@ -511,7 +669,7 @@ export default function AdminUserDetailPage() {
               ) : (
                 loginSessions.map((s) => {
                   const open = expandedAttempt === s.attemptId;
-                  const meta = [s.ip, s.country, s.serverName, s.deviceId ? `device ${s.deviceId}` : null]
+                  const meta = [s.ip, s.country, s.serverName, s.client, s.deviceId ? `device ${s.deviceId}` : null]
                     .filter(Boolean)
                     .join(' · ');
                   return (
@@ -555,7 +713,7 @@ export default function AdminUserDetailPage() {
                         >
                           {String(s.outcome || 'unknown').toLowerCase() === 'success'
                             ? 'session complete'
-                            : s.outcome || 'unknown'}
+                            : String(s.outcome || 'unknown').replace(/_/g, ' ')}
                         </span>
                       </button>
                       {open ? (

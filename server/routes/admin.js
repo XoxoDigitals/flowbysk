@@ -505,6 +505,18 @@ router.get('/users/:id', requireAdminAuth, async (req, res) => {
     db.getUserActivity(owned.user.id, owned.user.username, 100),
     db.buildLoginSessions({ userId: owned.user.id, limit: 50 }),
   ]);
+  // Newest real app login wins: IP / country / device / client cards are always
+  // the values of the latest login in the activity log (sessions are newest first).
+  const latest = loginSessions.find((s) => s.deviceId || s.client);
+  if (latest) {
+    if (latest.deviceId) user.lastDeviceId = latest.deviceId;
+    if (latest.client) user.lastClient = latest.client;
+    if (latest.ip) user.lastIp = latest.ip;
+    if (latest.country) {
+      user.lastCountry = latest.country;
+      user.country = latest.country;
+    }
+  }
   res.json({
     success: true,
     user,
