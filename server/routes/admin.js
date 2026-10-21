@@ -345,6 +345,43 @@ router.get('/metrics', requireAdminAuth, async (req, res) => {
     ];
   }
 
+  // Billing window (10th -> 10th UTC) new/renewal counts and users-by-plan per admin.
+  // The dashboard reads metrics.period, adminUserCounts[].period* and metrics.planBreakdown.
+  let period = null;
+  try {
+    const stats = await db.adminPeriodStats(adminUserCounts.map((a) => a.id));
+    const rowById = new Map((stats.byAdmin || []).map((r) => [r.id, r]));
+    adminUserCounts = adminUserCounts.map((a) => {
+      const r = rowById.get(a.id);
+      return {
+        ...a,
+        periodNew: r ? r.newUsers : 0,
+        periodRenewals: r ? r.renewals : 0,
+        periodTotal: r ? r.total : 0,
+      };
+    });
+    // Super admin sees the whole platform; a normal admin sees only their own numbers.
+    const own = !actor?.isSuperAdmin && actor ? rowById.get(actor.id) : null;
+    period = {
+      periodStart: stats.periodStart,
+      periodEnd: stats.periodEnd,
+      newUsers: own ? own.newUsers : stats.newUsers,
+      renewals: own ? own.renewals : stats.renewals,
+      total: own ? own.total : stats.total,
+    };
+  } catch (err) {
+    console.error('[metrics] period stats failed:', err);
+    period = { error: err.message || 'Period stats failed' };
+  }
+
+  let planBreakdown = null;
+  try {
+    planBreakdown = await db.adminPlanBreakdown(adminUserCounts);
+  } catch (err) {
+    console.error('[metrics] plan breakdown failed:', err);
+    planBreakdown = { error: err.message || 'Plan breakdown failed' };
+  }
+
   res.json({
     success: true,
     metrics: {
@@ -357,6 +394,8 @@ router.get('/metrics', requireAdminAuth, async (req, res) => {
       resellers: resellers.length,
       systemUsers: (await db.getSystemUsers()).length + 1,
       adminUserCounts,
+      period,
+      planBreakdown,
       servers: servers.map((s) => ({
         id: s.id,
         name: s.name,

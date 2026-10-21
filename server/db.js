@@ -802,6 +802,19 @@ class Database {
         const periodEnd = updates.planExpiry
           ? new Date(updates.planExpiry)
           : sub?.currentPeriodEnd || new Date(Date.now() + 30 * 86400000);
+        // Record a renewal event when the plan period is extended (even if credits stay the same).
+        const extended =
+          sub?.currentPeriodEnd &&
+          updates.planExpiry &&
+          periodEnd.getTime() > new Date(sub.currentPeriodEnd).getTime();
+        if (extended) {
+          await setStdBalance(id, await getStdBalance(id), {
+            type: 'ADMIN_ADJUSTMENT',
+            adminId: updates.adminId || updates.actorId || null,
+            reason: 'renewal',
+            forceLedger: true,
+          });
+        }
         if (sub) {
           await prisma.subscription.update({
             where: { id: sub.id },
