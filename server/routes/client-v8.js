@@ -152,7 +152,7 @@ async function getUserServers(user) {
   if (!user.allowedServerIds || user.allowedServerIds.includes('all')) {
     return allServers;
   }
-  return allServers.filter((s) => user.allowedServerIds.includes(s.id));
+  return allServers.filter((s) => s.imageOnly || user.allowedServerIds.includes(s.id));
 }
 
 async function resolveActiveServer(user) {
@@ -162,7 +162,8 @@ async function resolveActiveServer(user) {
     const selected = availableServers.find((s) => s.id === user.activeServerId);
     if (selected) return selected;
   }
-  return db.pickLeastLoadedServer(availableServers);
+  const standardServers = availableServers.filter((s) => !s.imageOnly);
+  return db.pickLeastLoadedServer(standardServers.length ? standardServers : availableServers);
 }
 
 function publicServerPayload(server) {

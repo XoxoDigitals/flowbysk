@@ -1057,6 +1057,45 @@ class FlowBrowserApp {
     this._toastTimer = setTimeout(() => el.classList.remove('show'), 2800);
   }
 
+  formatServerDisplayName(srv, allServers) {
+    if (!srv) return 'Account';
+    if (!srv.imageOnly) return srv.name || 'Account';
+    const list = Array.isArray(allServers) ? allServers : (this.currentServers || []);
+    const imgServers = list.filter((s) => s && s.imageOnly);
+    const idx = Math.max(0, imgServers.findIndex((s) => s.id === srv.id));
+    const raw = String(srv.name || '').trim();
+    if (/^(google|glow)s*flows*images/i.test(raw)) return raw;
+    if (/^servers*d+$/i.test(raw)) {
+      return 'Google Flow Images - ' + raw.replace(/^servers*/i, 'Server ');
+    }
+    return 'Google Flow Images - Server ' + (idx + 1);
+  }
+
+  getAllSuiteTools() {
+    const imgServers = (this.currentServers || []).filter((s) => s && s.imageOnly);
+    const imgTools = imgServers.map((srv, idx) => {
+      const displayName = this.formatServerDisplayName(srv, this.currentServers);
+      return {
+        id: 'flow-image-srv-' + srv.id,
+        serverId: srv.id,
+        imageOnlyServer: true,
+        code: 'FLOW IMAGES / 0' + (idx + 1),
+        name: displayName,
+        eyebrow: '— FREE IMAGE GENERATION / ' + displayName.toUpperCase(),
+        heroTitle: 'Unlimited AI Image Studio.',
+        heroDesc: 'Dedicated Google Flow Image Generation account (' + displayName + ') — Nano Banana & Imagen studio with 0 credit cost and Bulk Image automation.',
+        category: 'Image Generation Only (0 Cost)',
+        description: 'Google Flow Image Generation Studio & Bulk Image Mode (Free — 0 Credits)',
+        domain: '',
+        url: srv.targetUrl || 'https://flow.google.com/',
+        ready: true,
+        usesGoogleAccount: true,
+        iconSvg: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="4" stroke="#38bdf8" stroke-width="2"/><circle cx="8.5" cy="8.5" r="1.8" fill="#34d399"/><path d="M21 15l-5-5L5 21" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+      };
+    });
+    return [...SUITE_TOOLS_CATALOG, ...imgTools];
+  }
+
   initWorkspaceHub() {
     if (this.btnOpenWorkspaceHub) {
       this.btnOpenWorkspaceHub.addEventListener('click', () => {
@@ -1075,7 +1114,8 @@ class FlowBrowserApp {
     }
     if (this.hubHeroPrimaryBtn) {
       this.hubHeroPrimaryBtn.addEventListener('click', () => {
-        const tool = SUITE_TOOLS_CATALOG.find((t) => t.id === this.selectedToolId) || SUITE_TOOLS_CATALOG[0];
+        const allTools = this.getAllSuiteTools();
+        const tool = allTools.find((t) => t.id === this.selectedToolId) || allTools[0];
         if (!tool.ready) {
           this.notify(tool.name + ' will be available in an upcoming update.');
           return;
@@ -1100,7 +1140,7 @@ class FlowBrowserApp {
 
   syncToolbarBadgesForMode() {
     const hubOpen = this.workspaceHubScreen && !this.workspaceHubScreen.classList.contains('hidden');
-    const activeTool = SUITE_TOOLS_CATALOG.find((t) => t.id === this.runningToolId);
+    const activeTool = this.getAllSuiteTools().find((t) => t.id === this.runningToolId);
     const hideGoogleToolbarItems = hubOpen || (activeTool && !activeTool.usesGoogleAccount);
 
     const srvWrap = document.querySelector('.server-switcher-wrapper');
@@ -1129,17 +1169,24 @@ class FlowBrowserApp {
     this.syncToolbarBadgesForMode();
     this.renderWorkspaceHub();
     this.syncShellModeFromUi();
+    // Refresh server list in background so newly added Image-Only accounts appear immediately
+    this.checkAssignedAccountStillExists?.().catch(() => {});
   }
 
   hideWorkspaceHub() {
     if (!this.workspaceHubScreen) return;
     this.workspaceHubScreen.classList.add('hidden');
     this.btnOpenWorkspaceHub?.classList.remove('active');
+    const isFlowTool = this.runningToolId === 'google-flow' || String(this.runningToolId || '').startsWith('flow-image-srv-');
     if (this.btnToggleVeoAuto) {
-      this.btnToggleVeoAuto.style.display = this.runningToolId === 'google-flow' ? '' : 'none';
+      this.btnToggleVeoAuto.style.display = isFlowTool ? '' : 'none';
     }
     const urlBar = document.getElementById('debug-url-bar');
-    if (urlBar) urlBar.classList.add('hidden');
+    if (urlBar) {
+      const isTts = this.runningToolId === 'zextts-studio';
+      urlBar.classList.toggle('hidden', isTts);
+      urlBar.style.display = isTts ? 'none' : '';
+    }
     this.syncToolbarBadgesForMode();
     try {
       const live = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || '');
@@ -1153,7 +1200,7 @@ class FlowBrowserApp {
   }
 
   selectToolInHub(toolId) {
-    const tool = SUITE_TOOLS_CATALOG.find((t) => t.id === toolId);
+    const tool = this.getAllSuiteTools().find((t) => t.id === toolId);
     if (!tool) return;
     this.selectedToolId = tool.id;
     this.renderWorkspaceHub();
@@ -1162,8 +1209,11 @@ class FlowBrowserApp {
   isUrlMatchingTool(url, tool) {
     const u = String(url || '').toLowerCase();
     if (!u || u === 'about:blank') return false;
+    if (tool.imageOnlyServer && tool.serverId) {
+      return (u.includes('flow.google.com') || u.includes('labs.google')) && this.activeServer?.id === tool.serverId;
+    }
     if (tool.id === 'google-flow') {
-      return u.includes('flow.google.com') || u.includes('labs.google');
+      return (u.includes('flow.google.com') || u.includes('labs.google')) && !this.activeServer?.imageOnly;
     }
     if (tool.id === 'google-gemini') {
       return u.includes('gemini.google.com') || u.includes('bard.google.com');
@@ -1175,7 +1225,7 @@ class FlowBrowserApp {
   }
 
   async openToolFromHub(toolId) {
-    const tool = SUITE_TOOLS_CATALOG.find((t) => t.id === toolId);
+    const tool = this.getAllSuiteTools().find((t) => t.id === toolId);
     if (!tool) return;
     if (!tool.ready) {
       this.notify(tool.name + ' is not configured yet.');
@@ -1188,7 +1238,7 @@ class FlowBrowserApp {
     this._activeToolTargetUrl = tool.url;
     this._totpFilling = false;
 
-    // Check if WebView is already on the requested tool's domain
+    // Check if WebView is already on the requested tool's domain and same account
     let liveUrl = '';
     try {
       liveUrl = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || '');
@@ -1213,13 +1263,27 @@ class FlowBrowserApp {
 
     this.hideWorkspaceHub();
 
+    if (tool.imageOnlyServer && tool.serverId) {
+      const needSwitch = this.activeServer?.id !== tool.serverId || !!this._pendingFreshLogin;
+      await this.launchServerWorkspace(tool.serverId, needSwitch, tool.url);
+      return;
+    }
+
+    if (tool.id === 'google-flow' && this.activeServer?.imageOnly) {
+      const stdSrv = (this.currentServers || []).find((s) => s && !s.imageOnly);
+      if (stdSrv && stdSrv.id) {
+        await this.launchServerWorkspace(stdSrv.id, true, tool.url);
+        return;
+      }
+    }
+
     if (tool.usesGoogleAccount) {
       if (!this._pendingFreshLogin) {
         this.hideGoogleAuthBanner();
         this.postAuthOverlay({ show: false, captcha: false, done: true });
       }
       if (this.activeServer?.id && !this._pendingFreshLogin) {
-        // Already assigned & signed in: navigate directly to the selected tool without a server round-trip
+        this.sendCredentialsToWebview(false);
         this.loadTargetInWebview(tool.url, true);
       } else if (this.activeServer?.id) {
         await this.launchServerWorkspace(this.activeServer.id, !!this._pendingFreshLogin, tool.url);
@@ -1250,7 +1314,7 @@ class FlowBrowserApp {
         if (typeof this.webview?.loadURL === 'function') this.webview.loadURL('about:blank');
         else if (this.webview) this.webview.src = 'about:blank';
       } catch (e) {}
-      const tool = SUITE_TOOLS_CATALOG.find((t) => t.id === toolId);
+      const tool = this.getAllSuiteTools().find((t) => t.id === toolId);
       this.notify((tool ? tool.name : 'Tool') + ' session stopped.');
     }
     this.renderWorkspaceHub();
@@ -1258,10 +1322,11 @@ class FlowBrowserApp {
 
   renderWorkspaceHub() {
     if (!this.hubToolsGrid) return;
+    const allTools = this.getAllSuiteTools();
     const selectedTool =
-      SUITE_TOOLS_CATALOG.find((t) => t.id === this.selectedToolId) ||
-      SUITE_TOOLS_CATALOG.find((t) => t.id === this.runningToolId) ||
-      SUITE_TOOLS_CATALOG[0];
+      allTools.find((t) => t.id === this.selectedToolId) ||
+      allTools.find((t) => t.id === this.runningToolId) ||
+      allTools[0];
 
     if (this.hubBcToolName) this.hubBcToolName.textContent = selectedTool.name;
     if (this.hubHeroEyebrow) this.hubHeroEyebrow.textContent = selectedTool.eyebrow;
@@ -1294,13 +1359,13 @@ class FlowBrowserApp {
       this.hubHeroStopBtn.classList.toggle('hidden', !isSelectedRunning);
     }
 
-    const readyCount = SUITE_TOOLS_CATALOG.filter((t) => t.ready).length;
+    const readyCount = allTools.filter((t) => t.ready).length;
     if (this.hubSuiteCountLabel) {
-      this.hubSuiteCountLabel.textContent = readyCount + ' Ready / ' + SUITE_TOOLS_CATALOG.length + ' Tools Configured';
+      this.hubSuiteCountLabel.textContent = readyCount + ' Ready / ' + allTools.length + ' Tools Configured';
     }
 
     this.hubToolsGrid.innerHTML = '';
-    SUITE_TOOLS_CATALOG.forEach((tool) => {
+    allTools.forEach((tool) => {
       const isRunning = this.runningToolId === tool.id;
       const isSelected = selectedTool.id === tool.id;
 
@@ -1440,13 +1505,15 @@ class FlowBrowserApp {
     servers.forEach(srv => {
       const opt = document.createElement('option');
       opt.value = srv.id;
-      opt.textContent = srv.imageOnly ? `${srv.name} (Image Only)` : srv.name;
+      opt.textContent = this.formatServerDisplayName(srv, servers);
       this.serverSelect.appendChild(opt);
     });
     const current = this.activeServer && servers.find(s => s.id === this.activeServer.id);
     const activeId = (current && current.id) || (this.activeServer && this.activeServer.id) || servers[0].id;
     if (activeId) this.serverSelect.value = activeId;
-    this.setAccountName((current && current.name) || (this.activeServer && this.activeServer.name) || servers[0].name);
+    const activeSrvObj = current || this.activeServer || servers[0];
+    this.setAccountName(this.formatServerDisplayName(activeSrvObj, servers));
+    this.renderWorkspaceHub?.();
   }
 
   setAccountName(name) {
@@ -1625,7 +1692,14 @@ class FlowBrowserApp {
         const serverChanged = !!(previousServerId && previousServerId !== data.server.id);
         this.activeServer = sanitizeServerForStorage(data.server);
         if (this.serverSelect) this.serverSelect.value = data.server.id;
-        this.setAccountName(data.server.name);
+        this.setAccountName(this.formatServerDisplayName(data.server, this.currentServers));
+        if (data.server.imageOnly) {
+          this.runningToolId = 'flow-image-srv-' + data.server.id;
+          this.selectedToolId = this.runningToolId;
+        } else if (String(this.runningToolId || '').startsWith('flow-image-srv-')) {
+          this.runningToolId = 'google-flow';
+          this.selectedToolId = 'google-flow';
+        }
         this._lastAutoFillKey = null;
         this._lastAutoFillAt = 0;
         this._credAttemptId = null;
