@@ -16,8 +16,6 @@
 
   function invoke(cmd, payload) {
     const id = reqId++;
-    // Cookie/cache wipe can take longer than a normal host call.
-    const timeoutMs = cmd === 'clearPartitionSession' ? 120000 : 30000;
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       post({ type: 'invoke', id, cmd, payload: payload || {} });
@@ -26,7 +24,7 @@
           pending.delete(id);
           reject(new Error('Host invoke timeout: ' + cmd));
         }
-      }, timeoutMs);
+      }, 30000);
     });
   }
 
@@ -77,7 +75,19 @@
       if (msg.event === 'console-message') {
         detail.message = msg.message;
       }
+      if (msg.event === 'console-log') {
+        const line = msg.message || (msg.detail && msg.detail.message) || '';
+        console.log('[Host Auth]', line);
+        emitFlow('console-log', { message: line, level: msg.level || 'info' });
+        return;
+      }
       emitFlow(msg.event, detail);
+      return;
+    }
+
+    if (msg.type === 'bulk-panel-state') {
+      const btn = document.getElementById('btn-toggle-veo-auto');
+      if (btn) btn.classList.toggle('active', !!msg.open);
       return;
     }
 
@@ -114,6 +124,12 @@
     setShellMode: (mode) => {
       post({ type: 'cmd', cmd: 'shellMode', mode: mode === 'full' ? 'full' : 'chrome' });
     },
+    toggleBulkPanel: () => {
+      post({ type: 'cmd', cmd: 'toggleBulkPanel' });
+    },
+    openWorkflowWindow: () => {
+      post({ type: 'veo-open-workflow', url: 'src/ui/workflow/index.html' });
+    },
     onDownloadStarted: (cb) => { window.__downloadHandlers['download:started'] = cb; },
     onDownloadProgress: (cb) => { window.__downloadHandlers['download:progress'] = cb; },
     onDownloadCompleted: (cb) => { window.__downloadHandlers['download:completed'] = cb; },
@@ -125,6 +141,7 @@
     credMac: (attemptId, stage) => invoke('credMac', { attemptId, stage }),
     credDecrypt: (ciphertext, nonce) => invoke('credDecrypt', { ciphertext, nonce }),
     credClear: () => invoke('credClear'),
+    switchFlowCookieProfile: (payload) => invoke('switchFlowCookieProfile', payload),
     getDeviceId: () => invoke('getDeviceId')
   };
 
@@ -182,9 +199,9 @@
   function syncChromeMode() {
     const login = document.getElementById('login-screen');
     const drawers = [
+      document.getElementById('workspace-hub-screen'),
       document.getElementById('download-drawer'),
       document.getElementById('extension-drawer'),
-      document.getElementById('veo-auto-drawer'),
       document.getElementById('android-settings-sheet'),
       document.getElementById('app-confirm-modal')
     ];

@@ -44,6 +44,20 @@ public partial class MainWindow : Window
     TextBlock? _authCoverSubText;
     bool _toolTransitionCoverActive;
     bool _flowCredImageOnly;
+    string _activeFlowServerId = "";
+    readonly Dictionary<string, List<SavedCookieDto>> _flowServerCookies = new(StringComparer.OrdinalIgnoreCase);
+
+    sealed class SavedCookieDto
+    {
+        public string Name { get; set; } = "";
+        public string Value { get; set; } = "";
+        public string Domain { get; set; } = "";
+        public string Path { get; set; } = "/";
+        public double Expires { get; set; }
+        public bool IsHttpOnly { get; set; }
+        public bool IsSecure { get; set; }
+        public string SameSite { get; set; } = "Lax";
+    }
     DispatcherTimer? _toolTransitionTimer;
     DispatcherTimer? _authCoverPinTimer;
     DispatcherTimer? _flowOverlayMaxTimer;
@@ -164,6 +178,7 @@ public partial class MainWindow : Window
             await FlowView.EnsureCoreWebView2Async(flowEnv);
             ConfigureFlow();
             _flowReady = true;
+            LoadSavedFlowServerCookiesFromDisk();
 
             _ = InitBulkViewAsync(shellEnv);
         }
@@ -365,6 +380,10 @@ public partial class MainWindow : Window
             {
                 _ = CompleteToolTransitionCoverAsync();
             }
+            if (!string.IsNullOrWhiteSpace(_activeFlowServerId))
+            {
+                _ = SaveCurrentFlowCookiesForServerAsync(_activeFlowServerId);
+            }
             _ = ProbeGoogleTextCaptchaAsync(url);
             _ = TryHostGoogleAutofillAsync(url);
         };
@@ -375,6 +394,10 @@ public partial class MainWindow : Window
             NotifyBulkFlowUrl(url);
             PostToShell(new { type = "flow-event", @event = "did-navigate-in-page", url });
             PostToShell(new { type = "flow-event", @event = "page-title-updated", url });
+            if (!string.IsNullOrWhiteSpace(_activeFlowServerId))
+            {
+                _ = SaveCurrentFlowCookiesForServerAsync(_activeFlowServerId);
+            }
             _ = ProbeGoogleTextCaptchaAsync(url);
             _ = TryHostGoogleAutofillAsync(url);
         };
@@ -2162,6 +2185,17 @@ public partial class MainWindow : Window
             case "credClear":
                 _credChannel.Clear();
                 return new { success = true };
+            case "switchFlowCookieProfile":
+            {
+                var fromId = payload.TryGetProperty("fromServerId", out var fEl) && fEl.ValueKind == JsonValueKind.String
+                    ? fEl.GetString()
+                    : null;
+                var toId = payload.TryGetProperty("toServerId", out var tEl) && tEl.ValueKind == JsonValueKind.String
+                    ? tEl.GetString()
+                    : null;
+                var restored = await SwitchFlowServerCookieProfileAsync(fromId, toId);
+                return new { success = true, restored };
+            }
             case "getDeviceId":
                 return new { deviceId = GetStableDeviceId(), client = "windows-exe/" + AppVersion(), version = AppVersion() };
             default:
@@ -2193,9 +2227,192 @@ public partial class MainWindow : Window
         return "win-" + Convert.ToHexString(hash).ToLowerInvariant()[..32];
     }
 
+    static bool IsFlowAppSpecificCookie(CoreWebView2Cookie cookie)
+    {
+        var dom = (cookie.Domain ?? "").Trim().TrimStart('.').ToLowerInvariant();
+        return dom == "flow.google.com" ||
+               dom.EndsWith(".flow.google.com", StringComparison.OrdinalIgnoreCase) ||
+               dom == "labs.google" ||
+               dom.EndsWith(".labs.google", StringComparison.OrdinalIgnoreCase);
+    }
+
+    static bool IsFlowSessionAuthCookieName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        var n = name.ToLowerInvariant();
+        return n.Contains("session") || n.Contains("token") || n.Contains("auth") || n.Contains("sid");
+    }
+
+    string FlowServerCookiesFilePath => Path.Combine(_flowUserData, "flow-server-cookies.json");
+
+    void LoadSavedFlowServerCookiesFromDisk()
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(_flowUserData)) return;
+            var file = FlowServerCookiesFilePath;
+            if (!File.Exists(file)) return;
+            var json = File.ReadAllText(file);
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, List<SavedCookieDto>>>(json);
+            if (loaded == null) return;
+            _flowServerCookies.Clear();
+            foreach (var kv in loaded)
+            {
+                if (!string.IsNullOrWhiteSpace(kv.Key) && kv.Value is { Count: > 0 })
+                    _flowServerCookies[kv.Key] = kv.Value;
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("LoadSavedFlowServerCookiesFromDisk: " + ex.Message);
+        }
+    }
+
+    void SaveFlowServerCookiesToDisk()
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(_flowUserData)) return;
+            Directory.CreateDirectory(_flowUserData);
+            var json = JsonSerializer.Serialize(_flowServerCookies);
+            File.WriteAllText(FlowServerCookiesFilePath, json);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("SaveFlowServerCookiesToDisk: " + ex.Message);
+        }
+    }
+
+    async Task SaveCurrentFlowCookiesForServerAsync(string? serverId, bool allowBlankStartup = false)
+    {
+        if (FlowView.CoreWebView2 == null || string.IsNullOrWhiteSpace(serverId)) return;
+        try
+        {
+            var curUrl = (FlowView.CoreWebView2.Source ?? "").ToLowerInvariant();
+            if (_onGoogleAuth || _authLoginActive || IsGoogleAuthRelatedUrl(curUrl)) return;
+            if (curUrl.Contains("/about") || curUrl.Contains("/landing")) return;
+
+            var isOnFlow = curUrl.Contains("labs.google") || curUrl.Contains("flow.google.com");
+            var isBlankStartup = allowBlankStartup &&
+                                 (string.IsNullOrWhiteSpace(curUrl) || curUrl == "about:blank") &&
+                                 !_flowServerCookies.ContainsKey(serverId);
+            if (!isOnFlow && !isBlankStartup) return;
+
+            var flowHosts = new[] { "https://flow.google.com", "https://labs.google" };
+            var list = new List<SavedCookieDto>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var host in flowHosts)
+            {
+                var cookies = await FlowView.CoreWebView2.CookieManager.GetCookiesAsync(host);
+                foreach (var c in cookies)
+                {
+                    if (!IsFlowAppSpecificCookie(c) || string.IsNullOrEmpty(c.Value)) continue;
+                    var key = $"{c.Name}|{c.Domain}|{c.Path}";
+                    if (!seen.Add(key)) continue;
+                    list.Add(new SavedCookieDto
+                    {
+                        Name = c.Name,
+                        Value = c.Value,
+                        Domain = c.Domain,
+                        Path = string.IsNullOrWhiteSpace(c.Path) ? "/" : c.Path,
+                        Expires = c.Expires,
+                        IsHttpOnly = c.IsHttpOnly,
+                        IsSecure = c.IsSecure,
+                        SameSite = c.SameSite.ToString()
+                    });
+                }
+            }
+
+            if (list.Count == 0) return;
+
+            var hasSessionAuth = list.Exists(c => IsFlowSessionAuthCookieName(c.Name));
+            if (!hasSessionAuth &&
+                _flowServerCookies.TryGetValue(serverId, out var existing) &&
+                existing.Exists(c => IsFlowSessionAuthCookieName(c.Name)))
+            {
+                return;
+            }
+
+            _flowServerCookies[serverId] = list;
+            SaveFlowServerCookiesToDisk();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("SaveCurrentFlowCookiesForServer: " + ex.Message);
+        }
+    }
+
+    async Task<bool> SwitchFlowServerCookieProfileAsync(string? fromServerId, string? toServerId)
+    {
+        if (FlowView.CoreWebView2 == null) return false;
+        try
+        {
+            var prevId = !string.IsNullOrWhiteSpace(fromServerId) ? fromServerId! : _activeFlowServerId;
+            if (!string.IsNullOrWhiteSpace(prevId))
+            {
+                await SaveCurrentFlowCookiesForServerAsync(prevId, allowBlankStartup: true);
+            }
+
+            var nextId = toServerId ?? "";
+            if (!string.IsNullOrWhiteSpace(nextId) &&
+                string.Equals(prevId, nextId, StringComparison.OrdinalIgnoreCase))
+            {
+                _activeFlowServerId = nextId;
+                await SaveCurrentFlowCookiesForServerAsync(nextId, allowBlankStartup: true);
+                return _flowServerCookies.TryGetValue(nextId, out var sameSaved) &&
+                       sameSaved.Exists(c => IsFlowSessionAuthCookieName(c.Name));
+            }
+
+            _activeFlowServerId = nextId;
+
+            // Clear ONLY flow.google.com / labs.google host cookies (NEVER .google.com or accounts.google.com!)
+            await ClearFlowOnlyCookiesAsync();
+
+            if (!string.IsNullOrWhiteSpace(nextId) &&
+                _flowServerCookies.TryGetValue(nextId, out var saved) &&
+                saved.Count > 0 &&
+                saved.Exists(c => IsFlowSessionAuthCookieName(c.Name)))
+            {
+                foreach (var sc in saved)
+                {
+                    try
+                    {
+                        var dom = sc.Name.StartsWith("__Host-", StringComparison.OrdinalIgnoreCase)
+                            ? sc.Domain.TrimStart('.')
+                            : sc.Domain;
+                        var path = sc.Name.StartsWith("__Host-", StringComparison.OrdinalIgnoreCase)
+                            ? "/"
+                            : (string.IsNullOrWhiteSpace(sc.Path) ? "/" : sc.Path);
+                        var cookie = FlowView.CoreWebView2.CookieManager.CreateCookie(sc.Name, sc.Value, dom, path);
+                        if (sc.Expires > 0)
+                            cookie.Expires = sc.Expires;
+                        cookie.IsHttpOnly = sc.IsHttpOnly;
+                        cookie.IsSecure = sc.IsSecure || sc.Name.StartsWith("__Secure-", StringComparison.OrdinalIgnoreCase) || sc.Name.StartsWith("__Host-", StringComparison.OrdinalIgnoreCase);
+                        if (Enum.TryParse<CoreWebView2CookieSameSiteKind>(sc.SameSite, true, out var sameSite))
+                            cookie.SameSite = sameSite;
+                        FlowView.CoreWebView2.CookieManager.AddOrUpdateCookie(cookie);
+                    }
+                    catch (Exception cookieEx)
+                    {
+                        Debug.WriteLine("RestoreFlowCookie error: " + cookieEx.Message);
+                    }
+                }
+                return true;
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("SwitchFlowServerCookieProfile: " + ex.Message);
+            return false;
+        }
+    }
+
     /// <summary>
-    /// Clears ONLY flow.google.com and labs.google session cookies while keeping accounts.google.com
-    /// and gemini.google.com cookies intact so all Google accounts remain signed in simultaneously.
+    /// Clears ONLY flow.google.com and labs.google host-scoped cookies while keeping .google.com,
+    /// accounts.google.com, and gemini.google.com cookies intact so all Google accounts remain signed in simultaneously.
     /// </summary>
     async Task ClearFlowOnlyCookiesAsync()
     {
@@ -2211,7 +2428,12 @@ public partial class MainWindow : Window
             {
                 var cookies = await FlowView.CoreWebView2.CookieManager.GetCookiesAsync(host);
                 foreach (var cookie in cookies)
-                    FlowView.CoreWebView2.CookieManager.DeleteCookie(cookie);
+                {
+                    if (IsFlowAppSpecificCookie(cookie))
+                    {
+                        FlowView.CoreWebView2.CookieManager.DeleteCookie(cookie);
+                    }
+                }
             }
         }
         catch (Exception ex)
@@ -2222,6 +2444,15 @@ public partial class MainWindow : Window
 
     async Task ClearFlowSessionAsync()
     {
+        _flowServerCookies.Clear();
+        _activeFlowServerId = "";
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(_flowUserData) && File.Exists(FlowServerCookiesFilePath))
+                File.Delete(FlowServerCookiesFilePath);
+        }
+        catch { /* ignore */ }
+
         // Drop sticky Google auth cover immediately — wipe is not a sign-in session
         Dispatcher.Invoke(() =>
         {

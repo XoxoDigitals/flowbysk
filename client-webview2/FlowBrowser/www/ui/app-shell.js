@@ -545,7 +545,8 @@ class FlowBrowserApp {
         if (activeSrv) {
           this.activeServer = sanitizeServerForStorage(activeSrv);
           if (this.serverSelect) this.serverSelect.value = activeSrv.id;
-          this.setAccountName(activeSrv.name);
+          this.setAccountName(this.formatServerDisplayName(activeSrv, data.servers));
+          window.electronAPI.switchFlowCookieProfile?.({ fromServerId: activeSrv.id, toServerId: activeSrv.id }).catch(() => {});
         }
         this._pendingFreshLogin = !!wiped;
         this.showWorkspaceHub();
@@ -670,7 +671,10 @@ class FlowBrowserApp {
         if (!this.activeServer?.id && Array.isArray(data.servers) && data.servers.length > 0) {
           this.activeServer = sanitizeServerForStorage(data.servers[0]);
           if (this.serverSelect) this.serverSelect.value = this.activeServer.id;
-          this.setAccountName(this.activeServer.name);
+          this.setAccountName(this.formatServerDisplayName(this.activeServer, data.servers));
+        }
+        if (this.activeServer?.id) {
+          window.electronAPI.switchFlowCookieProfile?.({ fromServerId: this.activeServer.id, toServerId: this.activeServer.id }).catch(() => {});
         }
         this.showWorkspaceHub();
       } else {
@@ -1703,6 +1707,11 @@ class FlowBrowserApp {
         this._lastAutoFillKey = null;
         this._lastAutoFillAt = 0;
         this._credAttemptId = null;
+        if (serverChanged || resetGoogle) {
+          this._googleEmailMem = '';
+          this._googlePasswordMem = '';
+          this._credUsedStages = new Set();
+        }
 
         if (this.config?.authToken && this.config?.user) {
           await window.electronAPI.saveSession({
@@ -1718,19 +1727,28 @@ class FlowBrowserApp {
           ? desiredUrl
           : desiredUrl.replace(/\/$/, '') + '/';
 
-        // Keep all Google accounts logged in simultaneously!
-        // When switching accounts, clear ONLY Flow app cookies (never accounts.google.com) and use AccountChooser.
-        if (resetGoogle || serverChanged) {
+        // Snapshot previous server's Flow cookies and restore target server's Flow cookies (never deleting .google.com!)
+        let cookieRestored = false;
+        if (!isGeminiTarget) {
+          try {
+            const cookieSwitch = await window.electronAPI.switchFlowCookieProfile?.({
+              fromServerId: previousServerId || data.server.id,
+              toServerId: data.server.id
+            });
+            cookieRestored = !!(cookieSwitch && cookieSwitch.restored);
+          } catch (e) {}
+        }
+
+        if (cookieRestored && !isGeminiTarget) {
+          this._pendingFreshLogin = false;
+          this.hideGoogleAuthBanner();
+          this.postAuthOverlay({ show: false, captcha: false, done: true });
+          await this.sendCredentialsToWebview(false);
+          console.log('[AppShell] Restored saved Flow session for', data.server.name, '->', targetUrl);
+          this.loadTargetInWebview(targetUrl, true);
+        } else if (resetGoogle || serverChanged) {
           this._pendingFreshLogin = false;
           this._freshLoginStarted = true;
-          if (!isGeminiTarget) {
-            try {
-              window.chrome?.webview?.postMessage(JSON.stringify({
-                type: 'cmd',
-                cmd: 'clearFlowAppCookies'
-              }));
-            } catch (e) {}
-          }
           await this.sendCredentialsToWebview(true);
           const nextEmail = await this.resolveGoogleEmailForFill();
           const chooserUrl = nextEmail
