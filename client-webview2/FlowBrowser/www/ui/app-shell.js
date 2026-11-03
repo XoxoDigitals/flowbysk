@@ -1790,8 +1790,6 @@ class FlowBrowserApp {
 
   updateDebugUrl(url) {
     if (!this.debugUrlInput) return;
-    // Navigation events pass the authoritative URL. Prefer that over getURL() so the
-    // bar cannot stick on the first Google /identifier load when history updates race.
     let value = url || '';
     if (!value || value === 'about:blank') {
       try {
@@ -1802,6 +1800,12 @@ class FlowBrowserApp {
       } catch (e) {}
     }
     if (!value) value = 'about:blank';
+    const urlBar = document.getElementById('debug-url-bar');
+    if (urlBar) {
+      const isTtsStudio = /zextts|app.flowbrowser.localhost|flowbrowser.local/i.test(value);
+      urlBar.classList.toggle('hidden', isTtsStudio);
+      urlBar.style.display = isTtsStudio ? 'none' : '';
+    }
     // Display-only bar (div or input)
     if ('value' in this.debugUrlInput && this.debugUrlInput.tagName === 'INPUT') {
       this.debugUrlInput.value = value;
@@ -2833,8 +2837,13 @@ class FlowBrowserApp {
 
   showGoogleAuthBanner(text, captcha = false) {
     if (!this.googleAuthBanner || !this.googleAuthBannerText) return;
+    // Keep URL bar visible during normal Google login; only show top banner if captcha is active
+    if (!captcha) {
+      this.googleAuthBanner.classList.add('hidden');
+      return;
+    }
     this.googleAuthBannerText.textContent = text;
-    this.googleAuthBanner.classList.toggle('captcha', !!captcha);
+    this.googleAuthBanner.classList.toggle('captcha', true);
     this.googleAuthBanner.classList.remove('hidden');
   }
 
