@@ -1727,44 +1727,37 @@ class FlowBrowserApp {
           ? desiredUrl
           : desiredUrl.replace(/\/$/, '') + '/';
 
-        // Snapshot previous server's Flow cookies and restore target server's Flow cookies (never deleting .google.com!)
+        // Snapshot previous server's isolated cookies and restore target server's isolated cookies
         let cookieRestored = false;
-        if (!isGeminiTarget) {
-          try {
-            const cookieSwitch = await window.electronAPI.switchFlowCookieProfile?.({
-              fromServerId: previousServerId || data.server.id,
-              toServerId: data.server.id
-            });
-            cookieRestored = !!(cookieSwitch && cookieSwitch.restored);
-          } catch (e) {}
-        }
+        try {
+          const cookieSwitch = await window.electronAPI.switchFlowCookieProfile?.({
+            fromServerId: previousServerId || data.server.id,
+            toServerId: data.server.id
+          });
+          cookieRestored = !!(cookieSwitch && cookieSwitch.restored);
+        } catch (e) {}
 
-        if (cookieRestored && !isGeminiTarget) {
+        if (cookieRestored && !resetGoogle) {
           this._pendingFreshLogin = false;
           this.hideGoogleAuthBanner();
           this.postAuthOverlay({ show: false, captcha: false, done: true });
           await this.sendCredentialsToWebview(false);
-          console.log('[AppShell] Restored saved Flow session for', data.server.name, '->', targetUrl);
+          console.log('[AppShell] Restored isolated session for', data.server.name, '->', targetUrl);
           this.loadTargetInWebview(targetUrl, true);
-        } else if (resetGoogle || serverChanged) {
+        } else {
           this._pendingFreshLogin = false;
           this._freshLoginStarted = true;
           await this.sendCredentialsToWebview(true);
           const nextEmail = await this.resolveGoogleEmailForFill();
-          const chooserUrl = nextEmail
-            ? 'https://accounts.google.com/AccountChooser?hl=en&Email=' +
+          const loginUrl = nextEmail
+            ? 'https://accounts.google.com/ServiceLogin?hl=en&Email=' +
               encodeURIComponent(nextEmail) +
               '&continue=' +
               encodeURIComponent(targetUrl)
-            : 'https://accounts.google.com/AccountChooser?hl=en&continue=' +
+            : 'https://accounts.google.com/ServiceLogin?hl=en&continue=' +
               encodeURIComponent(targetUrl);
-          console.log('[AppShell] Multi-account switch to', nextEmail || data.server.name, '->', chooserUrl);
-          this.loadTargetInWebview(chooserUrl, true);
-        } else {
-          this._pendingFreshLogin = false;
-          await this.sendCredentialsToWebview(false);
-          console.log('[AppShell] Open Workspace for', data.server.name, '->', targetUrl);
-          this.loadTargetInWebview(targetUrl, true);
+          console.log('[AppShell] Starting isolated Google login for', nextEmail || data.server.name, '->', loginUrl);
+          this.loadTargetInWebview(loginUrl, true);
         }
       } else {
         const isLock = data && data.code === 'GOOGLE_SESSION_LOCKED';

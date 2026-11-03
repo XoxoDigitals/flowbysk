@@ -1144,7 +1144,12 @@ setupGenerateActionHook();
 // =========================================================================
 
 function cleanText(str) {
-  return String(str || '').replace(/volume_up|arrow_drop_down/g, '').trim();
+  return String(str || '')
+    .replace(/volume_up|arrow_drop_down|check|done/gi, '')
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/\s*-\s*/g, ' - ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function getButtonCleanLabel(btn) {
@@ -1774,7 +1779,8 @@ loadSavedProjectsFromDevice();
         "button[data-fake-model] i,button[data-fake-model] .google-symbols,button[data-fake-model] mat-icon,button[data-fake-model] svg{color:#fff!important;visibility:visible!important}" +
         "[role='menuitem'][data-hide-lp='true'],[role='option'][data-hide-lp='true']{height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
         "flow-menu-item:has([data-hide-lp='true']){height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
-        "[role='menuitem'][data-fake-active='true'],[role='option'][data-fake-active='true']{background-color:rgba(255,255,255,.1)!important;border-radius:12px!important}" +
+        "[role='menuitem'][data-fake-active='true'],[role='option'][data-fake-active='true']{background-color:rgba(255,255,255,.12)!important;border-radius:12px!important}" +
+        "[role='menuitem'][data-fake-inactive='true'],[role='option'][data-fake-inactive='true']{background-color:transparent!important}" +
         "[data-pakflow-autosetup-hide='true']{opacity:0!important;pointer-events:none!important;transition:none!important}" +
         "body[data-pakflow-boot-hide='true'] [role='dialog'],body[data-pakflow-boot-hide='true'] [data-radix-popper-content-wrapper],body[data-pakflow-boot-hide='true'] .cdk-overlay-pane,body[data-pakflow-boot-hide='true'] flow-prompt-box-settings,body[data-pakflow-boot-hide='true'] [role='menu'],body[data-pakflow-boot-hide='true'] [role='listbox']{opacity:0!important;pointer-events:none!important;transition:none!important}" +
         "a[data-fake-credits]{color:transparent!important;position:relative!important}" +
@@ -1891,6 +1897,11 @@ loadSavedProjectsFromDevice();
     const cleaned = cleanText(rawItemText || '').replace(/\s*\[Lower Priority\]/gi, '').trim();
     if (!cleaned) return '';
     if (creditMap[cleaned]) return cleaned;
+    const lower = cleaned.toLowerCase();
+    if (lower.includes('omni')) return 'Omni 1.1 Flash';
+    if (lower.includes('quality')) return 'Veo 3.1 - Quality';
+    if (lower.includes('fast')) return 'Veo 3.1 - Fast';
+    if (lower.includes('lite')) return 'Veo 3.1 - Lite';
     for (const k of Object.keys(creditMap)) {
       if (cleaned.includes(k)) return k;
     }
@@ -1920,6 +1931,42 @@ loadSavedProjectsFromDevice();
     return { target: null, isLp: false };
   }
 
+  function applyFakeModelToDomNow() {
+    if (!fakeModelName) return;
+    const modelMenuBtn = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(
+      (b) =>
+        b.textContent &&
+        (b.textContent.includes('Veo') || b.textContent.includes('Omni') || b.textContent.includes('Lower Priority'))
+    );
+    if (modelMenuBtn) {
+      modelMenuBtn.setAttribute('data-fake-model', fakeModelName);
+    }
+    const creditMenuLink = document.querySelector('a[href*="g1_ai_credit_menu"]');
+    if (creditMenuLink && creditMap[fakeModelName]) {
+      creditMenuLink.setAttribute('data-fake-credits', creditMap[fakeModelName]);
+    }
+  }
+
+  function closeOpenModelDropdownMenu() {
+    setTimeout(() => {
+      const openMenu = document.querySelector('[role="menu"], [role="listbox"]');
+      if (!openMenu) return;
+      const escInit = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true };
+      try { openMenu.dispatchEvent(new KeyboardEvent('keydown', escInit)); } catch (e) {}
+      try { document.dispatchEvent(new KeyboardEvent('keydown', escInit)); } catch (e) {}
+      try { document.dispatchEvent(new KeyboardEvent('keyup', escInit)); } catch (e) {}
+      setTimeout(() => {
+        const stillOpen = document.querySelector('[role="menu"], [role="listbox"]');
+        if (stillOpen) {
+          const expandedTrigger = document.querySelector('button[aria-haspopup="menu"][aria-expanded="true"]');
+          if (expandedTrigger) {
+            try { expandedTrigger.click(); } catch (e) {}
+          }
+        }
+      }, 35);
+    }, 35);
+  }
+
   function triggerLowerPrioritySelection(allMenuItems) {
     const { target } = findBestBackendModelItem(allMenuItems);
     if (target) {
@@ -1932,39 +1979,12 @@ loadSavedProjectsFromDevice();
       setTimeout(() => {
         try { delete target.__pakflowInternalClick; } catch (err) {}
       }, 250);
+      closeOpenModelDropdownMenu();
       return true;
     }
+    closeOpenModelDropdownMenu();
     return false;
   }
-
-  // Intercept pointerdown/mousedown on non-target model items so Radix/Angular Material
-  // selects [Lower Priority] (or Veo 3.1 - Lite if no LP exists) while displaying user's choice.
-  ['pointerdown', 'mousedown'].forEach((evtName) => {
-    document.addEventListener(evtName, (e) => {
-      if (!isFlowHost() || isImageModeActive || isImageOnlyAccount()) return;
-      const target = e.target;
-      if (!target || !target.closest) return;
-      const menuItem = target.closest('[role="menuitem"], [role="option"]');
-      if (!menuItem || menuItem.__pakflowInternalClick) return;
-      const itemText = cleanText(menuItem.textContent);
-      if ((itemText.includes('Veo') || itemText.includes('Omni')) && !itemText.includes('Lower Priority')) {
-        const matched = matchKnownModelName(itemText);
-        if (matched) {
-          fakeModelName = matched;
-          try { sessionStorage.setItem('__pakflow_fake_model', fakeModelName); } catch (err) {}
-        }
-        const allMenuItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
-        const best = findBestBackendModelItem(allMenuItems);
-        // If this menuItem IS already the best backend target (e.g. Veo 3.1 - Lite when no LP exists), let native click proceed!
-        if (!best.target || best.target === menuItem) {
-          return;
-        }
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-      }
-    }, true);
-  });
 
   // Click interception for 4K Upscaled -> 1080p (-50 cr) and redirecting model selection -> [Lower Priority] / Lite
   document.addEventListener('click', (e) => {
@@ -2009,11 +2029,13 @@ loadSavedProjectsFromDevice();
         if (matched) {
           fakeModelName = matched;
           try { sessionStorage.setItem('__pakflow_fake_model', fakeModelName); } catch (err) {}
+          applyFakeModelToDomNow();
         }
         const allMenuItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
         const best = findBestBackendModelItem(allMenuItems);
         if (!best.target || best.target === menuItem) {
-          // Allow native click on Veo 3.1 - Lite to close the dropdown naturally
+          // Allow native click on Veo 3.1 - Lite to select it & close the dropdown naturally
+          closeOpenModelDropdownMenu();
           return;
         }
         e.preventDefault();
@@ -2598,6 +2620,14 @@ loadSavedProjectsFromDevice();
       return;
     }
 
+    if (document.body && document.body.getAttribute('data-flow-image-only') === 'true') {
+      document.body.removeAttribute('data-flow-image-only');
+    }
+    document.querySelectorAll('[data-hide-image-only="true"]').forEach((el) => {
+      el.removeAttribute('data-hide-image-only');
+      el.style.removeProperty('display');
+    });
+
     // Detect Image Mode vs Video Mode on normal (Video + Image) accounts
     const imgTabSelected = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]')).find(
       (b) =>
@@ -2663,10 +2693,20 @@ loadSavedProjectsFromDevice();
       const txt = cleanText(mi.textContent);
       if (txt.includes('Lower Priority')) {
         mi.setAttribute('data-hide-lp', 'true');
-      } else if (matchKnownModelName(txt) === fakeModelName) {
-        mi.setAttribute('data-fake-active', 'true');
-      } else {
         mi.removeAttribute('data-fake-active');
+        mi.removeAttribute('data-fake-inactive');
+      } else {
+        const matchedName = matchKnownModelName(txt);
+        if (matchedName && matchedName === fakeModelName) {
+          mi.setAttribute('data-fake-active', 'true');
+          mi.removeAttribute('data-fake-inactive');
+        } else if (matchedName) {
+          mi.removeAttribute('data-fake-active');
+          mi.setAttribute('data-fake-inactive', 'true');
+        } else {
+          mi.removeAttribute('data-fake-active');
+          mi.removeAttribute('data-fake-inactive');
+        }
       }
     });
 

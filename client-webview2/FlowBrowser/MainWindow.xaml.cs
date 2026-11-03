@@ -2228,9 +2228,20 @@ public partial class MainWindow : Window
         return "win-" + Convert.ToHexString(hash).ToLowerInvariant()[..32];
     }
 
-    static bool IsFlowAppSpecificCookie(CoreWebView2Cookie cookie)
+    static bool IsGooglePrimaryAuthCookie(SavedCookieDto cookie)
     {
+        if (string.IsNullOrWhiteSpace(cookie.Name) || string.IsNullOrWhiteSpace(cookie.Value)) return false;
         var dom = (cookie.Domain ?? "").Trim().TrimStart('.').ToLowerInvariant();
+        if (dom != "google.com" && !dom.EndsWith(".google.com", StringComparison.OrdinalIgnoreCase))
+            return false;
+        return string.Equals(cookie.Name, "SID", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(cookie.Name, "__Secure-1PSID", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(cookie.Name, "__Secure-3PSID", StringComparison.OrdinalIgnoreCase);
+    }
+
+    static bool IsFlowAppCookieDomain(string? domain)
+    {
+        var dom = (domain ?? "").Trim().TrimStart('.').ToLowerInvariant();
         return dom == "flow.google.com" ||
                dom.EndsWith(".flow.google.com", StringComparison.OrdinalIgnoreCase) ||
                dom == "labs.google" ||
@@ -2244,7 +2255,13 @@ public partial class MainWindow : Window
         return n.Contains("session") || n.Contains("token") || n.Contains("auth") || n.Contains("sid");
     }
 
-    string FlowServerCookiesFilePath => Path.Combine(_flowUserData, "flow-server-cookies.json");
+    static bool IsValidIsolatedCookieSnapshot(List<SavedCookieDto>? list)
+    {
+        if (list == null || list.Count == 0) return false;
+        return list.Exists(IsGooglePrimaryAuthCookie);
+    }
+
+    string FlowServerCookiesFilePath => Path.Combine(_flowUserData, "flow-isolated-sessions-v2.json");
 
     void LoadSavedFlowServerCookiesFromDisk()
     {
@@ -2259,7 +2276,7 @@ public partial class MainWindow : Window
             _flowServerCookies.Clear();
             foreach (var kv in loaded)
             {
-                if (!string.IsNullOrWhiteSpace(kv.Key) && kv.Value is { Count: > 0 })
+                if (!string.IsNullOrWhiteSpace(kv.Key) && IsValidIsolatedCookieSnapshot(kv.Value))
                     _flowServerCookies[kv.Key] = kv.Value;
             }
         }
@@ -2284,54 +2301,48 @@ public partial class MainWindow : Window
         }
     }
 
-    async Task SaveCurrentFlowCookiesForServerAsync(string? serverId, bool allowBlankStartup = false)
+    async Task SaveCurrentFlowCookiesForServerAsync(string? serverId)
     {
         if (FlowView.CoreWebView2 == null || string.IsNullOrWhiteSpace(serverId)) return;
         try
         {
             var curUrl = (FlowView.CoreWebView2.Source ?? "").ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(curUrl) || curUrl == "about:blank") return;
             if (_onGoogleAuth || _authLoginActive || IsGoogleAuthRelatedUrl(curUrl)) return;
             if (curUrl.Contains("/about") || curUrl.Contains("/landing")) return;
 
-            var isOnFlow = curUrl.Contains("labs.google") || curUrl.Contains("flow.google.com");
-            var isBlankStartup = allowBlankStartup &&
-                                 (string.IsNullOrWhiteSpace(curUrl) || curUrl == "about:blank") &&
-                                 !_flowServerCookies.ContainsKey(serverId);
-            if (!isOnFlow && !isBlankStartup) return;
+            var isOnAuthenticatedWorkspace =
+                curUrl.Contains("labs.google/fx") ||
+                curUrl.Contains("flow.google.com") ||
+                curUrl.Contains("gemini.google.com/app");
+            if (!isOnAuthenticatedWorkspace) return;
 
-            var flowHosts = new[] { "https://flow.google.com", "https://labs.google" };
+            // Snapshot the ENTIRE cookie jar (.google.com, accounts.google.com, labs.google, flow.google.com, gemini.google.com)
+            // so this server account is 100% isolated with its own Google + Flow cookies!
+            var allCookies = await FlowView.CoreWebView2.CookieManager.GetCookiesAsync("");
             var list = new List<SavedCookieDto>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var host in flowHosts)
+            foreach (var c in allCookies)
             {
-                var cookies = await FlowView.CoreWebView2.CookieManager.GetCookiesAsync(host);
-                foreach (var c in cookies)
+                if (string.IsNullOrEmpty(c.Name) || string.IsNullOrEmpty(c.Value)) continue;
+                var key = $"{c.Name}|{c.Domain}|{c.Path}";
+                if (!seen.Add(key)) continue;
+                list.Add(new SavedCookieDto
                 {
-                    if (!IsFlowAppSpecificCookie(c) || string.IsNullOrEmpty(c.Value)) continue;
-                    var key = $"{c.Name}|{c.Domain}|{c.Path}";
-                    if (!seen.Add(key)) continue;
-                    list.Add(new SavedCookieDto
-                    {
-                        Name = c.Name,
-                        Value = c.Value,
-                        Domain = c.Domain,
-                        Path = string.IsNullOrWhiteSpace(c.Path) ? "/" : c.Path,
-                        Expires = c.Expires,
-                        IsSession = c.IsSession,
-                        IsHttpOnly = c.IsHttpOnly,
-                        IsSecure = c.IsSecure,
-                        SameSite = c.SameSite.ToString()
-                    });
-                }
+                    Name = c.Name,
+                    Value = c.Value,
+                    Domain = c.Domain,
+                    Path = string.IsNullOrWhiteSpace(c.Path) ? "/" : c.Path,
+                    Expires = c.Expires,
+                    IsSession = c.IsSession,
+                    IsHttpOnly = c.IsHttpOnly,
+                    IsSecure = c.IsSecure,
+                    SameSite = c.SameSite.ToString()
+                });
             }
 
-            if (list.Count == 0) return;
-
-            var hasSessionAuth = list.Exists(c => IsFlowSessionAuthCookieName(c.Name));
-            if (!hasSessionAuth &&
-                _flowServerCookies.TryGetValue(serverId, out var existing) &&
-                existing.Exists(c => IsFlowSessionAuthCookieName(c.Name)))
+            if (!IsValidIsolatedCookieSnapshot(list))
             {
                 return;
             }
@@ -2350,31 +2361,23 @@ public partial class MainWindow : Window
         if (FlowView.CoreWebView2 == null) return false;
         try
         {
-            var prevId = !string.IsNullOrWhiteSpace(fromServerId) ? fromServerId! : _activeFlowServerId;
-            if (!string.IsNullOrWhiteSpace(prevId))
+            // 1. If we were actively running on a server in this session, snapshot its cookies if authenticated
+            var prevId = !string.IsNullOrWhiteSpace(_activeFlowServerId) ? _activeFlowServerId : (fromServerId ?? "");
+            if (!string.IsNullOrWhiteSpace(prevId) && !string.IsNullOrWhiteSpace(_activeFlowServerId))
             {
-                await SaveCurrentFlowCookiesForServerAsync(prevId, allowBlankStartup: true);
+                await SaveCurrentFlowCookiesForServerAsync(prevId);
             }
 
             var nextId = toServerId ?? "";
-            if (!string.IsNullOrWhiteSpace(nextId) &&
-                string.Equals(prevId, nextId, StringComparison.OrdinalIgnoreCase))
-            {
-                _activeFlowServerId = nextId;
-                await SaveCurrentFlowCookiesForServerAsync(nextId, allowBlankStartup: true);
-                return _flowServerCookies.TryGetValue(nextId, out var sameSaved) &&
-                       sameSaved.Exists(c => IsFlowSessionAuthCookieName(c.Name));
-            }
-
             _activeFlowServerId = nextId;
 
-            // Clear ONLY flow.google.com / labs.google host cookies (NEVER .google.com or accounts.google.com!)
-            await ClearFlowOnlyCookiesAsync();
+            // 2. Always wipe ALL cookies in the active WebView2 cookie jar so accounts NEVER mix or leak sessions!
+            FlowView.CoreWebView2.CookieManager.DeleteAllCookies();
 
+            // 3. If the target server has a valid isolated cookie jar saved, restore all of its cookies now
             if (!string.IsNullOrWhiteSpace(nextId) &&
                 _flowServerCookies.TryGetValue(nextId, out var saved) &&
-                saved.Count > 0 &&
-                saved.Exists(c => IsFlowSessionAuthCookieName(c.Name)))
+                IsValidIsolatedCookieSnapshot(saved))
             {
                 foreach (var sc in saved)
                 {
@@ -2387,8 +2390,16 @@ public partial class MainWindow : Window
                             ? "/"
                             : (string.IsNullOrWhiteSpace(sc.Path) ? "/" : sc.Path);
                         var cookie = FlowView.CoreWebView2.CookieManager.CreateCookie(sc.Name, sc.Value, dom, path);
-                        if (!sc.IsSession && sc.Expires > DateTime.UtcNow)
-                            cookie.Expires = sc.Expires;
+                        if (!sc.IsSession)
+                        {
+                            var expUtc = sc.Expires.Kind == DateTimeKind.Unspecified
+                                ? DateTime.SpecifyKind(sc.Expires, DateTimeKind.Utc)
+                                : sc.Expires.ToUniversalTime();
+                            if (expUtc > DateTime.UtcNow.AddMinutes(1) && expUtc < DateTime.UtcNow.AddYears(5))
+                            {
+                                cookie.Expires = expUtc;
+                            }
+                        }
                         cookie.IsHttpOnly = sc.IsHttpOnly;
                         cookie.IsSecure = sc.IsSecure || sc.Name.StartsWith("__Secure-", StringComparison.OrdinalIgnoreCase) || sc.Name.StartsWith("__Host-", StringComparison.OrdinalIgnoreCase);
                         if (Enum.TryParse<CoreWebView2CookieSameSiteKind>(sc.SameSite, true, out var sameSite))
@@ -2412,36 +2423,18 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>
-    /// Clears ONLY flow.google.com and labs.google host-scoped cookies while keeping .google.com,
-    /// accounts.google.com, and gemini.google.com cookies intact so all Google accounts remain signed in simultaneously.
-    /// </summary>
     async Task ClearFlowOnlyCookiesAsync()
     {
         if (FlowView.CoreWebView2 == null) return;
         try
         {
-            var flowHosts = new[]
-            {
-                "https://flow.google.com",
-                "https://labs.google"
-            };
-            foreach (var host in flowHosts)
-            {
-                var cookies = await FlowView.CoreWebView2.CookieManager.GetCookiesAsync(host);
-                foreach (var cookie in cookies)
-                {
-                    if (IsFlowAppSpecificCookie(cookie))
-                    {
-                        FlowView.CoreWebView2.CookieManager.DeleteCookie(cookie);
-                    }
-                }
-            }
+            FlowView.CoreWebView2.CookieManager.DeleteAllCookies();
         }
         catch (Exception ex)
         {
             Debug.WriteLine("ClearFlowOnlyCookies: " + ex.Message);
         }
+        await Task.CompletedTask;
     }
 
     async Task ClearFlowSessionAsync()
