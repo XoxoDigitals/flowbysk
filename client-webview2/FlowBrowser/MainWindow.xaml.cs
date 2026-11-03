@@ -53,7 +53,8 @@ public partial class MainWindow : Window
         public string Value { get; set; } = "";
         public string Domain { get; set; } = "";
         public string Path { get; set; } = "/";
-        public double Expires { get; set; }
+        public DateTime Expires { get; set; }
+        public bool IsSession { get; set; }
         public bool IsHttpOnly { get; set; }
         public bool IsSecure { get; set; }
         public string SameSite { get; set; } = "Lax";
@@ -2317,6 +2318,7 @@ public partial class MainWindow : Window
                         Domain = c.Domain,
                         Path = string.IsNullOrWhiteSpace(c.Path) ? "/" : c.Path,
                         Expires = c.Expires,
+                        IsSession = c.IsSession,
                         IsHttpOnly = c.IsHttpOnly,
                         IsSecure = c.IsSecure,
                         SameSite = c.SameSite.ToString()
@@ -2385,7 +2387,7 @@ public partial class MainWindow : Window
                             ? "/"
                             : (string.IsNullOrWhiteSpace(sc.Path) ? "/" : sc.Path);
                         var cookie = FlowView.CoreWebView2.CookieManager.CreateCookie(sc.Name, sc.Value, dom, path);
-                        if (sc.Expires > 0)
+                        if (!sc.IsSession && sc.Expires > DateTime.UtcNow)
                             cookie.Expires = sc.Expires;
                         cookie.IsHttpOnly = sc.IsHttpOnly;
                         cookie.IsSecure = sc.IsSecure || sc.Name.StartsWith("__Secure-", StringComparison.OrdinalIgnoreCase) || sc.Name.StartsWith("__Host-", StringComparison.OrdinalIgnoreCase);
