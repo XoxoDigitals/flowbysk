@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TTS STUDIO — AI Voice Studio</title>
+  <link rel="icon" type="image/png" href="assets/zextts-favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true" style="display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#7c3aed,#a855f7);border-radius:12px;">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+        </div>
+        <div class="brand-text"><strong>TTS STUDIO</strong><span>AI voice studio</span></div>
+      </div>
+
+      <div class="sidebar-label">Workspace</div>
+      <nav class="nav" id="tabs">
+        <button type="button" class="nav-item active" data-tab="studio">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13M12 8.5v7M16 3v18M20 9.5v5M4 10v4"/></svg>
+          <span>Voice studio</span><em>01</em>
+        </button>
+        <button type="button" class="nav-item" data-tab="podcast">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17a5 5 0 0 0 5-5V7a5 5 0 0 0-10 0v5a5 5 0 0 0 5 5Z"/><path d="M4 11v1a8 8 0 0 0 16 0v-1M12 20v2"/></svg>
+          <span>Podcast maker</span><em>02</em>
+        </button>
+        <button type="button" class="nav-item" data-tab="voices">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9v6M9 6v12M13 3v18M17 7v10M21 10v4"/></svg>
+          <span>Voice library</span><em>03</em>
+        </button>
+        <button type="button" class="nav-item" data-tab="library">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5h16M4 12h16M4 17.5h10"/></svg>
+          <span>My generations</span><em>04</em>
+        </button>
+        <button type="button" class="nav-item" data-tab="settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21H9.6v-.09A1.7 1.7 0 0 0 8.55 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3V9.6h.09A1.7 1.7 0 0 0 4.6 8.55a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.45 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.14.38.36.72.66 1 .3.27.68.4 1.08.4H21v4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></svg>
+          <span>Settings</span><em>05</em>
+        </button>
+      </nav>
+
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-card">
+        <div class="sidebar-card-orb">✦</div>
+        <strong>Cloud-powered speech</strong>
+        <p>Generation needs internet. Finished audio saves to your selected folder.</p>
+      </div>
+      <button type="button" class="contact-facebook hidden" id="btnContact" style="display:none!important" title="Support">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.2 8.2V6.5c0-.8.5-1 1-1h2.6V2.1L14.7 2C11.5 2 10 3.9 10 6.1v2.1H7.2V12H10v10h4.2V12h3.2l.5-3.8h-3.7Z"/></svg>
+        <span>Contact Us</span>
+        <span class="contact-arrow">↗</span>
+      </button>
+      <div class="engine" id="engineChip">
+        <span class="engine-dot"></span>
+        <span id="engineLabel">Connecting…</span>
+        <button type="button" id="btnRefreshVoices" title="Sync voice catalogue">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+        </button>
+      </div>
+      <div class="sidebar-version">TTS STUDIO / PRO</div>
+    </aside>
+
+    <section class="main-shell">
+      <header class="header">
+        <div class="page-heading">
+          <div class="eyebrow" id="pageEyebrow">CREATE / SINGLE VOICE</div>
+          <h1 id="pageTitle">Voice studio</h1>
+        </div>
+        <div class="header-actions">
+          <div class="connectivity-status checking" id="connectivityStatus" role="status" aria-live="polite">
+            <span class="connectivity-dot"></span>
+            <span id="connectivityLabel">Checking connection…</span>
+          </div>
+          <div class="shortcut"><span>⌘</span><span>↵</span></div>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <main class="canvas">
+          <div class="pane active" id="pane-studio">
+            <section class="intro">
+              <div>
+                <div class="section-kicker"><span></span> AI SPEECH SYNTHESIS</div>
+                <h2>Make every word<br /><em>sound alive.</em></h2>
+              </div>
+              <p>Write your script, choose a voice, and shape every detail. TTS STUDIO turns text into natural speech in seconds.</p>
+            </section>
+
+            <section class="card script-card grow">
+              <div class="card-bar">
+                <div class="card-title">
+                  <span class="step">01</span>
+                  <div><h3>Your script</h3><p>Type, paste, or start with an example</p></div>
+                </div>
+                <button type="button" class="text-action" id="btnSample">Use sample</button>
+              </div>
+              <div class="editor-shell">
+                <textarea id="scriptText" spellcheck="true" maxlength="50000" placeholder="Start typing something worth listening to…"></textarea>
+                <div class="editor-meta">
+                  <span id="charCount">0 characters</span>
+                  <span id="readTime">~ 0 sec audio</span>
+                </div>
+              </div>
+              <div class="card-foot actions-only">
+                <div class="row-gap">
+                  <button type="button" class="btn btn-ghost" id="btnClear">Clear</button>
+                  <button type="button" class="btn btn-preview" id="btnPreviewStudio">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 8 5-8 5V7Z"/></svg>
+                    Preview latest
+                  </button>
+                  <button type="button" class="btn btn-run" id="btnGenerate" disabled>
+                    <span class="btn-spark">✦</span>
+                    <span id="generateLabel">Generate audio</span>
+                    <svg class="generate-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <section class="card output-card">
+              <div class="output-top">
+                <div class="card-title">
+                  <span class="step dark">02</span>
+                  <div><h3>Your audio</h3><p id="progressText">Ready when your script is</p></div>
+                </div>
+                <span class="progress-number mono" id="progressPct">0%</span>
+              </div>
+              <div class="track"><i id="progressFill"></i></div>
+              <div class="player">
+                <div id="audioEmpty" class="empty-state">
+                  <div class="wave-mini" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                  <div><strong>No generation yet</strong><span>Your finished audio will appear here</span></div>
+                </div>
+                <audio id="player" class="hidden" controls></audio>
+              </div>
+              <div class="pathline">
+                <div><span>OUTPUT FILE</span><input id="outPath" type="text" readonly placeholder="No file generated" /></div>
+                <button type="button" class="btn btn-replay" id="btnReplay" disabled>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.34-5.66M4 4v8h8"/></svg>
+                  Replay
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <div class="pane" id="pane-podcast">
+            <section class="intro compact-intro">
+              <div><div class="section-kicker"><span></span> MULTI-VOICE BUILDER</div><h2>Build a conversation<br /><em>with character.</em></h2></div>
+              <p>Create your cast, write the dialogue, then render a production-ready audio track.</p>
+            </section>
+            <div class="pod-grid">
+              <section class="card">
+                <div class="card-bar">
+                  <div class="card-title"><span class="step">01</span><div><h3>Your cast</h3><p>Give every speaker a voice</p></div></div>
+                  <button type="button" class="btn btn-add" id="btnAddChar">＋ Add</button>
+                </div>
+                <div class="stack" id="charList"></div>
+              </section>
+              <section class="card">
+                <div class="card-bar">
+                  <div class="card-title"><span class="step">02</span><div><h3>Dialogue</h3><p>Write the scene line by line</p></div></div>
+                  <div class="pod-card-actions">
+                    <button type="button" class="btn btn-import" id="btnImportScript">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4M12 11v6M9 14h6"/></svg>
+                      Import script
+                    </button>
+                    <button type="button" class="btn btn-add" id="btnAddLine">＋ Add</button>
+                  </div>
+                </div>
+                <div class="stack" id="lineList"></div>
+              </section>
+            </div>
+            <section class="card podcast-render">
+              <div class="card-bar">
+                <div class="card-title"><span class="step dark">03</span><div><h3>Final mix</h3><p id="podProgressText">Your conversation is ready to render</p></div></div>
+                <div class="render-actions"><span class="mono" id="podProgressPct">0%</span><button type="button" class="btn btn-run" id="btnPodcast" disabled>✦ Generate podcast</button></div>
+              </div>
+              <div class="track"><i id="podProgressFill"></i></div>
+            </section>
+          </div>
+
+          <div class="pane" id="pane-library">
+            <section class="intro compact-intro">
+              <div><div class="section-kicker"><span></span> YOUR AUDIO ARCHIVE</div><h2>Everything you’ve made,<br /><em>in one place.</em></h2></div>
+              <p>A clean record of finished Studio and Podcast outputs from this session.</p>
+            </section>
+            <div class="kpi-row">
+              <div class="kpi"><span>AVAILABLE VOICES</span><b id="statVoices">0</b><i>↗</i></div>
+              <div class="kpi"><span>SESSION OUTPUTS</span><b id="statJobs">0</b><i>♪</i></div>
+              <div class="kpi"><span>PODCAST CAST</span><b id="statChars">0</b><i>◎</i></div>
+            </div>
+            <section class="card grow library-card">
+              <div class="card-bar"><div class="card-title"><span class="step">↗</span><div><h3>Recent generations</h3><p>Completed outputs are listed here for reference</p></div></div></div>
+              <div class="stack" id="historyList"></div>
+            </section>
+          </div>
+
+          <div class="pane full-pane" id="pane-voices">
+            <section class="wide-page-head">
+              <div><div class="section-kicker"><span></span> EXPLORE / ALL VOICES</div><h2>Voice library</h2><p>Browse, filter, and preview every available neural voice.</p></div>
+              <button type="button" class="btn btn-preview" id="btnLibraryRefresh"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>Refresh</button>
+            </section>
+            <section class="library-toolbar">
+              <div class="search-wrap library-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input type="search" id="libraryVoiceSearch" placeholder="Search by name, language, or locale…" /></div>
+              <select id="libraryLanguageFilter"></select>
+              <select id="libraryCountryFilter"></select>
+              <select id="libraryGenderFilter"><option value="all">All genders</option><option value="Female">Female</option><option value="Male">Male</option></select>
+            </section>
+            <div class="library-results"><span id="libraryVoiceCount">Showing 0 voices</span><button type="button" id="btnSort">A–Z ↓</button></div>
+            <section class="voice-library-grid" id="voiceList"></section>
+          </div>
+
+          <div class="pane full-pane" id="pane-settings">
+            <section class="wide-page-head settings-page-head">
+              <div><div class="section-kicker"><span></span> APP / PREFERENCES</div><h2>Settings</h2><p>Configure where TTS STUDIO stores finished audio.</p></div>
+            </section>
+            <section class="card settings-card">
+              <div class="setting-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v10H3z"/><path d="M3 7.5v-3h7l2 3"/></svg></div>
+              <div class="setting-copy"><h3>Output path <span>Required</span></h3><p>Studio generations and finished podcasts will be saved in this folder.</p><div class="folder-field"><input type="text" id="outputFolder" readonly placeholder="No output folder selected" /><button type="button" class="btn btn-run" id="btnChooseOutput">Choose folder</button></div><small id="outputFolderHint">Select a folder before generating audio.</small></div>
+            </section>
+          </div>
+        </main>
+
+        <aside class="inspector">
+          <div class="inspector-scroll">
+            <section class="insp-block voice-block">
+              <div class="insp-head"><div><span>VOICE DESIGN</span><h2>Choose a voice</h2></div><span class="voice-count" id="voiceCount">0</span></div>
+
+              <div class="selected-voice">
+                <div class="voice-avatar" id="selectedVoiceAvatar"><span>A</span><i></i></div>
+                <div class="selected-copy"><span>SELECTED VOICE</span><strong id="selectedVoiceName">No voice</strong><small id="selectedVoiceLabel">Select a voice below</small></div>
+              </div>
+
+              <div class="search-wrap">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+                <input type="search" id="voiceSearch" placeholder="Search voice, language…" />
+                <span>⌘K</span>
+              </div>
+
+              <div class="filter-trio">
+                <label><span>Language</span><select id="languageFilter"></select></label>
+                <label><span>Country</span><select id="countryFilter"></select></label>
+                <label><span>Voice</span><select id="genderFilter"><option value="all">All</option><option value="Female">Female</option><option value="Male">Male</option></select></label>
+              </div>
+
+              <label class="voice-select-label" for="voiceSelect">SELECT VOICE</label>
+              <select id="voiceSelect" class="studio-voice-select"><option value="">Choose a voice…</option></select>
+              <button type="button" class="open-library" id="btnOpenLibrary">Open full voice library <span>↗</span></button>
+              <div id="quickLocales" class="hidden"></div><div id="localeFilter" class="hidden"></div><button type="button" id="btnGenderCycle" class="hidden"></button>
+            </section>
+
+            <section class="insp-block params">
+              <div class="insp-head settings-head"><div><span>PERFORMANCE</span><h2>Voice settings</h2></div><button type="button" id="btnResetParams">Reset</button></div>
+              <div class="speed-presets" id="speedPresets">
+                <button type="button" class="preset" data-rate="0.75">Slow</button>
+                <button type="button" class="preset active" data-rate="1">Natural</button>
+                <button type="button" class="preset" data-rate="1.25">Fast</button>
+                <button type="button" class="preset" data-rate="1.5">Punchy</button>
+              </div>
+              <div class="control"><div class="control-row"><span>Speed</span><span class="mono" id="rateVal">+0%</span></div><input type="range" id="rate" min="0.5" max="2" step="0.05" value="1" /></div>
+              <div class="control"><div class="control-row"><span>Pitch</span><span class="mono" id="pitchVal">+0Hz</span></div><input type="range" id="pitch" min="0.5" max="1.5" step="0.05" value="1" /></div>
+              <div class="control"><div class="control-row"><span>Volume</span><span class="mono" id="volumeVal">+0%</span></div><input type="range" id="volume" min="0.5" max="1.5" step="0.05" value="1" /></div>
+            </section>
+          </div>
+        </aside>
+      </div>
+
+      <footer class="statusbar">
+        <div><span class="status-pulse"></span><strong id="dockTitle">Ready</strong><span id="dockSub">Pick a voice · write text · generate</span></div>
+        <span>SPEECH ENGINE / <b>ONLINE</b></span>
+      </footer>
+    </section>
+  </div>
+
+  <div class="access-gate checking" id="accessGate" role="dialog" aria-modal="true" aria-labelledby="accessGateTitle">
+    <section class="access-gate-card">
+      <div class="access-gate-glow" aria-hidden="true"></div>
+      <div class="access-gate-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.8 8.2 7 10 4.2-1.8 7-5.4 7-10V6l-7-3Z"/><path d="m9.2 12 1.8 1.8 3.9-4"/></svg>
+        <span>✦</span>
+      </div>
+      <div class="access-gate-eyebrow" id="accessGateEyebrow">STARTING TTS STUDIO</div>
+      <h2 id="accessGateTitle">Getting your studio ready</h2>
+      <p id="accessGateMessage">Please wait while TTS STUDIO connects to its online speech services.</p>
+      <div class="access-gate-status">
+        <span class="access-gate-spinner" id="accessGateSpinner" aria-hidden="true"></span>
+        <strong id="accessGateStatus">Connecting securely…</strong>
+      </div>
+      <div class="access-gate-actions">
+        <button type="button" class="access-retry hidden" id="btnAccessRetry">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+          <span>Try again</span>
+        </button>
+        <button type="button" class="access-contact hidden" id="btnAccessContact">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.2 8.2V6.5c0-.8.5-1 1-1h2.6V2.1L14.7 2C11.5 2 10 3.9 10 6.1v2.1H7.2V12H10v10h4.2V12h3.2l.5-3.8h-3.7Z"/></svg>
+          <span>Contact us</span>
+        </button>
+      </div>
+      <small class="access-gate-foot">TTS STUDIO · AI VOICE STUDIO</small>
+    </section>
+  </div>
+
+  <div class="modal-backdrop hidden" id="importModal" aria-hidden="true">
+    <section class="import-modal" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
+      <header class="import-modal-head">
+        <div class="import-modal-title">
+          <span class="import-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4M12 11v6M9 14h6"/></svg></span>
+          <div><span>AUTO-BUILD PODCAST</span><h2 id="importModalTitle">Import script</h2></div>
+        </div>
+        <button type="button" class="modal-close" id="btnCloseImport" aria-label="Close import dialog">×</button>
+      </header>
+      <div class="import-modal-body">
+        <p>Paste one dialogue per line using <code>Speaker: dialogue</code>. TTS STUDIO will automatically build your cast and scene.</p>
+        <label for="importScriptText">PODCAST SCRIPT</label>
+        <textarea id="importScriptText" spellcheck="true" placeholder="Alice: Welcome to the show! Today we're talking about AI voices.&#10;Bob: Thanks for having me. It's a fascinating topic.&#10;Alice: Let's dive right in."></textarea>
+        <div class="import-feedback" id="importFeedback"><span>Waiting for your script</span><small>Importing replaces the current cast and dialogue.</small></div>
+      </div>
+      <footer class="import-modal-foot">
+        <button type="button" class="btn modal-cancel" id="btnCancelImport">Cancel</button>
+        <button type="button" class="btn modal-continue" id="btnApplyImport" disabled><span id="importButtonLabel">Import script</span><span>→</span></button>
+      </footer>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+  <audio id="voicePreviewPlayer" class="hidden"></audio>
+  <div id="wave" class="hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

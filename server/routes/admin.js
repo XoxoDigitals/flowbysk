@@ -49,6 +49,8 @@ function sanitizeServerForAdmin(server, assignedUserCount = 0) {
     hasTotp: !!(totpSecret && String(totpSecret).trim()),
     totpSecret: totpSecret || '',
     ...currentTotp(totpSecret),
+    imageOnly: !!server.imageOnly,
+    accountType: server.imageOnly ? 'image' : 'all',
     hasCookies: !!server.hasCookies,
     cookieVersion: Number(server.cookieVersion) || 0,
     cookieMeta: server.cookieMeta || null,
@@ -814,7 +816,7 @@ router.post('/servers/totp-preview', requireAdminAuth, async (req, res) => {
 
 router.post('/servers', requireAdminAuth, async (req, res) => {
   try {
-    const { name, targetUrl, email, password, totpSecret, isActive } = req.body;
+    const { name, targetUrl, email, password, totpSecret, isActive, imageOnly, accountType } = req.body;
     if (!name) return res.status(400).json({ success: false, error: 'Server name is required' });
     const newServer = await db.createServer({
       name,
@@ -823,6 +825,8 @@ router.post('/servers', requireAdminAuth, async (req, res) => {
       password: password || '',
       totpSecret: totpSecret || '',
       isActive: isActive !== undefined ? isActive : true,
+      imageOnly: !!imageOnly || accountType === 'image',
+      accountType: (imageOnly || accountType === 'image') ? 'image' : 'all',
     });
     await db.addLog('admin', 'admin', 'create_server', {
       serverName: name,

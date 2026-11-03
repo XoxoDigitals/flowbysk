@@ -186,39 +186,7 @@ class AdminApp {
       document.getElementById('stat-active-users').textContent = data.metrics.activeUsers;
       document.getElementById('stat-expired-users').textContent = data.metrics.expiredUsers;
       document.getElementById('stat-total-credits').textContent = data.metrics.totalCredits.toLocaleString();
-      const period = data.metrics.period;
-      if (period && !period.error) {
-        const fmt = (iso) => {
-          try {
-            return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }) + ' UTC';
-          } catch {
-            return iso;
-          }
-        };
-        document.getElementById('period-window-label').textContent =
-          `${fmt(period.periodStart)} → ${fmt(period.periodEnd)}`;
-        document.getElementById('stat-period-new').textContent = period.newUsers ?? 0;
-        document.getElementById('stat-period-renewals').textContent = period.renewals ?? 0;
-        document.getElementById('stat-period-total').textContent = period.total ?? 0;
-      }
     }
-  }
-
-  formatLogDetails(details) {
-    if (!details || typeof details !== 'object') return details == null ? '' : String(details);
-    const parts = [];
-    if (details.ip) parts.push(`IP ${details.ip}`);
-    if (details.country) parts.push(details.country);
-    if (details.deviceId) parts.push(`Device ${details.deviceId}`);
-    if (details.client) parts.push(details.client);
-    if (details.code) parts.push(details.code);
-    if (details.reason) parts.push(details.reason);
-    if (details.cascadeCount) parts.push(`cascade:${details.cascadeCount}`);
-    if (Array.isArray(details.cascaded) && details.cascaded.length) {
-      parts.push(`also banned: ${details.cascaded.join(', ')}`);
-    }
-    if (parts.length) return parts.join(' · ');
-    try { return JSON.stringify(details); } catch { return ''; }
   }
 
   async loadUsers() {
@@ -322,11 +290,20 @@ class AdminApp {
       const totpBadge = hasTotp
         ? '<span class="badge badge-success">TOTP Ready</span>'
         : '<span class="badge badge-danger">TOTP Missing</span>';
+      const cookieBadge = s.hasCookies
+        ? `<span class="badge badge-success">Cookies v${s.cookieVersion || 1}</span>`
+        : '<span class="badge badge-danger">No cookies (v5)</span>';
+      const earliest = s.cookieMeta?.earliestExpiryIso
+        ? s.cookieMeta.earliestExpiryIso
+        : (s.cookieMeta?.sessionCount ? `${s.cookieMeta.sessionCount} session` : '—');
       return `
         <div class="server-node-card">
           <div class="server-card-header">
             <span class="server-card-title">${s.name}</span>
-            <span class="badge ${s.isActive ? 'badge-success' : 'badge-danger'}">${s.isActive ? 'Active' : 'Disabled'}</span>
+            <div style="display:flex;gap:6px;align-items:center;">
+              ${s.imageOnly ? '<span class="badge badge-info" style="background:rgba(99,102,241,0.22);color:#c7d2fe;border:1px solid rgba(99,102,241,0.4);">Image Only (0 Cost)</span>' : '<span class="badge badge-neutral">Video + Image</span>'}
+              <span class="badge ${s.isActive ? 'badge-success' : 'badge-danger'}">${s.isActive ? 'Active' : 'Disabled'}</span>
+            </div>
           </div>
           <div class="server-meta-item">
             <span class="server-meta-label">Target URL:</span>
@@ -343,6 +320,10 @@ class AdminApp {
           <div class="server-meta-item">
             <span class="server-meta-label">Authenticator:</span>
             <span class="server-meta-val">${totpBadge}</span>
+          </div>
+          <div class="server-meta-item">
+            <span class="server-meta-label">v5 Cookies:</span>
+            <span class="server-meta-val">${cookieBadge} · ${earliest}</span>
           </div>
           <div class="server-card-actions">
             <button class="btn btn-sm btn-secondary" onclick="app.openEditServerModal('${s.id}')">Edit Account</button>
@@ -428,19 +409,15 @@ class AdminApp {
       const time = new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + ' ' + new Date(log.timestamp).toLocaleDateString();
       let badge = '<span class="badge badge-neutral">' + log.action + '</span>';
       if (log.action === 'client_login') badge = '<span class="badge badge-success">Client Login</span>';
-      if (log.action === 'suspicious_login') badge = '<span class="badge badge-danger">Suspicious</span>';
-      if (log.action === 'login_failed') badge = '<span class="badge badge-neutral">Login Failed</span>';
-      if (log.action === 'ban_user') badge = '<span class="badge badge-danger">Ban</span>';
       if (log.action === 'switch_server') badge = '<span class="badge badge-info">Switch Server</span>';
       if (log.action === 'use_credit') badge = '<span class="badge badge-neutral">Credit Usage</span>';
-      const detailText = this.formatLogDetails(log.details);
 
       return `
         <tr>
           <td style="color:#64748b;font-family:var(--font-mono);font-size:0.75rem;">${time}</td>
-          <td><strong>${log.username || '—'}</strong></td>
+          <td><strong>${log.username}</strong></td>
           <td>${badge}</td>
-          <td style="font-family:var(--font-mono);font-size:0.75rem;color:#94a3b8;">${detailText}</td>
+          <td style="font-family:var(--font-mono);font-size:0.75rem;color:#94a3b8;">${JSON.stringify(log.details)}</td>
         </tr>
       `;
     }).join('');
@@ -451,9 +428,9 @@ class AdminApp {
       return `
         <tr>
           <td style="color:#64748b;font-size:0.8rem;">${time}</td>
-          <td><strong>${log.username || '—'}</strong></td>
+          <td><strong>${log.username}</strong></td>
           <td><span class="badge badge-neutral">${log.action}</span></td>
-          <td style="font-size:0.8rem;color:#94a3b8;">${this.formatLogDetails(log.details)}</td>
+          <td style="font-size:0.8rem;color:#94a3b8;">${JSON.stringify(log.details)}</td>
         </tr>
       `;
     }).join('');
@@ -581,6 +558,8 @@ class AdminApp {
     document.getElementById('server-form-totp-secret').value = '';
     document.getElementById('server-totp-preview').textContent = '';
     document.getElementById('server-form-active').checked = true;
+    const imgOnlyEl = document.getElementById('server-form-image-only');
+    if (imgOnlyEl) imgOnlyEl.checked = false;
 
     this.serverModal.classList.remove('hidden');
   }
@@ -598,6 +577,8 @@ class AdminApp {
     document.getElementById('server-form-totp-secret').value = server.totpSecret || '';
     document.getElementById('server-totp-preview').textContent = '';
     document.getElementById('server-form-active').checked = server.isActive;
+    const imgOnlyEl = document.getElementById('server-form-image-only');
+    if (imgOnlyEl) imgOnlyEl.checked = !!server.imageOnly;
 
     this.serverModal.classList.remove('hidden');
   }
@@ -628,8 +609,10 @@ class AdminApp {
     const password = document.getElementById('server-form-password').value;
     const totpSecret = document.getElementById('server-form-totp-secret').value.trim();
     const isActive = document.getElementById('server-form-active').checked;
+    const imgOnlyEl = document.getElementById('server-form-image-only');
+    const imageOnly = imgOnlyEl ? imgOnlyEl.checked : false;
 
-    const payload = { name, targetUrl, email, password, totpSecret, isActive };
+    const payload = { name, targetUrl, email, password, totpSecret, isActive, imageOnly };
 
     let res;
     if (id) {

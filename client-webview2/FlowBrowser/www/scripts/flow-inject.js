@@ -31,8 +31,8 @@
 })();
 const { ipcRenderer } = window;
 
-if (window.__flowInjectBootstrapped) {
-  console.warn('[Flow Inject] duplicate inject skipped');
+if (window.__flowInjectBootstrapped || location.hostname === 'app.flowbrowser.localhost' || location.hostname === 'flowbrowser.local') {
+  // Skip duplicate inject or built-in local studio pages (TTS STUDIO)
 } else {
   window.__flowInjectBootstrapped = true;
 
@@ -55,27 +55,66 @@ function normalizeModelLabel(text) {
  * Blocked model picker labels — hide ONLY these four so other options stay.
  * Keep "lower priority" / alternate variants and image models visible.
  */
-function isBlockedModelLabel(text) {
-  if (!text) return false;
-  const t = normalizeModelLabel(text);
-  if (!t || t.length > 120) return false;
-  // Always keep lower-priority / alternate SKUs
-  if (/lower\s*priority/i.test(t)) return false;
-  // Never hide image models / UI chrome
-  if (/banana|nano|imagen|\bimage\b|frames|ingredients|aspect|duration|resolution/i.test(t)) return false;
-
-  const n = t.toLowerCase();
-  // Exact / near-exact matches for the four Flow menu items
-  if (/^omni\s*1\.?1\s*flash$/i.test(t) || (/\bomni\b/i.test(n) && /\bflash\b/i.test(n))) return true;
-  if (/^veo\s*3\.?1\s*[-–—]?\s*lite$/i.test(t)) return true;
-  if (/^veo\s*3\.?1\s*[-–—]?\s*fast$/i.test(t)) return true;
-  if (/^veo\s*3\.?1\s*[-–—]?\s*quality$/i.test(t)) return true;
-  // Broader: Veo 3.1 Lite/Fast/Quality without lower-priority suffix
-  if (/veo\s*3\.?1/i.test(n) && /\blite\b/i.test(n) && !/lower/i.test(n)) return true;
-  if (/veo\s*3\.?1/i.test(n) && /\bfast\b/i.test(n) && !/lower/i.test(n)) return true;
-  if (/veo\s*3\.?1/i.test(n) && /\bquality\b/i.test(n) && !/lower/i.test(n)) return true;
+function isBlockedModelLabel(_text) {
+  // PakFlow mode: keep all standard models visible in dropdown; [Lower Priority] is hidden via data-hide-lp="true"
   return false;
 }
+
+let fakeModelName = '';
+const creditMap = {
+  'Omni 1.1 Flash': '12',
+  'Veo 3.1 - Lite': '5',
+  'Veo 3.1 - Fast': '10',
+  'Veo 3.1 - Quality': '100'
+};
+
+let fakeBalance = 0;
+let serverDatabaseCredits = 0;
+let hasDatabaseCredits = false;
+const activeGenerationJobs = [];
+
+function recalcDisplayedBalance() {
+  fakeBalance = Math.max(0, serverDatabaseCredits);
+  try { localStorage.setItem('pakflow_db_credits', String(fakeBalance)); } catch (e) {}
+  try {
+    const totalCreditsLink = document.querySelector("a[href*='flow_ai_credits_page']");
+    if (totalCreditsLink) {
+      totalCreditsLink.setAttribute('data-fake-total-credits', String(fakeBalance));
+    }
+  } catch (e) {}
+}
+
+function loadFakeBalance() {
+  try {
+    const raw = localStorage.getItem('pakflow_db_credits');
+    if (raw !== null && !isNaN(parseInt(raw, 10))) {
+      serverDatabaseCredits = Math.max(0, parseInt(raw, 10));
+      fakeBalance = serverDatabaseCredits;
+    }
+  } catch (e) {}
+  try {
+    ipcRenderer.sendToHost('request-credits');
+  } catch (e) {}
+}
+
+function saveFakeBalance(val) {
+  serverDatabaseCredits = Math.max(0, parseInt(val, 10) || 0);
+  recalcDisplayedBalance();
+}
+
+window.__flowSetDatabaseCredits = function (val) {
+  if (val !== undefined && val !== null && !isNaN(Number(val))) {
+    hasDatabaseCredits = true;
+    serverDatabaseCredits = Math.max(0, Math.floor(Number(val)));
+    recalcDisplayedBalance();
+  }
+};
+ipcRenderer.on('apply-user-credits', (event, data) => {
+  if (data && data.credits !== undefined) {
+    window.__flowSetDatabaseCredits(data.credits);
+  }
+});
+loadFakeBalance();
 
 let maskingRules = {
   modelRenames: [],
@@ -86,7 +125,35 @@ let maskingRules = {
 let credentials = {
   email: '',
   password: '',
-  targetUrl: 'https://flow.google.com'
+  targetUrl: 'https://flow.google.com',
+  imageOnly: false
+};
+try {
+  if (sessionStorage.getItem('__flow_image_only') === '1') {
+    credentials.imageOnly = true;
+  }
+} catch (e) {}
+
+function isImageOnlyAccount() {
+  return !!credentials.imageOnly;
+}
+
+window.__flowSetImageOnlyMode = function (flag) {
+  credentials.imageOnly = !!flag;
+  try {
+    sessionStorage.setItem('__flow_image_only', credentials.imageOnly ? '1' : '0');
+  } catch (e) {}
+  if (document.body) {
+    if (credentials.imageOnly) {
+      document.body.setAttribute('data-flow-image-only', 'true');
+    } else {
+      document.body.removeAttribute('data-flow-image-only');
+      document.querySelectorAll('[data-hide-image-only="true"]').forEach((el) => {
+        el.removeAttribute('data-hide-image-only');
+        el.style.removeProperty('display');
+      });
+    }
+  }
 };
 
 let autoLoginState = {
@@ -103,6 +170,7 @@ let autoLoginState = {
   pathSeenAt: {},
   lastPath: '',
   pwdUiReloadTried: false,
+  selectionUiReloadTried: false,
   otpRequested: false,
   otpFilled: false,
   captchaPaused: false,
@@ -174,6 +242,7 @@ const processedGenerationIds = new Set();
 let pendingGeneration = null;
 
 function getActivePromptMode() {
+  if (isImageOnlyAccount()) return 'image';
   try {
     const allButtons = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]'));
     const imgBtn = allButtons.find(b => {
@@ -300,27 +369,31 @@ function getGenerationModelDetails(forceType = '', modelHint = '', requestBodyTe
   }
 
   if (activeMode === 'video') {
-    return { type: 'video', modelName: 'Veo 3.1 - Fast', rate: 10 };
+    let detectedModel = fakeModelName;
+    if (!detectedModel) {
+      const rawDom = getActiveDomModelText();
+      if (rawDom.includes('Quality')) detectedModel = 'Veo 3.1 - Quality';
+      else if (rawDom.includes('Fast')) detectedModel = 'Veo 3.1 - Fast';
+      else if (rawDom.includes('Omni')) detectedModel = 'Omni 1.1 Flash';
+      else if (rawDom.includes('Lite')) detectedModel = 'Veo 3.1 - Lite';
+    }
+    const mName = detectedModel && creditMap[detectedModel] ? detectedModel : 'Veo 3.1 - Fast';
+    const mRate = parseInt(creditMap[mName] || '5', 10) || 5;
+    return { type: 'video', modelName: mName, rate: mRate };
   }
 
-  // Active mode is IMAGE:
+  // Active mode is IMAGE (0 credit cost — free image generation):
   const imageSearchStr = reqStr + ' ' + domModelStr;
-  
-  // 1. Nano Banana Pro -> 8 credits
   if (imageSearchStr.includes('banana pro') || imageSearchStr.includes('nano banana pro') || imageSearchStr.includes('banana-pro') || imageSearchStr.includes('pro')) {
-    return { type: 'image', modelName: 'Nano Banana Pro', rate: 8 };
+    return { type: 'image', modelName: 'Nano Banana Pro', rate: 0 };
   }
-
-  // 2. Nano Banana Lite / Nano Banana 2 Lite -> 3 credits
   if (imageSearchStr.includes('banana lite') || imageSearchStr.includes('banana 2 lite') || imageSearchStr.includes('nano banana lite') || imageSearchStr.includes('nano banana 2 lite') || imageSearchStr.includes('banana-lite') || imageSearchStr.includes('lite')) {
-    return { type: 'image', modelName: 'Nano Banana Lite', rate: 3 };
+    return { type: 'image', modelName: 'Nano Banana Lite', rate: 0 };
   }
-
-  // 3. Nano Banana 2 -> 5 credits
-  return { type: 'image', modelName: 'Nano Banana 2', rate: 5 };
+  return { type: 'image', modelName: 'Nano Banana 2', rate: 0 };
 }
 
-function showGenerationToast(type, modelName, amount, count) {
+function showGenerationToast(type, modelName, amount, count, isRefund = false) {
   try {
     let toast = document.getElementById('flow-generation-toast');
     if (!toast) {
@@ -328,8 +401,8 @@ function showGenerationToast(type, modelName, amount, count) {
       toast.id = 'flow-generation-toast';
       toast.style.cssText = `
         position: fixed;
-        bottom: 24px;
-        right: 24px;
+        bottom: 68px;
+        right: 22px;
         background: #111827;
         border: 1px solid rgba(56, 189, 248, 0.4);
         color: #f3f4f6;
@@ -349,11 +422,21 @@ function showGenerationToast(type, modelName, amount, count) {
       (document.body || document.documentElement).appendChild(toast);
     }
     const label = type === 'video' ? `${count} Video(s)` : `${count} Image(s)`;
-    toast.innerHTML = `
-      <span style="color:#38bdf8;font-size:15px;">Ã¢Å¡Â¡</span>
-      <span>${modelName || label}</span>
-      <span style="background:rgba(239, 68, 68, 0.2); color:#f87171; padding:2px 8px; border-radius:4px; font-size:12px; margin-left:4px;">-${amount} Credits</span>
-    `;
+    if (isRefund) {
+      toast.style.borderColor = 'rgba(16, 185, 129, 0.55)';
+      toast.innerHTML = `
+        <span style="color:#10b981;font-size:15px;">⚡</span>
+        <span>${modelName || label} (Failed)</span>
+        <span style="background:rgba(16, 185, 129, 0.2); color:#34d399; padding:2px 8px; border-radius:4px; font-size:12px; margin-left:4px;">+${amount} Credits Refunded</span>
+      `;
+    } else {
+      toast.style.borderColor = 'rgba(56, 189, 248, 0.4)';
+      toast.innerHTML = `
+        <span style="color:#38bdf8;font-size:15px;">⚡</span>
+        <span>${modelName || label}</span>
+        <span style="background:rgba(239, 68, 68, 0.2); color:#f87171; padding:2px 8px; border-radius:4px; font-size:12px; margin-left:4px;">-${amount} Credits</span>
+      `;
+    }
     toast.style.opacity = '1';
     toast.style.transform = 'translateY(0)';
 
@@ -361,28 +444,25 @@ function showGenerationToast(type, modelName, amount, count) {
     toast._timeout = setTimeout(() => {
       toast.style.opacity = '0';
       toast.style.transform = 'translateY(10px)';
-    }, 3500);
+    }, 3800);
   } catch (err) {
     console.error('[Flow Toast Error]', err);
   }
 }
 
+// Immediate direct deduction (used only for 4K Upscale)
 function deductCredits(modelDetails, count = 1, uniqueId = '') {
-  if (uniqueId && processedGenerationIds.has(uniqueId)) {
-    return; // Prevent duplicate billing for the same media item
-  }
-  if (uniqueId) {
-    processedGenerationIds.add(uniqueId);
-  }
+  if (uniqueId && processedGenerationIds.has(uniqueId)) return;
+  if (uniqueId) processedGenerationIds.add(uniqueId);
 
   const effectiveCount = Math.max(1, count || 1);
   const { type, modelName, rate } = modelDetails;
   const totalAmount = rate * effectiveCount;
-  const reason = `${modelName}: Generated ${effectiveCount} ${type}(s) (${rate} cr/ea)`;
+  const reason = `${modelName}: ${effectiveCount} ${type}(s) (${rate} cr/ea)`;
 
-  console.log(`[Flow Credit Engine] Deducting ${totalAmount} credits for ${effectiveCount} ${type}(s) using ${modelName}. Reason: ${reason}`);
+  serverDatabaseCredits = Math.max(0, serverDatabaseCredits - totalAmount);
+  recalcDisplayedBalance();
 
-  // Send IPC message to Flow Browser app-shell (which calls server /api/{v2|v3}/client/use-credit)
   ipcRenderer.sendToHost('credit:deduct', {
     amount: totalAmount,
     count: effectiveCount,
@@ -391,131 +471,409 @@ function deductCredits(modelDetails, count = 1, uniqueId = '') {
     reason
   });
 
-  // Display user HUD notification
-  showGenerationToast(type, modelName, totalAmount, effectiveCount);
+  showGenerationToast(type, modelName, totalAmount, effectiveCount, false);
 }
 
-// Analyze response data from Google Flow to detect generation completion
+// Start a tracked generation job: deducts ONCE on start (UI + DB) for every prompt (1st, 2nd, 3rd concurrent) and refunds if that job fails
+let lastJobStartTime = 0;
+let lastTypedPromptText = '';
+let lastTypedPromptAt = 0;
+const seenPendingTiles = new WeakSet();
+const seenGridTiles = new WeakSet();
+
+function getPromptTextboxContent() {
+  try {
+    const editors = document.querySelectorAll('div[role="textbox"], flow-rich-text-editor, textarea, [contenteditable="true"]');
+    for (const ed of editors) {
+      if (ed.closest('#flow-saved-projects-backdrop, #flow-my-projects-dock, header')) continue;
+      const t = (ed.innerText || ed.value || ed.textContent || '').trim();
+      if (t) return t;
+    }
+  } catch (e) {}
+  return '';
+}
+
+// Track prompt text continuously so if Enter clears the textbox first, we still know it had text
+document.addEventListener('input', () => {
+  const t = getPromptTextboxContent();
+  if (t) {
+    lastTypedPromptText = t;
+    lastTypedPromptAt = Date.now();
+  }
+}, true);
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') {
+    const t = getPromptTextboxContent();
+    if (t) {
+      lastTypedPromptText = t;
+      lastTypedPromptAt = Date.now();
+    }
+  }
+}, true);
+
+function startGenerationJob(source = '', boundPendingTile = null) {
+  const now = Date.now();
+  // Short 250ms debounce only to prevent Enter + synthetic click on the exact same millisecond from double-firing
+  if (!boundPendingTile && (now - lastJobStartTime < 250)) return null;
+  lastJobStartTime = now;
+
+  const mode = pendingGeneration ? pendingGeneration.modelDetails.type : getActivePromptMode();
+  const multiplier = pendingGeneration ? (pendingGeneration.multiplier || 1) : getActiveBatchMultiplier();
+  const details = pendingGeneration ? pendingGeneration.modelDetails : getGenerationModelDetails(mode);
+  if (isImageOnlyAccount() || mode === 'image' || details.type === 'image' || !details.rate || details.rate <= 0) {
+    pendingGeneration = null;
+    isWaitingForPercentage = false;
+    lastTypedPromptText = '';
+    markInitialMediaAsSeen();
+    return null;
+  }
+  const totalAmount = Math.max(1, details.rate * multiplier);
+
+  pendingGeneration = null;
+  isWaitingForPercentage = false;
+  lastTypedPromptText = '';
+
+  // Snapshot existing completed media before this job completes
+  markInitialMediaAsSeen();
+
+  const tileContainer = boundPendingTile ? boundPendingTile.closest('flow-grid-tile-container') : null;
+
+  const job = {
+    id: 'job_' + now + '_' + Math.random().toString(36).slice(2, 6),
+    modelDetails: details,
+    multiplier: multiplier,
+    amount: totalAmount,
+    startedAt: now,
+    status: 'running',
+    dbCommitted: true,
+    refunded: false,
+    sawProgress: !!boundPendingTile,
+    lastProgressAt: boundPendingTile ? now : 0,
+    pendingTileEl: boundPendingTile || null,
+    tileContainerEl: tileContainer || null,
+    projectPath: window.location.pathname,
+    source: source
+  };
+
+  activeGenerationJobs.push(job);
+
+  // Deduct ONCE immediately on start (both UI and DB stay 100% synced)
+  serverDatabaseCredits = Math.max(0, serverDatabaseCredits - totalAmount);
+  recalcDisplayedBalance();
+
+  const { type, modelName, rate } = details;
+  const reason = `${modelName}: Generated ${multiplier} ${type}(s) (${rate} cr/ea)`;
+  ipcRenderer.sendToHost('credit:deduct', {
+    amount: totalAmount,
+    count: multiplier,
+    type,
+    modelName,
+    reason,
+    jobId: job.id
+  });
+
+  showGenerationToast(type, modelName, totalAmount, multiplier, false);
+  console.log('[Flow Credit Engine] Started generation job (1x deduction):', job.id, modelName, '-' + totalAmount, 'Source:', source);
+  return job;
+}
+
+function completeSpecificJob(job, triggerReason = '') {
+  if (!job || job.status !== 'running') return false;
+  job.status = 'completed';
+  job.completedAt = Date.now();
+  console.log('[Flow Credit Engine] Generation job completed (no 2nd deduction):', job.id, triggerReason);
+  return true;
+}
+
+// Complete the oldest running job -> mark completed WITHOUT deducting a second time!
+function completeOldestRunningJob(triggerReason = '') {
+  const job = activeGenerationJobs.find((j) => j && j.status === 'running');
+  return completeSpecificJob(job, triggerReason);
+}
+
+function failSpecificJob(job, failReason = '') {
+  if (!job || job.refunded || job.status === 'failed') return false;
+
+  job.status = 'failed';
+  job.refunded = true;
+
+  serverDatabaseCredits += job.amount;
+  recalcDisplayedBalance();
+
+  ipcRenderer.sendToHost('credit:refund', {
+    amount: job.amount,
+    count: job.multiplier,
+    type: job.modelDetails.type,
+    modelName: job.modelDetails.modelName,
+    reason: 'Refund: ' + (failReason || 'generation failed'),
+    jobId: job.id
+  });
+
+  console.log('[Flow Credit Engine] Generation job FAILED — refunded +' + job.amount + ' credits:', job.id, failReason);
+  showGenerationToast(job.modelDetails.type, job.modelDetails.modelName, job.amount, job.multiplier, true);
+  return true;
+}
+
+// Fail & refund the oldest running job (or most recently started running job if an immediate API error occurred)
+function failOldestRunningJob(failReason = '') {
+  let job = activeGenerationJobs.find((j) => j && j.status === 'running' && !j.refunded);
+  return failSpecificJob(job, failReason);
+}
+
+// Helper to inspect a flow-grid-tile-container's live state (matches veo-content-bundle.js V() logic)
+function inspectFlowGridTileState(tileEl) {
+  if (!tileEl) return { hasResource: false, hasPending: false, hasErrorIcon: false };
+  const videos = tileEl.querySelectorAll('video');
+  let hasVideo = false;
+  videos.forEach((v) => {
+    if (v.src || v.currentSrc || v.querySelector('source[src]')) hasVideo = true;
+  });
+  const imgs = tileEl.querySelectorAll('img');
+  let hasImage = false;
+  imgs.forEach((im) => {
+    const s = im.src || im.getAttribute('src') || '';
+    if (s && !s.includes('avatar') && !s.includes('icon')) hasImage = true;
+  });
+  const hasResource = hasVideo || hasImage;
+
+  const hasPendingTile = tileEl.querySelector('flow-pending-tile') !== null;
+  let hasPercentage = false;
+  const divs = tileEl.querySelectorAll('div, span');
+  for (const d of divs) {
+    if (d.children.length === 0 && /^\d+%$/.test((d.textContent || '').trim())) {
+      hasPercentage = true;
+      break;
+    }
+  }
+  const hasPending = hasPendingTile || hasPercentage;
+
+  let hasErrorIcon = false;
+  const icons = tileEl.querySelectorAll('mat-icon, i.google-symbols, .material-icons');
+  for (const ic of icons) {
+    const it = (ic.textContent || '').trim().toLowerCase();
+    if (it === 'warning' || it === 'warning_amber' || it === 'error' || it === 'error_outline' || it === 'report' || it === 'block') {
+      hasErrorIcon = true;
+      break;
+    }
+  }
+
+  return { hasResource, hasPending, hasErrorIcon };
+}
+
+function isUploadOrAssetPendingTile(pt) {
+  if (!pt) return false;
+  if (pt.closest('flow-add-menu-popover-content, flow-add-menu-asset-list, flow-ingredient-bar, [role="dialog"], [role="menu"]')) {
+    return true;
+  }
+  const txt = (pt.textContent || '').toLowerCase();
+  if (txt.includes('upload') || txt.includes('importing')) return true;
+  // Check if user uploaded a file very recently and no prompt was submitted
+  if (window.__flowLastUploadActionAt && (Date.now() - window.__flowLastUploadActionAt < 25000)) {
+    return true;
+  }
+  return false;
+}
+
+// Track file input selections & upload clicks so file uploads are never mistaken for video/image generations
+document.addEventListener('change', (e) => {
+  if (e.target && e.target.tagName === 'INPUT' && e.target.type === 'file') {
+    window.__flowLastUploadActionAt = Date.now();
+  }
+}, true);
+
+document.addEventListener('drop', (e) => {
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+    window.__flowLastUploadActionAt = Date.now();
+  }
+}, true);
+
+// Scan all flow-pending-tile and flow-grid-tile-container elements to bind concurrent jobs & detect per-tile completion or failure
+function updateConcurrentTileJobs() {
+  const now = Date.now();
+
+  // During initial 3.5s after page load or navigation, mark existing tiles as pre-existing
+  if (!pageInitialLoadDone || now - lastNavigationTime < 3500) {
+    document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
+    document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
+    return;
+  }
+
+  // 1. Bind any newly mounted <flow-pending-tile> to an unlinked running job
+  const pendingTiles = document.querySelectorAll('flow-pending-tile');
+  for (const pt of pendingTiles) {
+    if (seenPendingTiles.has(pt)) continue;
+    seenPendingTiles.add(pt);
+
+    const container = pt.closest('flow-grid-tile-container');
+    if (container) seenGridTiles.add(container);
+
+    if (isUploadOrAssetPendingTile(pt)) {
+      continue;
+    }
+
+    // Look for an unlinked running job started recently by prompt submit
+    const unlinkedJob = activeGenerationJobs.find(
+      (j) => j && j.status === 'running' && !j.pendingTileEl && (now - j.startedAt < 15000)
+    );
+    if (unlinkedJob) {
+      unlinkedJob.pendingTileEl = pt;
+      unlinkedJob.tileContainerEl = container || null;
+      unlinkedJob.sawProgress = true;
+      unlinkedJob.lastProgressAt = now;
+      console.log('[Flow Credit Engine] Linked pending tile to running job:', unlinkedJob.id);
+    }
+  }
+
+  // 2. Also check if any brand-new <flow-grid-tile-container> mounted directly in an error/warning state (no pending tile and no media)
+  const gridTiles = document.querySelectorAll('flow-grid-tile-container');
+  for (const gt of gridTiles) {
+    if (seenGridTiles.has(gt)) continue;
+    const state = inspectFlowGridTileState(gt);
+    if (state.hasPending || state.hasResource) {
+      seenGridTiles.add(gt);
+      continue;
+    }
+    // New grid tile has neither pending nor resource yet: record first-seen timestamp on element
+    if (!gt.__flowFirstEmptySeenAt) {
+      gt.__flowFirstEmptySeenAt = now;
+    } else if (now - gt.__flowFirstEmptySeenAt > 2000) {
+      seenGridTiles.add(gt);
+      // If there's a running job waiting for a tile, this tile failed!
+      const unlinkedOrRunning = activeGenerationJobs.find((j) => j && j.status === 'running' && !j.refunded);
+      if (unlinkedOrRunning) {
+        failSpecificJob(unlinkedOrRunning, 'New tile mounted in warning/empty error state');
+      }
+    }
+  }
+
+  // 3. Check each active running job's bound tile state
+  for (const job of activeGenerationJobs) {
+    if (!job || job.status !== 'running' || job.refunded) continue;
+
+    // If user navigated away to a different project URL, don't false-refund from DOM removal
+    if (job.projectPath && window.location.pathname !== job.projectPath && !job.projectPath.endsWith('/')) {
+      continue;
+    }
+
+    if (job.tileContainerEl || job.pendingTileEl) {
+      const container = (job.tileContainerEl && job.tileContainerEl.isConnected)
+        ? job.tileContainerEl
+        : (job.pendingTileEl && job.pendingTileEl.isConnected ? job.pendingTileEl.closest('flow-grid-tile-container') : null);
+
+      const pendingStillConnected = !!(job.pendingTileEl && job.pendingTileEl.isConnected);
+
+      if (container) {
+        const state = inspectFlowGridTileState(container);
+        if (state.hasResource) {
+          completeSpecificJob(job, 'Bound tile media mounted');
+          continue;
+        }
+        if (state.hasPending || pendingStillConnected) {
+          job.sawProgress = true;
+          job.lastProgressAt = now;
+          job.pendingDisconnectedAt = 0;
+          continue;
+        }
+        // Neither pending nor resource inside the bound container!
+        if (state.hasErrorIcon) {
+          failSpecificJob(job, 'Bound tile showed warning/error icon');
+          continue;
+        }
+        if (!job.pendingDisconnectedAt) {
+          job.pendingDisconnectedAt = now;
+        } else if (now - job.pendingDisconnectedAt > 2200) {
+          checkForNewGeneratedMedia();
+          if (job.status === 'running') {
+            failSpecificJob(job, 'Bound tile finished without producing video/image');
+          }
+        }
+      } else if (!pendingStillConnected) {
+        // Both pendingTileEl and tileContainerEl were removed from DOM
+        if (!job.pendingDisconnectedAt) {
+          job.pendingDisconnectedAt = now;
+        } else if (now - job.pendingDisconnectedAt > 2500) {
+          checkForNewGeneratedMedia();
+          if (job.status === 'running') {
+            failSpecificJob(job, 'Pending tile removed from DOM without producing media');
+          }
+        }
+      }
+    } else {
+      // Job was started by user submit, but no <flow-pending-tile> has bound to it yet
+      if (now - job.startedAt > 12000) {
+        checkForNewGeneratedMedia();
+        if (job.status === 'running') {
+          failSpecificJob(job, 'Prompt submission did not start generation tile within 12s');
+        }
+      }
+    }
+  }
+}
+
+// Inspect JSON response data from Google Flow to detect generation completion or explicit API failure
 function inspectDataForGenerations(url, data, requestBodyText = '') {
-  if (!data) return;
-
+  if (!data || typeof data !== 'object') return;
   const urlLower = (url || '').toLowerCase();
-  const reqLower = (requestBodyText || '').toLowerCase();
 
-  // Check if this is a generation endpoint
-  const isGenerationEndpoint =
-    urlLower.includes('batchgenerate') ||
-    urlLower.includes('batch_generate') ||
-    urlLower.includes('generatevideo') ||
-    urlLower.includes('generateimage') ||
-    urlLower.includes('aisandbox') ||
-    urlLower.includes('operations/') ||
-    reqLower.includes('batchgenerate') ||
-    reqLower.includes('generate');
-
-  // If this is a project listing or account query, NEVER deduct credits
-  const isListingEndpoint =
+  if (
     urlLower.includes('listprojects') ||
     urlLower.includes('listmedia') ||
     urlLower.includes('/projects?') ||
     urlLower.includes('userinfo') ||
-    urlLower.includes('session');
-
-  if (isListingEndpoint) return;
-
-  const isVideo = urlLower.includes('video') || urlLower.includes('veo') || reqLower.includes('video') || reqLower.includes('veo');
-  const isImage = urlLower.includes('image') || urlLower.includes('imagen') || urlLower.includes('banana') || reqLower.includes('image') || reqLower.includes('imagen') || reqLower.includes('banana');
-
-  const hasPending = pendingGeneration && !pendingGeneration.billed && (Date.now() - pendingGeneration.timestamp < 300000);
-
-  // If no pending generation, only proceed if this is an explicit generation endpoint returning media
-  if (!hasPending && !isGenerationEndpoint) {
+    urlLower.includes('session') ||
+    urlLower.includes('credits')
+  ) {
     return;
   }
 
-  const modelDetails = hasPending ? pendingGeneration.modelDetails : getGenerationModelDetails(isVideo ? 'video' : (isImage ? 'image' : ''));
-  const multiplier = hasPending ? (pendingGeneration.multiplier || 1) : 1;
+  // 1. Check for explicit API failure / RAI safety filter in generation response
+  const resp = data.response || {};
+  const hasExplicitError =
+    !!data.error ||
+    !!resp.error ||
+    data.status === 'FAILED' ||
+    data.state === 'FAILED' ||
+    (Number(data.raiMediaFilteredCount) || 0) > 0 ||
+    (Number(resp.raiMediaFilteredCount) || 0) > 0 ||
+    (Array.isArray(data.raiMediaFilteredReasons) && data.raiMediaFilteredReasons.length > 0) ||
+    (Array.isArray(resp.raiMediaFilteredReasons) && resp.raiMediaFilteredReasons.length > 0);
 
-  // 1. Direct video array or object
-  if (data.generatedVideos && Array.isArray(data.generatedVideos) && data.generatedVideos.length > 0) {
-    const validVideos = data.generatedVideos.filter(v => v && (v.id || v.video || v.uri || v.url || v.encodedVideo));
-    const count = validVideos.length || data.generatedVideos.length || multiplier;
-    const uid = data.operationId || data.id || validVideos[0]?.id || validVideos[0]?.uri || (url + '_' + Date.now());
-    if (hasPending) pendingGeneration.billed = true;
-    deductCredits(modelDetails || getGenerationModelDetails('video', '', requestBodyText, data), count, uid);
-    return;
-  }
-  if (data.videos && Array.isArray(data.videos) && data.videos.length > 0) {
-    const validVideos = data.videos.filter(v => v && (v.id || v.video || v.uri || v.url || v.encodedVideo));
-    const count = validVideos.length || data.videos.length || multiplier;
-    const uid = data.operationId || data.id || validVideos[0]?.id || validVideos[0]?.uri || (url + '_' + Date.now());
-    if (hasPending) pendingGeneration.billed = true;
-    deductCredits(modelDetails || getGenerationModelDetails('video', '', requestBodyText, data), count, uid);
+  if (hasExplicitError) {
+    failOldestRunningJob('API generation error or safety filter');
     return;
   }
 
-  // 2. Direct image array or object
-  if (data.generatedImages && Array.isArray(data.generatedImages) && data.generatedImages.length > 0) {
-    const validImages = data.generatedImages.filter(img => img && (img.id || img.image || img.uri || img.url || img.encodedImage));
-    const count = validImages.length || data.generatedImages.length || multiplier;
-    const uid = data.operationId || data.id || validImages[0]?.id || validImages[0]?.uri || (url + '_' + Date.now());
-    if (hasPending) pendingGeneration.billed = true;
-    deductCredits(modelDetails || getGenerationModelDetails('image', '', requestBodyText, data), count, uid);
-    return;
-  }
-  if (data.images && Array.isArray(data.images) && data.images.length > 0) {
-    const validImages = data.images.filter(img => img && (img.id || img.image || img.uri || img.url || img.encodedImage));
-    const count = validImages.length || data.images.length || multiplier;
-    const uid = data.operationId || data.id || validImages[0]?.id || validImages[0]?.uri || (url + '_' + Date.now());
-    if (hasPending) pendingGeneration.billed = true;
-    deductCredits(modelDetails || getGenerationModelDetails('image', '', requestBodyText, data), count, uid);
-    return;
-  }
+  // 2. Check for explicit media completion
+  const hasVideos =
+    (Array.isArray(data.generatedVideos) && data.generatedVideos.length > 0) ||
+    (Array.isArray(data.videos) && data.videos.length > 0) ||
+    (Array.isArray(resp.generatedVideos) && resp.generatedVideos.length > 0) ||
+    (Array.isArray(resp.videos) && resp.videos.length > 0) ||
+    !!(data.mediaUri || data.videoUri || data.videoUrl);
 
-  // 3. Long running operations (LRO) checking: { done: true, response: { ... } }
-  if (data.done === true && (data.response || data.metadata || data.name)) {
-    const opName = data.name || data.id || (url + '_op');
-    const resp = data.response || {};
-    const meta = data.metadata || {};
+  const hasImages =
+    (Array.isArray(data.generatedImages) && data.generatedImages.length > 0) ||
+    (Array.isArray(data.images) && data.images.length > 0) ||
+    (Array.isArray(resp.generatedImages) && resp.generatedImages.length > 0) ||
+    (Array.isArray(resp.images) && resp.images.length > 0) ||
+    !!(data.imageUri || data.imageUrl || data.encodedImage);
 
-    if (resp.generatedVideos || resp.videos || meta.videoMetadata || isVideo) {
-      const vids = resp.generatedVideos || resp.videos || [1];
-      const count = Array.isArray(vids) ? vids.length : multiplier;
-      if (hasPending) pendingGeneration.billed = true;
-      deductCredits(modelDetails || getGenerationModelDetails('video', '', requestBodyText, data), count, opName);
-      return;
-    }
-
-    if (resp.generatedImages || resp.images || meta.imageMetadata || isImage) {
-      const imgs = resp.generatedImages || resp.images || [1];
-      const count = Array.isArray(imgs) ? imgs.length : multiplier;
-      if (hasPending) pendingGeneration.billed = true;
-      deductCredits(modelDetails || getGenerationModelDetails('image', '', requestBodyText, data), count, opName);
-      return;
-    }
-  }
-
-  // 4. Output media response
-  if (data.mediaUri || data.videoUri || data.videoUrl) {
-    const uid = data.id || data.mediaUri || data.videoUri || data.videoUrl;
-    if (hasPending) pendingGeneration.billed = true;
-    deductCredits(modelDetails || getGenerationModelDetails('video', '', requestBodyText, data), multiplier, uid);
-    return;
-  }
-
-  if (data.imageUri || data.imageUrl || data.encodedImage) {
-    const uid = data.id || data.imageUri || data.imageUrl;
-    if (hasPending) pendingGeneration.billed = true;
-    deductCredits(modelDetails || getGenerationModelDetails('image', '', requestBodyText, data), multiplier, uid);
-    return;
+  if (hasVideos || hasImages) {
+    completeOldestRunningJob('API media payload');
   }
 }
 
-// Hook generate button click and Enter key to capture generation intent
+// Hook generate button click and Enter key to immediately start a tracked generation job
 function setupGenerateActionHook() {
+  function isFlowGenerationHost() {
+    const h = (window.location.hostname || '').toLowerCase();
+    return h.includes('flow.google.com') || h.includes('labs.google');
+  }
+
   function onGenerateTriggered(source = '') {
-    const hostname = window.location.hostname;
-    if (hostname.includes('accounts.google.com') || window.location.pathname.includes('/about')) {
+    if (!isFlowGenerationHost()) return;
+    if (window.location.pathname.includes('/about')) {
       return;
     }
     const mode = getActivePromptMode();
@@ -530,16 +888,18 @@ function setupGenerateActionHook() {
       source: source
     };
 
-    console.log('[Flow Credit Engine] Generation action initiated:', mode, details.modelName, 'Multiplier:', multiplier, 'Source:', source);
+    // Start the job and deduct immediately so 1st, 2nd, 3rd concurrent prompts always deduct!
+    startGenerationJob(source);
   }
 
   document.addEventListener('click', (e) => {
+    if (!isFlowGenerationHost()) return;
     const btn = e.target && e.target.closest && e.target.closest('button, [role="button"], a[role="button"]');
     if (!btn) return;
-
+    if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return;
+    
     const txt = (btn.innerText || btn.textContent || '').trim().toLowerCase();
 
-    // Ignore settings buttons (aspect ratio, duration, model selector, etc.)
     if (
       txt.includes('16:9') || txt.includes('9:16') || txt.includes('1:1') ||
       txt.includes('720p') || txt.includes('1080p') ||
@@ -547,73 +907,62 @@ function setupGenerateActionHook() {
       /^x[1-4]$/.test(txt) ||
       txt === 'image' || txt === 'video' ||
       txt === 'frames' || txt === 'ingredients' ||
+      txt === 'add' || txt.includes('upload') || txt.includes('drive_folder_upload') ||
       btn.getAttribute('aria-label') === 'Select model family' ||
-      btn.closest('.prompt-settings-pill, flow-model-picker')
+      btn.closest('.prompt-settings-pill, flow-model-picker, flow-prompt-box-settings, flow-add-menu-popover-content, flow-ingredient-bar, #flow-my-projects-dock, #flow-saved-projects-backdrop, [role="menu"], [role="dialog"], .mat-mdc-menu-panel')
     ) {
       return;
     }
 
-    const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
-    const title = (btn.getAttribute('title') || '').toLowerCase();
-    const isSubmitType = btn.getAttribute('type') === 'submit';
+    const hasArrowForward = txt.includes('arrow_forward');
+    const isGenerateIconBtn = btn.closest('flow-generate-icon-button') !== null;
+    const isRedoTileBtn = btn.closest('flow-grid-tile-container') !== null && (txt === 'replay' || txt === 'refresh' || txt === 'undo');
 
-    // Check if it's inside prompt area
-    const inPromptArea = btn.closest('.prompt-box, form, [class*="prompt"], flow-prompt-box, [class*="action-bar"], .gen-actions, .input-container') !== null;
-
-    // Check if it has send/arrow/generate icon or text
-    const hasIcon = btn.querySelector('svg, polygon, mat-icon, [data-icon], [class*="send"], [class*="arrow"]') !== null;
-    const matchesKeyword =
-      txt.includes('generate') || txt.includes('create') || txt.includes('run') || txt.includes('send') || txt.includes('submit') ||
-      aria.includes('generate') || aria.includes('create') || aria.includes('send') || aria.includes('submit') ||
-      title.includes('generate') || title.includes('send') || title.includes('create') || title.includes('submit');
-
-    if (matchesKeyword || isSubmitType || (inPromptArea && (hasIcon || !txt))) {
-      onGenerateTriggered('click:' + (aria || txt || 'prompt-btn'));
+    if (hasArrowForward || isGenerateIconBtn || isRedoTileBtn) {
+      onGenerateTriggered('click-submit-btn');
     }
   }, true);
 
   document.addEventListener('keydown', (e) => {
+    if (!isFlowGenerationHost()) return;
     if (e.key === 'Enter' && !e.shiftKey) {
       const active = document.activeElement;
-      if (
+      const inPromptEditor =
         active &&
         (active.tagName === 'TEXTAREA' ||
          active.tagName === 'INPUT' ||
+         active.getAttribute('role') === 'textbox' ||
          active.getAttribute('contenteditable') === 'true' ||
-         active.closest('form, [class*="prompt"], [class*="input"], flow-prompt-box'))
-      ) {
-        onGenerateTriggered('enter-key');
+         active.closest('flow-rich-text-editor, form, [class*="prompt"], flow-prompt-box'));
+
+      if (inPromptEditor) {
+        const currentTxt = getPromptTextboxContent();
+        const hadRecentTxt = lastTypedPromptText.length > 0 && (Date.now() - lastTypedPromptAt < 5000);
+        if (currentTxt.length > 0 || hadRecentTxt) {
+          onGenerateTriggered('enter-key');
+        }
       }
     }
   }, true);
 }
 
-// Main World network hooks (WebView2 has no Electron webRequest bridge by default)
+// Network hooks: watch generation & operation endpoints for completion or explicit error
 (function installNetworkCreditHooks() {
   try {
-    const looksGen = (url) => {
+    const isGenOrOpUrl = (url) => {
       const u = String(url || '').toLowerCase();
+      if (u.includes('listprojects') || u.includes('listmedia') || u.includes('userinfo') || u.includes('log') || u.includes('telemetry')) {
+        return false;
+      }
       return (
         u.includes('batchgenerate') ||
         u.includes('batch_generate') ||
         u.includes('generatevideo') ||
         u.includes('generateimage') ||
-        u.includes('aisandbox') ||
-        u.includes('/operations/')
+        u.includes('checkoperations') ||
+        u.includes('/operations/') ||
+        (u.includes('aisandbox') && (u.includes('generate') || u.includes('flow') || u.includes('video') || u.includes('image') || u.includes('batch')))
       );
-    };
-
-    const fireCompleted = (url) => {
-      if (!looksGen(url)) return;
-      try {
-        if (pendingGeneration && !pendingGeneration.billed) {
-          console.log('[Flow Credit Engine] Generation network (fetch/xhr):', url);
-          const details = pendingGeneration.modelDetails;
-          const count = pendingGeneration.multiplier || 1;
-          pendingGeneration.billed = true;
-          deductCredits(details, count, url + '_' + Date.now());
-        }
-      } catch (e) {}
     };
 
     if (window.fetch) {
@@ -621,7 +970,17 @@ function setupGenerateActionHook() {
       window.fetch = function (input, init) {
         const url = typeof input === 'string' ? input : (input && input.url) || '';
         return origFetch(input, init).then((res) => {
-          try { if (res && res.ok) fireCompleted(url); } catch (e) {}
+          try {
+            if (isGenOrOpUrl(url)) {
+              if (!res.ok && res.status >= 400) {
+                failOldestRunningJob('Generation HTTP ' + res.status);
+              } else if (res.ok && typeof res.clone === 'function') {
+                res.clone().json().then((data) => {
+                  inspectDataForGenerations(url, data);
+                }).catch(() => {});
+              }
+            }
+          } catch (e) {}
           return res;
         });
       };
@@ -632,13 +991,22 @@ function setupGenerateActionHook() {
       const open = XO.prototype.open;
       const send = XO.prototype.send;
       XO.prototype.open = function (method, url) {
+        this.__flowMethod = method;
         this.__flowUrl = url;
         return open.apply(this, arguments);
       };
       XO.prototype.send = function () {
         this.addEventListener('load', () => {
           try {
-            if (this.status >= 200 && this.status < 300) fireCompleted(this.__flowUrl);
+            if (!isGenOrOpUrl(this.__flowUrl)) return;
+            if (this.status >= 400) {
+              failOldestRunningJob('Generation XHR HTTP ' + this.status);
+            } else if (this.status >= 200 && this.status < 300 && this.responseText) {
+              try {
+                const data = JSON.parse(this.responseText);
+                inspectDataForGenerations(this.__flowUrl, data);
+              } catch (e) {}
+            }
           } catch (e) {}
         });
         return send.apply(this, arguments);
@@ -649,21 +1017,12 @@ function setupGenerateActionHook() {
   }
 })();
 
-// IPC Listener from Electron / WebView2 host WebRequest Monitor
-ipcRenderer.on('flow:generation-network-completed', (event, info) => {
-  if (pendingGeneration && !pendingGeneration.billed) {
-    console.log('[Flow Credit Engine] Generation network completion received from main process:', info && info.url);
-    const details = pendingGeneration.modelDetails;
-    const count = pendingGeneration.multiplier || 1;
-    pendingGeneration.billed = true;
-    deductCredits(details, count, (info && info.url ? info.url : 'net') + '_' + Date.now());
-  }
-});
-
-// DOM Canvas Card & Video Watcher Engine
+// DOM Canvas Card & Explicit Failure Alert Watcher Engine
 const seenMediaElements = new Set();
+const seenErrorSignATURES = new Set();
 let pageInitialLoadDone = false;
 let lastKnownPathname = window.location.pathname;
+let lastNavigationTime = Date.now();
 
 function markInitialMediaAsSeen() {
   try {
@@ -673,6 +1032,7 @@ function markInitialMediaAsSeen() {
       img[src*="googleusercontent"],
       [data-testid*="media"],
       [class*="media-card"],
+      flow-grid-tile-container,
       flow-media-card,
       flow-video-card,
       .media-item
@@ -686,79 +1046,92 @@ function markInitialMediaAsSeen() {
 
 function getMediaCardIdentifier(el) {
   if (!el) return '';
-  return el.getAttribute('data-id') ||
+  const vid = el.tagName === 'VIDEO' ? el : el.querySelector('video');
+  const img = el.tagName === 'IMG' ? el : el.querySelector('img[src*="googleusercontent"], img[src*="blob:"]');
+  return (vid && (vid.currentSrc || vid.src)) ||
+         (img && img.src) ||
+         el.getAttribute('data-id') ||
          el.getAttribute('data-media-id') ||
          el.id ||
-         el.currentSrc ||
-         el.src ||
-         el.querySelector('video')?.currentSrc ||
-         el.querySelector('video')?.src ||
-         el.querySelector('img')?.src ||
-         (el.innerText && el.innerText.trim().slice(0, 50)) ||
          '';
 }
 
-function checkForNewGeneratedMedia() {
-  // Check if user navigated to a different project or page
-  if (window.location.pathname !== lastKnownPathname) {
-    lastKnownPathname = window.location.pathname;
-    pageInitialLoadDone = false;
-    setTimeout(() => {
-      markInitialMediaAsSeen();
-      pageInitialLoadDone = true;
-    }, 2500);
+function scanDomForFailedGenerations() {
+  const hasRunningJob = activeGenerationJobs.some((j) => j && j.status === 'running' && !j.refunded);
+  if (!hasRunningJob) return;
+
+  // Match explicit generation failure messages in snackbars/alerts/tiles — never match "Privacy Policy" or account dialogs!
+  const explicitFailRegex = /\b(couldn'?t generate|could not generate|failed to generate|generation failed|unable to generate|error generating|can'?t generate|violates our|blocked by|something went wrong|try again later|prompt was blocked)\b/i;
+  const candidates = document.querySelectorAll('[role="alert"], [role="status"], mat-snack-bar-container, .mat-mdc-snack-bar-label, .mdc-snackbar__label, flow-grid-tile-container');
+  for (const el of candidates) {
+    if (!el || el.id === 'flow-generation-toast' || el.closest('#flow-generation-toast')) continue;
+    if (el.closest('[role="menu"], [role="dialog"], .mat-mdc-menu-panel, header, footer, #flow-saved-projects-backdrop')) continue;
+    const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!txt || txt.length > 260) continue;
+    if (!explicitFailRegex.test(txt)) continue;
+
+    const sig = txt.slice(0, 100);
+    if (seenErrorSignATURES.has(sig)) continue;
+    seenErrorSignATURES.add(sig);
+    setTimeout(() => seenErrorSignATURES.delete(sig), 12000);
+
+    failOldestRunningJob(txt.slice(0, 60));
     return;
-  }
-
-  if (!pageInitialLoadDone) return;
-
-  const currentMode = getActivePromptMode();
-
-  // Find all cards or video elements
-  const allCards = document.querySelectorAll(`
-    flow-media-card,
-    flow-video-card,
-    [data-testid*="media-card"],
-    [data-testid*="video-card"],
-    [class*="media-card"],
-    .media-item,
-    video
-  `);
-
-  for (const card of allCards) {
-    const id = getMediaCardIdentifier(card);
-    if (!id || seenMediaElements.has(id)) continue;
-
-    // Found an unseen media card in the DOM!
-    seenMediaElements.add(id);
-
-    // Is it a video or image?
-    const hasVideo = card.tagName === 'VIDEO' ||
-                     card.querySelector('video') !== null ||
-                     card.querySelector('[data-icon*="play"], svg polygon, .play-button') !== null ||
-                     (card.innerText || '').toLowerCase().includes('video');
-
-    if (hasVideo) {
-      console.log('[Flow Credit Engine] New video element detected on canvas:', id);
-      const modelDetails = (pendingGeneration && pendingGeneration.modelDetails) || { type: 'video', modelName: 'Veo 3.1 - Fast', rate: 10 };
-      const multiplier = (pendingGeneration && pendingGeneration.multiplier) || 1;
-      if (pendingGeneration) pendingGeneration.billed = true;
-      deductCredits(modelDetails, multiplier, id);
-      return;
-    } else if (currentMode === 'image' || (pendingGeneration && pendingGeneration.modelDetails?.type === 'image')) {
-      console.log('[Flow Credit Engine] New image element detected on canvas:', id);
-      const modelDetails = (pendingGeneration && pendingGeneration.modelDetails) || getGenerationModelDetails('image');
-      const multiplier = (pendingGeneration && pendingGeneration.multiplier) || 1;
-      if (pendingGeneration) pendingGeneration.billed = true;
-      deductCredits(modelDetails, multiplier, id);
-      return;
-    }
   }
 }
 
-// Initial settle timer
+function checkForNewGeneratedMedia() {
+  // If user navigated to a different project or page, mark all existing media as seen and NEVER bill for opening a project!
+  if (window.location.pathname !== lastKnownPathname) {
+    lastKnownPathname = window.location.pathname;
+    lastNavigationTime = Date.now();
+    pageInitialLoadDone = false;
+    markInitialMediaAsSeen();
+    document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
+    document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
+    setTimeout(() => {
+      markInitialMediaAsSeen();
+      document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
+      document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
+      pageInitialLoadDone = true;
+    }, 3000);
+    return;
+  }
+
+  // Always keep marking initial media during the first 3.5 seconds after navigation
+  if (!pageInitialLoadDone || Date.now() - lastNavigationTime < 3500) {
+    markInitialMediaAsSeen();
+    return;
+  }
+
+  scanDomForFailedGenerations();
+
+  const allMedia = document.querySelectorAll(`
+    flow-grid-tile-container video,
+    flow-grid-tile-container img[src*="googleusercontent"],
+    flow-grid-tile-container img[src*="blob:"],
+    video[src],
+    img[src*="blob:"]
+  `);
+
+  let newMediaCount = 0;
+  for (const mediaEl of allMedia) {
+    if (mediaEl.closest('header, [role="dialog"], [role="menu"], #flow-saved-projects-backdrop')) continue;
+    const id = getMediaCardIdentifier(mediaEl);
+    if (!id || seenMediaElements.has(id)) continue;
+    seenMediaElements.add(id);
+    newMediaCount++;
+  }
+
+  for (let i = 0; i < newMediaCount; i++) {
+    completeOldestRunningJob('DOM media mounted');
+  }
+}
+
 setTimeout(() => {
   markInitialMediaAsSeen();
+  document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
+  document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
   pageInitialLoadDone = true;
 }, 3000);
 
@@ -766,239 +1139,1566 @@ setTimeout(() => {
 setupGenerateActionHook();
 
 // =========================================================================
-// MODEL ENGINE (locking/renaming disabled — show all Google Flow models)
+// =========================================================================
+// PAKFLOW v1.0.2 DOM MODEL RELABELING, AUTO-SETUP & CREDIT ENGINE
 // =========================================================================
 
-function isLowerPriorityOption(text, el) {
-  if (el && el.getAttribute && el.getAttribute('data-is-lower-priority') === 'true') {
-    return true;
-  }
-  if (!text) return false;
-  const t = text.toLowerCase();
-  // NEVER treat Nano Banana or image models as Veo lower priority!
-  if (t.includes("banana") || t.includes("nano") || t.includes("imagen")) {
-    return false;
-  }
-  return (
-    t.includes("lower priority") ||
-    t.includes("[lower priority]") ||
-    t.includes("(lower priority)") ||
-    t.includes("lite [lower priority]") ||
-    t.includes("fast [lower priority]") ||
-    t.includes("veo 3.1 - fast") ||
-    t.includes("veo 3.1 - lite") ||
-    t.includes("veo 3.1 lite") ||
-    t.includes("veo fast") ||
-    (t.includes("fast") && t.includes("veo")) ||
-    (t.trim() === 'fast' && (el?.getAttribute('data-is-veo-model') === 'true' || getActivePromptMode() === 'video')) ||
-    (t.trim() === 'lite' && (el?.getAttribute('data-is-veo-model') === 'true' || getActivePromptMode() === 'video'))
-  );
+function cleanText(str) {
+  return String(str || '').replace(/volume_up|arrow_drop_down/g, '').trim();
 }
 
-function isOtherModelOption(text, el) {
-  if (!text) return false;
-  const t = text.toLowerCase().trim();
-
-  // If this element has been stamped as lower priority, keep it!
-  if (el && el.getAttribute && el.getAttribute('data-is-lower-priority') === 'true') {
-    return false;
+function getButtonCleanLabel(btn) {
+  if (!btn) return '';
+  try {
+    let out = '';
+    const walker = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      const p = n.parentElement;
+      if (p && p.closest && p.closest('mat-icon, i.google-symbols, .material-icons, .google-material-icons, svg')) continue;
+      out += ' ' + (n.nodeValue || '');
+    }
+    return out.replace(/\s+/g, ' ').trim();
+  } catch (e) {
+    return String(btn.textContent || '').trim();
   }
-
-  if (isLowerPriorityOption(text, el)) {
-    return false;
-  }
-
-  // ALL IMAGE MODELS MUST ALWAYS BE VISIBLE AND SELECTABLE!
-  if (
-    t.includes('banana') ||
-    t.includes('nano') ||
-    t.includes('imagen') ||
-    t.includes('image')
-  ) {
-    return false; // NEVER HIDE IMAGE MODELS!
-  }
-
-  // Navigation, tools, settings, UI buttons must NEVER be hidden or treated as a model option!
-  if (
-    t.includes('all media') ||
-    t.includes('videos') ||
-    t.includes('characters') ||
-    t.includes('scenes') ||
-    t.includes('tools') ||
-    t.includes('project') ||
-    t.includes('new project') ||
-    t.includes('library') ||
-    t.includes('home') ||
-    t.includes('settings') ||
-    t.includes('share') ||
-    t.includes('export') ||
-    t.includes('download') ||
-    t.includes('delete') ||
-    t.includes('rename') ||
-    t.includes('duplicate') ||
-    t.includes('aspect') ||
-    t.includes('duration') ||
-    t.includes('resolution') ||
-    t.includes('16:9') || t.includes('9:16') || t.includes('1:1') || t.includes('4:3') ||
-    t.includes('720p') || t.includes('1080p') ||
-    /^x[1-4]$/i.test(t) || /^[468]s$/i.test(t) ||
-    t === 'frames' || t === 'ingredients'
-  ) {
-    return false;
-  }
-
-  // Strictly the blocked video models (Omni Flash / Veo 3.1 Lite·Fast·Quality)
-  return isBlockedModelLabel(t);
 }
 
-// Model renaming removed — show original Google Flow labels
-function renameLowerPriorityText(_element) {}
-
-function isSettingsOverlayPanel(el) {
-  if (!el) return false;
-  const txt = (el.innerText || el.textContent || '').trim();
-  return (
-    txt.includes('16:9') ||
-    txt.includes('9:16') ||
-    txt.includes('1:1') ||
-    txt.includes('4:3') ||
-    txt.includes('3:4') ||
-    txt.includes('720p') ||
-    txt.includes('1080p') ||
-    txt.includes('Frames') ||
-    txt.includes('Ingredients') ||
-    txt.includes('Nano Banana') ||
-    txt.includes('Veo') ||
-    (txt.includes('8s') && (txt.includes('x1') || txt.includes('x2') || txt.includes('x4'))) ||
-    el.querySelector('[aria-label*="16:9" i], [aria-label*="9:16" i], [aria-label*="1:1" i]') !== null
-  );
-}
-
-function dismissVideoModelMenus() {
-  // Model items are individually filtered via isBlockedModelLabel
-}
-
-function modelLabelFromEl(el) {
-  if (!el) return '';
-  const labelEl = el.querySelector(
-    '.label, .item-text .label, .item-text, .mat-mdc-menu-item-text, .model-select-trigger-content'
-  );
-  return normalizeModelLabel(
-    (labelEl && (labelEl.innerText || labelEl.textContent)) ||
-      el.innerText ||
-      el.textContent ||
-      el.getAttribute('aria-label') ||
-      ''
-  );
-}
-
-function hideBlockedModelNode(el) {
+function simulateClick(el) {
   if (!el) return;
-  const target = el.closest('flow-menu-item') || el;
-  try { target.setAttribute('data-flow-blocked-model', '1'); } catch (e) {}
+  try { el.focus(); } catch (e) {}
+  const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+  const cx = rect ? rect.left + rect.width / 2 : 0;
+  const cy = rect ? rect.top + rect.height / 2 : 0;
+  const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1 };
+  ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((type) => {
+    try {
+      if (type.startsWith('pointer') && typeof PointerEvent !== 'undefined') {
+        el.dispatchEvent(new PointerEvent(type, { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      } else {
+        el.dispatchEvent(new MouseEvent(type, opts));
+      }
+    } catch (e) {}
+  });
+}
+
+function purgeSignoutElements() {
   try {
-    target.style.setProperty('display', 'none', 'important');
-    target.style.setProperty('visibility', 'hidden', 'important');
-    target.style.setProperty('pointer-events', 'none', 'important');
-    target.style.setProperty('opacity', '0', 'important');
-    target.style.setProperty('height', '0px', 'important');
-    target.style.setProperty('max-height', '0px', 'important');
-    target.style.setProperty('overflow', 'hidden', 'important');
-    target.setAttribute('aria-hidden', 'true');
-  } catch (e) {}
-  // Also hide nested button so Material ripple doesn't keep it focusable
-  try {
-    target.querySelectorAll('button, [role="menuitem"]').forEach((b) => {
-      b.style.setProperty('display', 'none', 'important');
-      b.setAttribute('aria-hidden', 'true');
-      try { b.disabled = true; } catch (e2) {}
+    document.querySelectorAll('button, a, span, div, p').forEach((el) => {
+      const txt = (el.textContent || '').toLowerCase();
+      if (txt.includes('sign out of all accounts') || txt.includes('sign out')) {
+        const target =
+          el.closest('button') ||
+          el.closest('a') ||
+          (el.tagName === 'BUTTON' || el.tagName === 'A' ? el : null);
+        if (target) {
+          target.setAttribute('data-hide-signout', 'true');
+          target.style.setProperty('display', 'none', 'important');
+          target.style.setProperty('visibility', 'hidden', 'important');
+          target.style.setProperty('pointer-events', 'none', 'important');
+          target.style.setProperty('opacity', '0', 'important');
+          target.style.setProperty('height', '0', 'important');
+        }
+      }
     });
   } catch (e) {}
 }
 
-function enforceModelRestrictions() {
-  try {
-    const host = (location.hostname || '').toLowerCase();
-    if (!host.includes('flow.google.com') && !host.includes('labs.google')) return;
+let pendingCost = 0;
+let isWaitingForPercentage = false;
+let isLockedBySubmission = false;
+let waitStartTime = 0;
+let isGenerating = false;
+let lastDeductTime = 0;
+let setupState = 0;
+let isImageModeActive = false;
+let lastActionTime = 0;
+let setupStartTime = 0;
+let lastPakflowPathname = '';
 
-    const hideBlocked = (el) => {
-      if (!el) return;
-      if (el.getAttribute('data-flow-blocked-model') === '1') {
-        hideBlockedModelNode(el);
+function queueDeduction() {
+  const mode = getActivePromptMode();
+  const multiplier = getActiveBatchMultiplier();
+  const details = getGenerationModelDetails(mode);
+  pendingGeneration = {
+    modelDetails: details,
+    multiplier: multiplier,
+    timestamp: Date.now(),
+    billed: false,
+    source: 'pakflow-submit'
+  };
+  startGenerationJob('pakflow-submit');
+}
+
+// Spoof Google Account Email -> flowcreator@gmail.com and Name -> Flow Creator
+function spoofAccountIdentityInDom() {
+  try {
+    const emailRegex = /[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/g;
+    // 1. Spoof aria-label / title on header profile buttons
+    document.querySelectorAll('header button, header a, .header-user-button, [aria-label*="@"]').forEach((el) => {
+      ['aria-label', 'title'].forEach((attr) => {
+        const val = el.getAttribute(attr);
+        if (val && emailRegex.test(val) && !val.includes('flowcreator@gmail.com')) {
+          el.setAttribute(attr, 'Google Account: Flow Creator (flowcreator@gmail.com)');
+        }
+      });
+    });
+
+    // 2. Spoof visible email text nodes & adjacent display name in the account popup
+    const nodes = document.querySelectorAll('div, span, p, a, h1, h2, h3, h4');
+    for (const el of nodes) {
+      if (el.children.length > 0) continue;
+      const txt = (el.textContent || '').trim();
+      if (!txt || txt.length > 120) continue;
+      if (emailRegex.test(txt)) {
+        if (txt !== 'flowcreator@gmail.com') {
+          el.textContent = txt.replace(emailRegex, 'flowcreator@gmail.com');
+        }
+        // Check sibling above email (account holder's display name, e.g. "Jitendar Kumawat")
+        const prev = el.previousElementSibling;
+        if (prev && prev.children.length === 0) {
+          const prevTxt = (prev.textContent || '').trim();
+          if (prevTxt && prevTxt !== 'Flow Creator' && prevTxt !== 'Google' && !prevTxt.includes('@')) {
+            prev.textContent = 'Flow Creator';
+          }
+        }
+        // Also check parent container for single-letter avatar circle (e.g. "J")
+        const card = el.parentElement && el.parentElement.parentElement;
+        if (card) {
+          card.querySelectorAll('div, span').forEach((av) => {
+            if (av.children.length === 0 && /^[A-Z]$/.test((av.textContent || '').trim())) {
+              if (av.textContent.trim() !== 'F') av.textContent = 'F';
+            }
+          });
+        }
+      }
+    }
+  } catch (e) {}
+}
+
+// Ensure top-right profile icon / ULTRA tier pill is NEVER hidden
+function ensureProfileIconVisible() {
+  try {
+    const targets = document.querySelectorAll(
+      'header button, header a, header img, .header-user-button, .header-user-button *, ' +
+      'flow-user-tier-chip, flow-user-tier-chip *, .tier-chip, [aria-label="ULTRA tier"], ' +
+      '[aria-label="Account details"], [aria-label*="Google Account" i], .account-switcher-placeholder'
+    );
+    targets.forEach((el) => {
+      if (!el || el.tagName === 'A' && (el.classList.contains('switch-account-link') || (el.getAttribute('href') || '').includes('myaccount.google.com'))) {
         return;
       }
-      const raw = modelLabelFromEl(el);
-      if (!raw || raw.length > 120) return;
-      if (!isBlockedModelLabel(raw)) return;
-      hideBlockedModelNode(el);
-    };
-
-    document.querySelectorAll(
-      'flow-menu-item, button.mat-mdc-menu-item, button[mat-menu-item], ' +
-      'button.flow-internal-menu-item, [role="menuitem"], .flow-internal-menu-item'
-    ).forEach(hideBlocked);
-
-    // Menu panels that mount late (CDK overlay)
-    document.querySelectorAll(
-      '.mat-mdc-menu-content flow-menu-item, .mat-mdc-menu-panel [role="menuitem"], ' +
-      '.cdk-overlay-container flow-menu-item, .cdk-overlay-container [role="menuitem"]'
-    ).forEach(hideBlocked);
+      if ((el.textContent || '').toLowerCase().includes('sign out')) return;
+      if (el.getAttribute('data-flow-hidden') === '1') {
+        el.removeAttribute('data-flow-hidden');
+        el.removeAttribute('aria-hidden');
+        el.style.removeProperty('display');
+        el.style.removeProperty('visibility');
+        el.style.removeProperty('opacity');
+        el.style.removeProperty('pointer-events');
+        el.style.removeProperty('width');
+        el.style.removeProperty('height');
+        el.style.removeProperty('max-height');
+      }
+    });
   } catch (e) {}
+}
+
+// =========================================================================
+// SAVED PROJECTS HISTORY ENGINE (Auto-Save & "My Projects" Modal on Device)
+// =========================================================================
+const SAVED_PROJECTS_KEY = 'flow_saved_projects_v1';
+let savedProjectsList = [];
+let lastAutoSavedProjectId = '';
+let lastAutoSaveCheckAt = 0;
+
+function loadSavedProjectsFromDevice() {
+  try {
+    const raw = localStorage.getItem(SAVED_PROJECTS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) savedProjectsList = parsed;
+    }
+  } catch (e) {}
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.get([SAVED_PROJECTS_KEY], (res) => {
+        if (res && Array.isArray(res[SAVED_PROJECTS_KEY]) && res[SAVED_PROJECTS_KEY].length > 0) {
+          mergeSavedProjects(res[SAVED_PROJECTS_KEY], false);
+        }
+      });
+    }
+  } catch (e) {}
+  try {
+    ipcRenderer.sendToHost('saved-projects:load');
+  } catch (e) {}
+}
+
+function mergeSavedProjects(incoming, persistBack = true) {
+  if (!Array.isArray(incoming)) return;
+  const map = new Map();
+  savedProjectsList.forEach((p) => {
+    if (p && p.id) map.set(p.id, p);
+  });
+  incoming.forEach((p) => {
+    if (!p || !p.id) return;
+    const existing = map.get(p.id);
+    if (!existing || (p.updatedAt || 0) >= (existing.updatedAt || 0)) {
+      map.set(p.id, { ...existing, ...p });
+    }
+  });
+  savedProjectsList = Array.from(map.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  try {
+    localStorage.setItem(SAVED_PROJECTS_KEY, JSON.stringify(savedProjectsList));
+  } catch (e) {}
+  if (persistBack) {
+    try {
+      ipcRenderer.sendToHost('saved-projects:save', { projects: savedProjectsList });
+    } catch (e) {}
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({ [SAVED_PROJECTS_KEY]: savedProjectsList });
+      }
+    } catch (e) {}
+  }
+  updateMyProjectsUI();
+}
+
+ipcRenderer.on('apply-saved-projects', (event, data) => {
+  if (data && Array.isArray(data.projects)) {
+    mergeSavedProjects(data.projects, false);
+  }
+});
+
+function isGeminiHostUrl() {
+  const h = (window.location.hostname || '').toLowerCase();
+  return h.includes('gemini.google.com') || h.includes('bard.google.com');
+}
+
+function getCurrentProjectIdFromUrl() {
+  if (isGeminiHostUrl()) {
+    const m = (window.location.pathname || '').match(/\/app\/([0-9a-zA-Z_-]{6,})/);
+    return m ? 'gemini_' + m[1] : '';
+  }
+  const m = (window.location.pathname || '').match(/\/project\/([0-9a-fA-F-]{8,})/);
+  return m ? m[1] : '';
+}
+
+function detectCurrentProjectTitle() {
+  if (isGeminiHostUrl()) {
+    try {
+      const queries = document.querySelectorAll('user-query, [data-test-id*="user-query"], .query-text, .user-query-container');
+      for (const q of queries) {
+        const qt = (q.textContent || '').replace(/\s+/g, ' ').trim();
+        if (qt && qt.length >= 3) {
+          return qt.length > 48 ? qt.slice(0, 48) + '…' : qt;
+        }
+      }
+      const docTitle = (document.title || '').replace(/\s*[-–|]\s*Google Gemini$/i, '').replace(/^Google Gemini$/i, '').replace(/^Gemini$/i, '').trim();
+      if (docTitle && docTitle.length >= 3) {
+        return docTitle.length > 48 ? docTitle.slice(0, 48) + '…' : docTitle;
+      }
+    } catch (e) {}
+    const now = new Date();
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `Gemini Chat - ${months[now.getMonth()]} ${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  }
+  try {
+    // Check top-left Flow project header date/title (e.g. "Nov 03 - 14:31")
+    const dateRe = /^\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{1,2}\s*[-–]\s*\d{1,2}:\d{2}$/i;
+    const nodes = document.querySelectorAll('header span, header div, nav span, div, span');
+    for (const el of nodes) {
+      if (el.children.length > 0) continue;
+      const t = (el.textContent || '').trim();
+      if (dateRe.test(t)) {
+        return 'Google Flow - ' + t;
+      }
+    }
+  } catch (e) {}
+  const now = new Date();
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const mon = months[now.getMonth()];
+  const day = String(now.getDate()).padStart(2, '0');
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  return `Google Flow - ${mon} ${day} - ${hh}:${mm}`;
+}
+
+function getScopedSavedProjectsList() {
+  const isGem = isGeminiHostUrl();
+  return savedProjectsList.filter((p) => {
+    if (!p || !p.id) return false;
+    const itemIsGem = p.kind === 'gemini' || String(p.id).startsWith('gemini_') || String(p.url || '').includes('gemini.google.com');
+    return isGem ? itemIsGem : !itemIsGem;
+  });
+}
+
+function detectCurrentProjectThumbnail() {
+  try {
+    const imgs = document.querySelectorAll('img[src*="googleusercontent.com"], img[src*="ggpht.com"]');
+    for (const img of imgs) {
+      if (img.closest('header')) continue;
+      const r = img.getBoundingClientRect();
+      if (r.width >= 80 && r.height >= 50 && img.src) {
+        return img.src;
+      }
+    }
+  } catch (e) {}
+  return '';
+}
+
+function saveCurrentProjectToDevice(manual = false) {
+  const projId = getCurrentProjectIdFromUrl();
+  if (!projId) return false;
+  const isGem = isGeminiHostUrl();
+  const rawGemId = isGem ? projId.replace(/^gemini_/, '') : '';
+  const fullUrl = isGem
+    ? window.location.origin + '/app/' + rawGemId
+    : window.location.origin + '/project/' + projId;
+  const existing = savedProjectsList.find((p) => p.id === projId);
+  const detectedTitle = detectCurrentProjectTitle();
+  const thumb = isGem ? '' : (detectCurrentProjectThumbnail() || (existing && existing.thumbnail) || '');
+  const now = new Date();
+
+  const entry = {
+    id: projId,
+    kind: isGem ? 'gemini' : 'flow',
+    url: fullUrl,
+    title: (existing && existing.customTitle) || detectedTitle || (existing && existing.title) || (isGem ? 'Google Gemini Chat' : 'Google Flow Project'),
+    savedAt: existing && existing.savedAt ? existing.savedAt : now.toLocaleString(),
+    updatedAt: existing && !manual ? existing.updatedAt : Date.now(),
+    thumbnail: thumb
+  };
+
+  const filtered = savedProjectsList.filter((p) => p && p.id !== projId);
+  savedProjectsList = [entry, ...filtered];
+  try {
+    localStorage.setItem(SAVED_PROJECTS_KEY, JSON.stringify(savedProjectsList));
+  } catch (e) {}
+  try {
+    ipcRenderer.sendToHost('saved-projects:save', { projects: savedProjectsList });
+  } catch (e) {}
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ [SAVED_PROJECTS_KEY]: savedProjectsList });
+    }
+  } catch (e) {}
+  updateMyProjectsUI();
+  return true;
+}
+
+function deleteSavedProject(projId) {
+  savedProjectsList = savedProjectsList.filter((p) => p && p.id !== projId);
+  try {
+    localStorage.setItem(SAVED_PROJECTS_KEY, JSON.stringify(savedProjectsList));
+  } catch (e) {}
+  try {
+    ipcRenderer.sendToHost('saved-projects:save', { projects: savedProjectsList });
+  } catch (e) {}
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ [SAVED_PROJECTS_KEY]: savedProjectsList });
+    }
+  } catch (e) {}
+  updateMyProjectsUI();
+  renderSavedProjectsModalCards();
+}
+
+function renderSavedProjectsModalCards() {
+  const grid = document.getElementById('flow-saved-projects-grid');
+  const countBadge = document.getElementById('flow-saved-projects-modal-count');
+  const hTitle = document.getElementById('flow-saved-projects-modal-title');
+  const isGem = isGeminiHostUrl();
+  const scopedList = getScopedSavedProjectsList();
+  if (hTitle) {
+    hTitle.textContent = isGem ? '💬 My Saved Gemini Chats' : '🎬 My Saved Projects History';
+  }
+  if (countBadge) countBadge.textContent = `${scopedList.length} Saved`;
+  if (!grid) return;
+  grid.textContent = '';
+
+  if (scopedList.length === 0) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'grid-column: 1 / -1; text-align: center; padding: 48px 20px; color: #9ca3af; font-size: 14px;';
+    empty.textContent = isGem
+      ? 'No saved chats yet. Start a conversation in Google Gemini (or click "📌 Save Chat") and your personal chats will be saved here on your device!'
+      : 'No saved projects yet. Create or open a project in Google Flow and it will be automatically saved here!';
+    grid.appendChild(empty);
+    return;
+  }
+
+  scopedList.forEach((proj) => {
+    const card = document.createElement('div');
+    card.className = 'flow-saved-proj-card';
+
+    const preview = document.createElement('div');
+    preview.className = 'flow-saved-proj-preview';
+    if (proj.thumbnail && !isGem) {
+      preview.style.backgroundImage = `url("${proj.thumbnail}")`;
+      preview.style.backgroundSize = 'cover';
+      preview.style.backgroundPosition = 'center';
+    } else {
+      const playIcon = document.createElement('div');
+      playIcon.className = 'flow-saved-proj-play';
+      playIcon.textContent = isGem ? '✦' : '▶';
+      const subLbl = document.createElement('div');
+      subLbl.className = 'flow-saved-proj-sub';
+      subLbl.textContent = isGem ? 'Gemini Conversation' : 'Flow Video Project';
+      preview.appendChild(playIcon);
+      preview.appendChild(subLbl);
+    }
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'flow-saved-proj-del';
+    delBtn.title = isGem ? 'Remove saved chat' : 'Remove saved project';
+    delBtn.textContent = '✕';
+    delBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      deleteSavedProject(proj.id);
+    });
+    preview.appendChild(delBtn);
+
+    const body = document.createElement('div');
+    body.className = 'flow-saved-proj-body';
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'flow-saved-proj-title';
+    titleEl.textContent = proj.title || (isGem ? 'Google Gemini Chat' : 'Google Flow Project');
+
+    const dateEl = document.createElement('div');
+    dateEl.className = 'flow-saved-proj-date';
+    dateEl.textContent = '📅 ' + (proj.savedAt || '');
+
+    const openBtn = document.createElement('button');
+    openBtn.className = 'flow-saved-proj-open';
+    openBtn.textContent = isGem ? '💬 Open This Chat' : '▶ Open This Project';
+    openBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const modal = document.getElementById('flow-saved-projects-backdrop');
+      if (modal) modal.style.display = 'none';
+      window.location.href = proj.url;
+    });
+
+    body.appendChild(titleEl);
+    body.appendChild(dateEl);
+    body.appendChild(openBtn);
+
+    card.appendChild(preview);
+    card.appendChild(body);
+    grid.appendChild(card);
+  });
+}
+
+function toggleSavedProjectsModal(forceOpen) {
+  let backdrop = document.getElementById('flow-saved-projects-backdrop');
+  const isGem = isGeminiHostUrl();
+  if (!backdrop) {
+    backdrop = document.createElement('div');
+    backdrop.id = 'flow-saved-projects-backdrop';
+    backdrop.addEventListener('click', (ev) => {
+      if (ev.target === backdrop) backdrop.style.display = 'none';
+    });
+
+    const modal = document.createElement('div');
+    modal.id = 'flow-saved-projects-modal';
+
+    const header = document.createElement('div');
+    header.className = 'flow-saved-proj-header';
+
+    const titleWrap = document.createElement('div');
+    titleWrap.style.cssText = 'display:flex;align-items:center;gap:10px;';
+
+    const hTitle = document.createElement('span');
+    hTitle.id = 'flow-saved-projects-modal-title';
+    hTitle.style.cssText = 'font-size:16px;font-weight:700;color:#fff;';
+    hTitle.textContent = isGem ? '💬 My Saved Gemini Chats' : '🎬 My Saved Projects History';
+
+    const hBadge = document.createElement('span');
+    hBadge.id = 'flow-saved-projects-modal-count';
+    hBadge.style.cssText = 'background:rgba(139,92,246,0.25);border:1px solid rgba(139,92,246,0.5);color:#ddd6fe;font-size:12px;font-weight:600;padding:2px 10px;border-radius:999px;';
+    hBadge.textContent = `${getScopedSavedProjectsList().length} Saved`;
+
+    titleWrap.appendChild(hTitle);
+    titleWrap.appendChild(hBadge);
+
+    const actionsWrap = document.createElement('div');
+    actionsWrap.style.cssText = 'display:flex;align-items:center;gap:10px;';
+
+    if (isGem) {
+      const newChatBtn = document.createElement('button');
+      newChatBtn.style.cssText = 'background:linear-gradient(90deg,#7c3aed 0%,#6d28d9 100%);border:none;color:#fff;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;';
+      newChatBtn.textContent = '＋ New Chat';
+      newChatBtn.addEventListener('click', () => {
+        backdrop.style.display = 'none';
+        window.location.href = 'https://gemini.google.com/app';
+      });
+      actionsWrap.appendChild(newChatBtn);
+    }
+
+    const closeBtn = document.createElement('button');
+    closeBtn.style.cssText = 'background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:#e5e7eb;width:30px;height:30px;border-radius:8px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;';
+    closeBtn.textContent = '✕';
+    closeBtn.addEventListener('click', () => {
+      backdrop.style.display = 'none';
+    });
+
+    actionsWrap.appendChild(closeBtn);
+    header.appendChild(titleWrap);
+    header.appendChild(actionsWrap);
+
+    const grid = document.createElement('div');
+    grid.id = 'flow-saved-projects-grid';
+
+    modal.appendChild(header);
+    modal.appendChild(grid);
+    backdrop.appendChild(modal);
+    (document.body || document.documentElement).appendChild(backdrop);
+  }
+
+  const isCurrentlyOpen = backdrop.style.display === 'flex';
+  const nextOpen = forceOpen !== undefined ? forceOpen : !isCurrentlyOpen;
+  if (nextOpen) {
+    if (getCurrentProjectIdFromUrl()) saveCurrentProjectToDevice(false);
+    renderSavedProjectsModalCards();
+    backdrop.style.display = 'flex';
+  } else {
+    backdrop.style.display = 'none';
+  }
+}
+
+function updateMyProjectsUI() {
+  const host = (window.location.hostname || '').toLowerCase();
+  const isGem = host.includes('gemini.google.com') || host.includes('bard.google.com');
+  const isFlow = host.includes('flow.google.com') || host.includes('labs.google');
+  if (!isFlow && !isGem) return;
+  if (!document.body) return;
+
+  const scopedCount = getScopedSavedProjectsList().length;
+
+  let container = document.getElementById('flow-my-projects-dock');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'flow-my-projects-dock';
+
+    if (isGem) {
+      const saveChatBtn = document.createElement('button');
+      saveChatBtn.id = 'flow-save-current-project-btn';
+      saveChatBtn.type = 'button';
+      saveChatBtn.textContent = '📌 Save Chat';
+      saveChatBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const saved = saveCurrentProjectToDevice(true);
+        if (saved) {
+          saveChatBtn.textContent = '✓ Chat Saved!';
+          setTimeout(() => {
+            if (saveChatBtn.isConnected) saveChatBtn.textContent = '📌 Save Chat';
+          }, 1800);
+        } else {
+          saveChatBtn.textContent = 'Send a message first';
+          setTimeout(() => {
+            if (saveChatBtn.isConnected) saveChatBtn.textContent = '📌 Save Chat';
+          }, 1800);
+        }
+      });
+      container.appendChild(saveChatBtn);
+    }
+
+    const myProjBtn = document.createElement('button');
+    myProjBtn.id = 'flow-my-projects-btn';
+    myProjBtn.type = 'button';
+
+    const iconSpan = document.createElement('span');
+    iconSpan.id = 'flow-my-projects-label';
+    iconSpan.textContent = isGem ? '💬 My Chats' : '🎬 My Projects';
+
+    const countSpan = document.createElement('span');
+    countSpan.id = 'flow-my-projects-count';
+    countSpan.textContent = String(scopedCount);
+
+    myProjBtn.appendChild(iconSpan);
+    myProjBtn.appendChild(countSpan);
+    myProjBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleSavedProjectsModal();
+    });
+
+    container.appendChild(myProjBtn);
+    document.body.appendChild(container);
+  }
+
+  if (!isGem) {
+    const legacySaveBtn = document.getElementById('flow-save-current-project-btn');
+    if (legacySaveBtn) legacySaveBtn.remove();
+  }
+
+  const labelEl = document.getElementById('flow-my-projects-label');
+  if (labelEl) labelEl.textContent = isGem ? '💬 My Chats' : '🎬 My Projects';
+
+  const countEl = document.getElementById('flow-my-projects-count');
+  if (countEl) countEl.textContent = String(scopedCount);
+}
+
+loadSavedProjectsFromDevice();
+
+(function initPakflowDomEngine() {
+  const isFlowHost = () => {
+    const h = (window.location.hostname || '').toLowerCase();
+    return h.includes('flow.google.com') || h.includes('labs.google');
+  };
+  const isGeminiHost = () => {
+    const h = (window.location.hostname || '').toLowerCase();
+    return h.includes('gemini.google.com') || h.includes('bard.google.com');
+  };
+  const isProtectedWorkspaceHost = () => isFlowHost() || isGeminiHost();
+
+  try {
+    const savedFakeModel = sessionStorage.getItem('__pakflow_fake_model');
+    if (savedFakeModel && creditMap[savedFakeModel]) {
+      fakeModelName = savedFakeModel;
+    }
+  } catch (e) {}
+
+  function injectPakflowStyles() {
+    if (!isProtectedWorkspaceHost()) return;
+    if (!document.getElementById('pakflow-core-style')) {
+      const style = document.createElement('style');
+      style.id = 'pakflow-core-style';
+      style.textContent =
+        "button[data-fake-model]{color:transparent!important;position:relative!important}" +
+        "button[data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path){color:transparent!important}" +
+        "button[data-fake-model]::after{content:attr(data-fake-model)!important;position:absolute!important;left:var(--fake-model-left,14px)!important;top:50%!important;transform:translateY(-50%)!important;color:#fff!important;font-family:'Google Sans Text','Google Sans',sans-serif!important;font-size:13px!important;font-weight:500!important;pointer-events:none!important;white-space:nowrap!important}" +
+        "button[data-fake-model] i,button[data-fake-model] .google-symbols,button[data-fake-model] mat-icon,button[data-fake-model] svg{color:#fff!important;visibility:visible!important}" +
+        "[role='menuitem'][data-hide-lp='true'],[role='option'][data-hide-lp='true']{height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
+        "flow-menu-item:has([data-hide-lp='true']){height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
+        "[role='menuitem'][data-fake-active='true'],[role='option'][data-fake-active='true']{background-color:rgba(255,255,255,.1)!important;border-radius:12px!important}" +
+        "[data-pakflow-autosetup-hide='true']{opacity:0!important;pointer-events:none!important;transition:none!important}" +
+        "body[data-pakflow-boot-hide='true'] [role='dialog'],body[data-pakflow-boot-hide='true'] [data-radix-popper-content-wrapper],body[data-pakflow-boot-hide='true'] .cdk-overlay-pane,body[data-pakflow-boot-hide='true'] flow-prompt-box-settings,body[data-pakflow-boot-hide='true'] [role='menu'],body[data-pakflow-boot-hide='true'] [role='listbox']{opacity:0!important;pointer-events:none!important;transition:none!important}" +
+        "a[data-fake-credits]{color:transparent!important;position:relative!important}" +
+        "a[data-fake-credits] *{color:transparent!important}" +
+        "a[data-fake-credits]::after{content:attr(data-fake-credits) ' credits'!important;position:absolute!important;left:0.25rem!important;top:0!important;color:#DADCE0!important;text-decoration:underline!important;white-space:nowrap!important}" +
+        "button[data-hide-tab='true']{display:none!important}" +
+        "mat-button-toggle:has(button[data-hide-tab='true']){display:none!important}" +
+        "mat-button-toggle{flex:1!important;}" +
+        "button[data-hide-submit='true']{display:none!important;pointer-events:none!important;opacity:0!important}" +
+        "button[data-hide-signout='true'],[data-hide-signout='true']{display:none!important;visibility:hidden!important;pointer-events:none!important;opacity:0!important;height:0!important;min-height:0!important;padding:0!important;margin:0!important;}" +
+        "button[data-hide-agent='true'],flow-agent-mode-toggle-chip[data-hide-agent='true'],[data-pakflow-agent-hidden='true']{display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;opacity:0!important;}" +
+        "[data-hide-image-only='true'],mat-button-toggle:has([data-hide-image-only='true']){display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;opacity:0!important;overflow:hidden!important;}" +
+        "body[data-flow-image-only='true'] flow-agent-panel,body[data-flow-image-only='true'] flow-agent-mode-toggle-chip{display:none!important;visibility:hidden!important;pointer-events:none!important;}" +
+        "a[href*='flow_ai_credits_page']{font-size:0!important;color:transparent!important;pointer-events:none!important;}" +
+        "a[href*='flow_ai_credits_page']>*{display:none!important;}" +
+        "a[href*='flow_ai_credits_page']::after{content:attr(data-fake-total-credits) ' Google Flow credits'!important;font-size:16px!important;color:#fff!important;visibility:visible!important;text-decoration:underline!important;white-space:nowrap!important;}" +
+        "#ct-blur-overlay { position: fixed !important; top: 0 !important; left: 0 !important; width: 100vw !important; height: 100vh !important; backdrop-filter: blur(10px) !important; background: rgba(0,0,0,0.6) !important; z-index: 2147483640 !important; pointer-events: auto !important; }" +
+        "button[data-elevate-btn='true'] { z-index: 2147483641 !important; box-shadow: 0 0 0 2px rgba(255,255,255,0.1), 0 0 30px rgba(255,255,255,0.3) !important; }" +
+        "a.switch-account-link{display:none!important}" +
+        "a.upsell-link{pointer-events:none!important}" +
+        "a.upsell-link span.mdc-button__label{font-size:0!important}" +
+        "a.upsell-link span.mdc-button__label::after{content:'Google Ultra Plan 20x'!important;font-size:14px!important;color:#000!important}" +
+        "flow-credit-banner,.credit-banner{display:none!important}" +
+        ".mavatar-footer-row,.mavatar-footer-row.collapsed,mavatar-footer-row,expandable-section[storagekey='chats'],[data-test-id='chats-expandable-section'],#sidenav-section-content-chats,#sidenav-section-content-chats .chat-history,#sidenav-section-content-chats .chat-history-list,conversations-list[data-test-id='all-conversations'],[data-test-id='all-conversations'],gem-nav-list-item[data-test-id='conversation']{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;}" +
+        "model-response a,model-response a[href],message-content a,message-content a[href],user-query a,user-query a[href],.response-container a,.query-content a,.user-query-container a,.markdown a,chat-window a,main a,[role='main'] a,source-footnote,inline-source-citation,sources-carousel,sources-carousel-inline,fact-check-evaluator,[data-test-id*='source'],button[aria-label*='source' i],button[aria-label*='Google Help' i]{pointer-events:none!important;cursor:text!important;text-decoration:none!important;}" +
+        ".header-user-button,.header-user-button *,flow-user-tier-chip,flow-user-tier-chip *,.tier-chip,[aria-label='ULTRA tier'],[aria-label='Account details'],header button[aria-label*='Account' i],header img[src*='googleusercontent.com'],header img[src*='ggpht.com']{visibility:visible!important;opacity:1!important;pointer-events:auto!important}" +
+        "#flow-my-projects-dock{position:fixed!important;bottom:18px!important;right:22px!important;left:auto!important;z-index:2147483645!important;display:flex!important;align-items:center!important;gap:10px!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
+        "#flow-my-projects-btn,#flow-save-current-project-btn{display:inline-flex!important;align-items:center!important;gap:8px!important;background:rgba(22,19,36,0.94)!important;border:1px solid rgba(139,92,246,0.45)!important;color:#f3f4f6!important;padding:8px 16px!important;border-radius:999px!important;font-size:13px!important;font-weight:600!important;cursor:pointer!important;box-shadow:0 8px 24px rgba(0,0,0,0.6)!important;transition:all .18s ease!important;}" +
+        "#flow-my-projects-btn:hover,#flow-save-current-project-btn:hover{background:rgba(38,31,64,0.98)!important;border-color:rgba(167,139,250,0.8)!important;transform:translateY(-1px)!important;}" +
+        "#flow-my-projects-count{background:rgba(139,92,246,0.35)!important;color:#ddd6fe!important;padding:1px 8px!important;border-radius:999px!important;font-size:11px!important;font-weight:700!important;}" +
+        "#flow-saved-projects-backdrop{position:fixed!important;inset:0!important;background:rgba(0,0,0,0.72)!important;backdrop-filter:blur(6px)!important;z-index:2147483646!important;display:none;align-items:center!important;justify-content:center!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
+        "#flow-saved-projects-modal{width:92vw!important;max-width:960px!important;max-height:82vh!important;background:rgba(19,17,28,0.97)!important;border:1px solid rgba(139,92,246,0.38)!important;border-radius:16px!important;padding:22px!important;display:flex!important;flex-direction:column!important;gap:18px!important;box-shadow:0 24px 64px rgba(0,0,0,0.85)!important;}" +
+        ".flow-saved-proj-header{display:flex!important;align-items:center!important;justify-content:space-between!important;padding-bottom:12px!important;border-bottom:1px solid rgba(255,255,255,0.08)!important;}" +
+        "#flow-saved-projects-grid{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(210px,1fr))!important;gap:16px!important;overflow-y:auto!important;padding-right:4px!important;max-height:65vh!important;}" +
+        ".flow-saved-proj-card{background:rgba(30,27,46,0.85)!important;border:1px solid rgba(139,92,246,0.22)!important;border-radius:12px!important;overflow:hidden!important;display:flex!important;flex-direction:column!important;transition:border-color .18s ease,transform .18s ease!important;}" +
+        ".flow-saved-proj-card:hover{border-color:rgba(139,92,246,0.65)!important;transform:translateY(-2px)!important;}" +
+        ".flow-saved-proj-preview{height:112px!important;background:linear-gradient(135deg,#201a3a 0%,#141124 100%)!important;position:relative!important;display:flex!important;flex-direction:column!important;align-items:center!important;justify-content:center!important;gap:6px!important;}" +
+        ".flow-saved-proj-play{color:#a78bfa!important;font-size:20px!important;}" +
+        ".flow-saved-proj-sub{color:#a78bfa!important;font-size:11px!important;font-weight:500!important;opacity:0.85!important;}" +
+        ".flow-saved-proj-del{position:absolute!important;top:8px!important;right:8px!important;width:24px!important;height:24px!important;border-radius:999px!important;background:rgba(0,0,0,0.65)!important;border:1px solid rgba(255,255,255,0.18)!important;color:#d1d5db!important;font-size:11px!important;cursor:pointer!important;display:flex!important;align-items:center!important;justify-content:center!important;}" +
+        ".flow-saved-proj-del:hover{background:#ef4444!important;color:#fff!important;border-color:#ef4444!important;}" +
+        ".flow-saved-proj-body{padding:12px!important;display:flex!important;flex-direction:column!important;gap:6px!important;}" +
+        ".flow-saved-proj-title{color:#fff!important;font-size:13px!important;font-weight:700!important;white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;}" +
+        ".flow-saved-proj-date{color:#9ca3af!important;font-size:11px!important;margin-bottom:4px!important;}" +
+        ".flow-saved-proj-open{width:100%!important;background:linear-gradient(90deg,#7c3aed 0%,#6d28d9 100%)!important;border:none!important;color:#fff!important;padding:8px 12px!important;border-radius:8px!important;font-size:12px!important;font-weight:600!important;cursor:pointer!important;transition:opacity .15s ease!important;}" +
+        ".flow-saved-proj-open:hover{opacity:0.92!important;}";
+      (document.head || document.documentElement).appendChild(style);
+    }
+  }
+
+  if (document.documentElement) injectPakflowStyles();
+  else document.addEventListener('DOMContentLoaded', injectPakflowStyles);
+
+  try {
+    const signoutObserver = new MutationObserver(() => {
+      if (isProtectedWorkspaceHost()) {
+        purgeSignoutElements();
+        spoofAccountIdentityInDom();
+      }
+    });
+    if (document.documentElement) {
+      signoutObserver.observe(document.documentElement, { childList: true, subtree: true });
+    } else {
+      document.addEventListener('DOMContentLoaded', () => {
+        if (document.documentElement) {
+          signoutObserver.observe(document.documentElement, { childList: true, subtree: true });
+        }
+      });
+    }
+  } catch (e) {}
+
+  // Block sign-out clicks and disable all links inside Gemini responses / user messages
+  ['click', 'auxclick', 'mousedown', 'pointerdown'].forEach((evtName) => {
+    document.addEventListener(evtName, (e) => {
+      if (!isProtectedWorkspaceHost()) return;
+      const t = e.target;
+      if (!t || !t.closest) return;
+      const btn = t.closest('button, a, [role="button"]');
+      if (btn && (btn.textContent || '').toLowerCase().includes('sign out')) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        btn.style.setProperty('display', 'none', 'important');
+        return false;
+      }
+      if (isGeminiHost()) {
+        if (t.closest('#flow-my-projects-dock, #flow-saved-projects-backdrop')) return;
+        const msgOrRespLink = t.closest(
+          'model-response a, message-content a, user-query a, .markdown a, .response-container a, .query-content a, .user-query-container a, chat-window a, main a, [role="main"] a, source-footnote, inline-source-citation, sources-carousel, sources-carousel-inline, [data-test-id*="source"]'
+        );
+        if (msgOrRespLink) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          return false;
+        }
+        const anyLink = t.closest('a[href], [role="link"]');
+        if (anyLink) {
+          const rawHref = (anyLink.getAttribute('href') || '').trim();
+          const isInternalGem = rawHref.startsWith('/app') || rawHref.startsWith('https://gemini.google.com/app');
+          const isTopSignIn = rawHref.includes('ServiceLogin') && !rawHref.toLowerCase().includes('recovery');
+          if (!isInternalGem && !isTopSignIn) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            return false;
+          }
+        }
+      }
+    }, true);
+  });
+
+  function matchKnownModelName(rawItemText) {
+    const cleaned = cleanText(rawItemText || '').replace(/\s*\[Lower Priority\]/gi, '').trim();
+    if (!cleaned) return '';
+    if (creditMap[cleaned]) return cleaned;
+    for (const k of Object.keys(creditMap)) {
+      if (cleaned.includes(k)) return k;
+    }
+    return '';
+  }
+
+  function findBestBackendModelItem(allMenuItems) {
+    const items = Array.from(allMenuItems || document.querySelectorAll('[role="menuitem"], [role="option"]'));
+    const lpTarget =
+      items.find((mi) => {
+        const t = cleanText(mi.textContent);
+        return t.includes('Lower Priority') && t.includes('Fast');
+      }) ||
+      items.find((mi) => {
+        const t = cleanText(mi.textContent);
+        return t.includes('Lower Priority') && t.includes('Lite');
+      }) ||
+      items.find((mi) => cleanText(mi.textContent).includes('Lower Priority'));
+    if (lpTarget) return { target: lpTarget, isLp: true };
+
+    // Fallback when account has no [Lower Priority] option: use Veo 3.1 - Lite
+    const liteTarget = items.find((mi) => {
+      const t = cleanText(mi.textContent);
+      return t.includes('Veo') && t.includes('Lite');
+    });
+    if (liteTarget) return { target: liteTarget, isLp: false };
+    return { target: null, isLp: false };
+  }
+
+  function triggerLowerPrioritySelection(allMenuItems) {
+    const { target } = findBestBackendModelItem(allMenuItems);
+    if (target) {
+      const wasHidden = target.getAttribute('data-hide-lp') === 'true';
+      if (wasHidden) target.removeAttribute('data-hide-lp');
+      target.__pakflowInternalClick = true;
+      simulateClick(target);
+      try { target.click(); } catch (err) {}
+      if (wasHidden) target.setAttribute('data-hide-lp', 'true');
+      setTimeout(() => {
+        try { delete target.__pakflowInternalClick; } catch (err) {}
+      }, 250);
+      return true;
+    }
+    return false;
+  }
+
+  // Intercept pointerdown/mousedown on non-target model items so Radix/Angular Material
+  // selects [Lower Priority] (or Veo 3.1 - Lite if no LP exists) while displaying user's choice.
+  ['pointerdown', 'mousedown'].forEach((evtName) => {
+    document.addEventListener(evtName, (e) => {
+      if (!isFlowHost() || isImageModeActive || isImageOnlyAccount()) return;
+      const target = e.target;
+      if (!target || !target.closest) return;
+      const menuItem = target.closest('[role="menuitem"], [role="option"]');
+      if (!menuItem || menuItem.__pakflowInternalClick) return;
+      const itemText = cleanText(menuItem.textContent);
+      if ((itemText.includes('Veo') || itemText.includes('Omni')) && !itemText.includes('Lower Priority')) {
+        const matched = matchKnownModelName(itemText);
+        if (matched) {
+          fakeModelName = matched;
+          try { sessionStorage.setItem('__pakflow_fake_model', fakeModelName); } catch (err) {}
+        }
+        const allMenuItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
+        const best = findBestBackendModelItem(allMenuItems);
+        // If this menuItem IS already the best backend target (e.g. Veo 3.1 - Lite when no LP exists), let native click proceed!
+        if (!best.target || best.target === menuItem) {
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      }
+    }, true);
+  });
+
+  // Click interception for 4K Upscaled -> 1080p (-50 cr) and redirecting model selection -> [Lower Priority] / Lite
+  document.addEventListener('click', (e) => {
+    if (!isFlowHost()) return;
+    const target = e.target;
+    if (!target || !target.closest) return;
+
+    const menuItem = target.closest('[role="menuitem"], [role="option"]');
+    if (!menuItem || menuItem.__pakflowInternalClick) return;
+    const itemText = cleanText(menuItem.textContent);
+
+    // 4K Upscaled interception -> click 1080p and deduct 50 credits
+    if (itemText.includes('4K') && itemText.includes('Upscaled')) {
+      let has1080p = false;
+      const allMenuItems = document.querySelectorAll('[role="menuitem"]');
+      for (const mi of allMenuItems) {
+        if ((mi.textContent || '').includes('1080p')) {
+          has1080p = true;
+          break;
+        }
+      }
+      if (has1080p) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        for (const mi of allMenuItems) {
+          if ((mi.textContent || '').includes('1080p')) {
+            simulateClick(mi);
+            break;
+          }
+        }
+        deductCredits({ type: 'video', modelName: '4K Upscale', rate: 50 }, 1, 'upscale_' + Date.now());
+        lastDeductTime = Date.now();
+        return;
+      }
+    }
+
+    // PakFlow Model Redirection: user selects ANY model -> display & charge user's selection, but select [Lower Priority] (or Lite) in Flow
+    if (!isImageModeActive && !isImageOnlyAccount() && (itemText.includes('Veo') || itemText.includes('Omni'))) {
+      if (!itemText.includes('Lower Priority')) {
+        const matched = matchKnownModelName(itemText);
+        if (matched) {
+          fakeModelName = matched;
+          try { sessionStorage.setItem('__pakflow_fake_model', fakeModelName); } catch (err) {}
+        }
+        const allMenuItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
+        const best = findBestBackendModelItem(allMenuItems);
+        if (!best.target || best.target === menuItem) {
+          // Allow native click on Veo 3.1 - Lite to close the dropdown naturally
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        triggerLowerPrioritySelection(allMenuItems);
+      }
+    }
+  }, true);
+
+  // PakFlow Agent Mode Storage Sanitizer & Auto-Deactivator
+  let lastAgentDeactivateAt = 0;
+
+  function sanitizePakflowAgentStorage() {
+    try {
+      [sessionStorage, localStorage].forEach((st) => {
+        if (!st) return;
+        for (let i = 0; i < st.length; i++) {
+          const key = st.key(i);
+          if (!key) continue;
+          const lower = key.toLowerCase();
+          if ((lower.includes('agent') || lower.includes('agentmode')) && !key.startsWith('__pakflow')) {
+            const val = String(st.getItem(key) || '').toLowerCase();
+            if (val === 'true' || val === '1' || val === 'open' || val === 'active' || val === 'expanded') {
+              st.setItem(key, 'false');
+            }
+          }
+        }
+      });
+    } catch (e) {}
+  }
+
+  function cleanAgentUrlParams() {
+    try {
+      if (window.location.search && window.location.search.toLowerCase().includes('agent')) {
+        const url = new URL(window.location.href);
+        let changed = false;
+        for (const p of ['mode', 'agent', 'tab', 'panel', 'view']) {
+          if (url.searchParams.has(p) && (url.searchParams.get(p) || '').toLowerCase().includes('agent')) {
+            url.searchParams.delete(p);
+            changed = true;
+          }
+        }
+        if (changed) {
+          window.history.replaceState(null, '', url.pathname + (url.search ? url.search : '') + url.hash);
+        }
+      }
+    } catch (e) {}
+  }
+
+  function isAgentToggleActive(el) {
+    if (!el) return false;
+    const checkNode = (node) => {
+      if (!node || !(node instanceof Element)) return false;
+      if (node.getAttribute('aria-pressed') === 'true') return true;
+      if (node.getAttribute('aria-checked') === 'true') return true;
+      if (node.getAttribute('aria-selected') === 'true') return true;
+      if (node.getAttribute('data-state') === 'on' || node.getAttribute('data-state') === 'checked' || node.getAttribute('data-state') === 'active') return true;
+      const cls = String(node.className || '').toLowerCase();
+      if (/\b(active|selected|checked|enabled|is-active|on|mdc-evolution-chip--selected|mat-mdc-chip-selected)\b/.test(cls)) return true;
+      return false;
+    };
+    if (checkNode(el)) return true;
+    if (el.parentElement && checkNode(el.parentElement)) return true;
+    const chip = el.closest && el.closest('flow-agent-mode-toggle-chip, mat-chip-option, mat-chip');
+    if (chip && checkNode(chip)) return true;
+    return false;
+  }
+
+  function fireToggleExitClick(target) {
+    if (!target) return;
+    try {
+      target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+      target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      target.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true }));
+      target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+      target.click();
+    } catch (e) {
+      try { target.click(); } catch (_) {}
+    }
+  }
+
+  function ensureExitAgentModeAndHideToggle() {
+    cleanAgentUrlParams();
+    const now = Date.now();
+    const canTriggerExit = now - lastAgentDeactivateAt > 550;
+
+    // 1. Check if Google Flow's <flow-agent-panel> or Agent Mode toggle chip is open/checked
+    const agentPanel = document.querySelector('flow-agent-panel, [data-testid*="agent-panel" i]');
+    const checkedChip = document.querySelector('flow-agent-mode-toggle-chip.checked, flow-agent-mode-toggle-chip[aria-selected="true"], flow-agent-mode-toggle-chip[aria-pressed="true"]');
+
+    if (canTriggerExit) {
+      let triggered = false;
+
+      // Click close button inside <flow-agent-panel> if present
+      if (agentPanel) {
+        const closeBtns = agentPanel.querySelectorAll('button');
+        for (const b of closeBtns) {
+          const txt = (b.textContent || '').trim().toLowerCase();
+          const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+          const title = (b.getAttribute('title') || '').toLowerCase();
+          if (txt === 'close' || txt.includes('close') || aria.includes('close') || aria.includes('collapse') || title.includes('close')) {
+            fireToggleExitClick(b);
+            triggered = true;
+            break;
+          }
+        }
+      }
+
+      // Click checked <flow-agent-mode-toggle-chip> or its inner button to exit Agent Mode
+      if (checkedChip) {
+        const innerBtn = checkedChip.querySelector('button, [role="button"], [role="switch"]') || checkedChip;
+        fireToggleExitClick(innerBtn);
+        if (innerBtn !== checkedChip) fireToggleExitClick(checkedChip);
+        triggered = true;
+      }
+
+      // Also check any complementary/aside Agent panel with close button
+      const sidePanels = document.querySelectorAll('[role="complementary"], aside, [aria-label*="Agent" i]');
+      for (const panel of sidePanels) {
+        const pText = (panel.textContent || '').toUpperCase();
+        if (pText.includes('AGENT') && (pText.includes('SESSION') || pText.includes('CHAT') || pText.includes('HISTORY') || pText.includes('PLAN'))) {
+          const cBtn = panel.querySelector('button[aria-label*="close" i], button[aria-label*="collapse" i], button[title*="close" i]');
+          if (cBtn) {
+            fireToggleExitClick(cBtn);
+            triggered = true;
+          }
+        }
+      }
+
+      if (triggered) {
+        lastAgentDeactivateAt = now;
+        sanitizePakflowAgentStorage();
+      }
+    }
+
+    // 2. Scan Agent toggle buttons: if active or if agentPanel is still in DOM, turn OFF first before hiding!
+    const agentCandidates = [];
+    document.querySelectorAll('flow-agent-mode-toggle-chip, button, a, [role="button"], [role="tab"], [role="switch"]').forEach((el) => {
+      const rawTxt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      const aria = (el.getAttribute('aria-label') || '').trim();
+      if (
+        el.tagName.toLowerCase() === 'flow-agent-mode-toggle-chip' ||
+        rawTxt === 'Agent' ||
+        /^spark\s*Agent$/i.test(rawTxt) ||
+        /^auto_awesome\s*Agent$/i.test(rawTxt) ||
+        aria.toLowerCase() === 'agent' ||
+        aria.toLowerCase() === 'agent mode'
+      ) {
+        const targetBtn = el.tagName.toLowerCase() === 'flow-agent-mode-toggle-chip' ? el : (el.closest('button') || el);
+        if (!agentCandidates.includes(targetBtn)) agentCandidates.push(targetBtn);
+      }
+    });
+
+    document.querySelectorAll('span.content').forEach((sp) => {
+      if ((sp.textContent || '').trim() === 'Agent') {
+        const btn = sp.closest('button') || sp.parentElement;
+        if (btn && !agentCandidates.includes(btn)) agentCandidates.push(btn);
+      }
+    });
+
+    const isAgentPanelStillOpen = Boolean(document.querySelector('flow-agent-panel'));
+
+    agentCandidates.forEach((btn) => {
+      const active = isAgentToggleActive(btn) || isAgentPanelStillOpen;
+      if (active) {
+        // Un-hide temporarily if needed and click to exit Agent Mode
+        if (Date.now() - lastAgentDeactivateAt > 550) {
+          lastAgentDeactivateAt = Date.now();
+          const innerClickable = btn.querySelector('button') || btn;
+          fireToggleExitClick(innerClickable);
+          if (innerClickable !== btn) fireToggleExitClick(btn);
+          sanitizePakflowAgentStorage();
+        }
+      }
+      // Hide visually once processed
+      if (btn.getAttribute('data-hide-agent') !== 'true') {
+        btn.setAttribute('data-hide-agent', 'true');
+      }
+      const hostChip = btn.closest && btn.closest('flow-agent-mode-toggle-chip');
+      if (hostChip && hostChip.getAttribute('data-hide-agent') !== 'true') {
+        hostChip.setAttribute('data-hide-agent', 'true');
+      }
+    });
+  }
+
+  sanitizePakflowAgentStorage();
+  cleanAgentUrlParams();
+
+  // PakFlow Core Loop (fast for model menu spoofing, throttled for heavy DOM scans)
+  setInterval(() => {
+    const now = Date.now();
+    if (isGeminiHost()) {
+      injectPakflowStyles();
+      if (now - (initPakflowDomEngine._lastGeminiPass || 0) < 500) return;
+      initPakflowDomEngine._lastGeminiPass = now;
+      purgeSignoutElements();
+      spoofAccountIdentityInDom();
+      ensureProfileIconVisible();
+      updateMyProjectsUI();
+
+      // Hide shared Gemini account sidebar chat history & mavatar footer row in DOM (never hide main <chat-window> .chat-history!)
+      document.querySelectorAll(
+        '.mavatar-footer-row, .mavatar-footer-row.collapsed, mavatar-footer-row, ' +
+        'expandable-section[storagekey="chats"], [data-test-id="chats-expandable-section"], ' +
+        '#sidenav-section-content-chats, conversations-list[data-test-id="all-conversations"], ' +
+        '[data-test-id="all-conversations"], gem-nav-list-item[data-test-id="conversation"]'
+      ).forEach((el) => {
+        el.style.setProperty('display', 'none', 'important');
+        el.style.setProperty('visibility', 'hidden', 'important');
+        el.style.setProperty('height', '0', 'important');
+        el.style.setProperty('overflow', 'hidden', 'important');
+      });
+      // Ensure main chat window conversation history is always visible
+      document.querySelectorAll('chat-window, chat-window .chat-history, main [ role="listitem" ], chat-window [role="listitem"]').forEach((el) => {
+        if (el.getAttribute('data-flow-hidden') === '1') {
+          el.removeAttribute('data-flow-hidden');
+          el.removeAttribute('aria-hidden');
+          el.style.removeProperty('display');
+          el.style.removeProperty('visibility');
+          el.style.removeProperty('opacity');
+          el.style.removeProperty('height');
+          el.style.removeProperty('max-height');
+          el.style.removeProperty('overflow');
+          el.style.removeProperty('pointer-events');
+        }
+      });
+
+      // Disable all links and citations inside Gemini responses and user messages
+      document.querySelectorAll(
+        'model-response a, message-content a, user-query a, .markdown a, .response-container a, .query-content a, .user-query-container a, chat-window a, main a, [role="main"] a'
+      ).forEach((a) => {
+        if (a.closest('#flow-my-projects-dock, #flow-saved-projects-backdrop')) return;
+        if (a.hasAttribute('href')) a.removeAttribute('href');
+        if (a.hasAttribute('target')) a.removeAttribute('target');
+        a.style.setProperty('pointer-events', 'none', 'important');
+        a.style.setProperty('cursor', 'text', 'important');
+        a.style.setProperty('text-decoration', 'none', 'important');
+      });
+
+      // Auto-save active Gemini chat (/app/<chatId>) to user device
+      const currGemId = getCurrentProjectIdFromUrl();
+      if (currGemId) {
+        if (currGemId !== lastAutoSavedProjectId || now - lastAutoSaveCheckAt > 6000) {
+          lastAutoSavedProjectId = currGemId;
+          lastAutoSaveCheckAt = now;
+          saveCurrentProjectToDevice(false);
+        }
+      }
+
+      // Auto-click Sign In on Gemini landing page if shared Google cookies are ready
+      const signInLink = document.querySelector('a[href*="accounts.google.com/ServiceLogin"], a.gb_Ta, a[aria-label*="Sign in" i]');
+      if (signInLink && !initPakflowDomEngine._geminiSignInClicked) {
+        initPakflowDomEngine._geminiSignInClicked = true;
+        try { signInLink.click(); } catch (e) {}
+      }
+      return;
+    }
+    if (!isFlowHost()) return;
+    injectPakflowStyles();
+
+    if (window.location.pathname !== lastPakflowPathname) {
+      lastPakflowPathname = window.location.pathname;
+      setupState = 6;
+      setupStartTime = now;
+    }
+
+    const runHeavyDomPass = now - (initPakflowDomEngine._lastHeavyDomPass || 0) >= 600;
+    if (runHeavyDomPass) {
+      initPakflowDomEngine._lastHeavyDomPass = now;
+      purgeSignoutElements();
+      spoofAccountIdentityInDom();
+      ensureProfileIconVisible();
+      updateMyProjectsUI();
+      ensureExitAgentModeAndHideToggle();
+
+      // Request database credits periodically until synced
+      if (!hasDatabaseCredits && now - (initPakflowDomEngine._lastCredReq || 0) > 2000) {
+        initPakflowDomEngine._lastCredReq = now;
+        try { ipcRenderer.sendToHost('request-credits'); } catch (e) {}
+      }
+
+      // Auto-save active project to user device
+      const currProjId = getCurrentProjectIdFromUrl();
+      if (currProjId) {
+        if (currProjId !== lastAutoSavedProjectId || now - lastAutoSaveCheckAt > 6000) {
+          lastAutoSavedProjectId = currProjId;
+          lastAutoSaveCheckAt = now;
+          saveCurrentProjectToDevice(false);
+        }
+      }
+
+      document.querySelectorAll('button, a').forEach((el) => {
+        const tc = el.textContent || '';
+        if (tc.includes('Manage subscription')) el.style.pointerEvents = 'none';
+        if (tc.trim() === 'Agent') el.setAttribute('data-hide-agent', 'true');
+        if (tc.includes('Add AI credits')) el.style.display = 'none';
+      });
+    }
+
+    // Hide video quality selector (360p / 720p / 1080p) inside settings popover and strip quality text from the prompt bar pill
+    document.querySelectorAll('button').forEach((btn) => {
+      const bt = (btn.textContent || '').trim();
+      const lower = bt.toLowerCase();
+      if (lower === '360p' || lower === '720p' || lower === '1080p') {
+        const group = btn.closest('mat-button-toggle-group, [role="radiogroup"], [role="tablist"], [role="group"]') || btn.parentElement;
+        if (group && !group.querySelector('button[aria-haspopup="menu"]')) {
+          group.style.setProperty('display', 'none', 'important');
+        } else {
+          btn.style.setProperty('display', 'none', 'important');
+        }
+      }
+      if (bt.includes('Video') && /(360p|720p|1080p)/i.test(bt)) {
+        const walker = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT);
+        let tn;
+        while ((tn = walker.nextNode())) {
+          if (/(360p|720p|1080p)/i.test(tn.nodeValue || '')) {
+            tn.nodeValue = tn.nodeValue
+              .replace(/\s*·\s*(360p|720p|1080p)/gi, '')
+              .replace(/(360p|720p|1080p)\s*·\s*/gi, '')
+              .replace(/\b(360p|720p|1080p)\b/gi, '');
+          }
+        }
+      }
+    });
+
+    if (runHeavyDomPass) {
+      document.querySelectorAll('div, span, textarea, input').forEach((el) => {
+        const textOrPh =
+          el.placeholder ||
+          (el.childNodes.length === 1 && el.childNodes[0].nodeType === 3 ? el.textContent : '');
+        if (textOrPh && textOrPh.includes('edit this video')) {
+          let cur = el;
+          for (let i = 0; i < 6; i++) {
+            if (cur.parentElement && cur.parentElement.tagName !== 'BODY') {
+              cur = cur.parentElement;
+            }
+          }
+          cur.style.setProperty('display', 'none', 'important');
+        }
+      });
+
+      // Elevate "New project" button with #ct-blur-overlay on home page
+      const newProjBtn = Array.from(document.querySelectorAll('button')).find(
+        (b) => b.textContent && b.textContent.includes('New project')
+      );
+      if (newProjBtn) {
+        let overlay = document.getElementById('ct-blur-overlay');
+        if (!overlay && newProjBtn.parentNode) {
+          overlay = document.createElement('div');
+          overlay.id = 'ct-blur-overlay';
+          newProjBtn.parentNode.insertBefore(overlay, newProjBtn);
+        }
+        if (newProjBtn.getAttribute('data-elevate-btn') !== 'true') {
+          newProjBtn.setAttribute('data-elevate-btn', 'true');
+        }
+      } else {
+        const overlay = document.getElementById('ct-blur-overlay');
+        if (overlay) overlay.remove();
+      }
+
+      // Hide Agent span.content buttons
+      document.querySelectorAll('span.content').forEach((sp) => {
+        if ((sp.textContent || '').trim() === 'Agent') {
+          const btn = sp.closest('button');
+          if (btn && btn.getAttribute('data-hide-agent') !== 'true') {
+            btn.setAttribute('data-hide-agent', 'true');
+          }
+        }
+      });
+
+      // Hide Tools tab
+      document.querySelectorAll('span').forEach((sp) => {
+        if ((sp.textContent || '').trim() === 'Tools') {
+          const parent = sp.parentElement;
+          if (parent && !parent.classList.contains('force-hide-radix')) {
+            parent.classList.add('force-hide-radix');
+            parent.style.setProperty('display', 'none', 'important');
+            parent.style.setProperty('pointer-events', 'none', 'important');
+          }
+        }
+      });
+
+      // Hide Extend (Veo / Omni), pen_magic Omni, Create tool, and enable 4K Upscaled menuitem
+      document.querySelectorAll('button, a, [role="button"], [role="menuitem"]').forEach((el) => {
+        if (!el.textContent) return;
+        const t = el.textContent.trim();
+        const tl = t.toLowerCase();
+        if (tl.includes('create tool')) {
+          el.classList.add('force-hide-radix');
+          el.style.setProperty('display', 'none', 'important');
+          el.style.setProperty('pointer-events', 'none', 'important');
+          const prev = el.previousElementSibling;
+          if (prev && (prev.tagName === 'HR' || prev.getAttribute('role') === 'separator' || (prev.textContent || '').trim() === '')) {
+            prev.style.setProperty('display', 'none', 'important');
+          }
+          return;
+        }
+        if (t.includes('Extend (Veo') || t.includes('Extend (Omni')) {
+          el.classList.add('force-hide-radix');
+          el.style.setProperty('display', 'none', 'important');
+        }
+        if (t.includes('pen_magic') && (t.includes('Omni 1.1 Flash') || t.includes('Omni'))) {
+          el.classList.add('force-hide-radix');
+          el.style.setProperty('display', 'none', 'important');
+        }
+        if (el.getAttribute('role') === 'menuitem' && t.includes('4K') && t.includes('Upscaled')) {
+          el.style.setProperty('pointer-events', 'auto', 'important');
+          el.style.setProperty('opacity', '1', 'important');
+          el.style.setProperty('cursor', 'pointer', 'important');
+          el.removeAttribute('aria-disabled');
+          el.removeAttribute('disabled');
+          el.querySelectorAll('*').forEach((child) => {
+            if (child.textContent && child.textContent.trim() === 'Get more AI credits') {
+              child.style.setProperty('display', 'none', 'important');
+            }
+          });
+        }
+      });
+
+      // Hide "Describe your edits"
+      document.querySelectorAll('input, textarea, div, span').forEach((el) => {
+        let match = false;
+        if (el.placeholder && el.placeholder.includes('Describe your edits')) {
+          match = true;
+        } else if (
+          el.childNodes.length === 1 &&
+          el.childNodes[0].nodeType === 3 &&
+          (el.textContent || '').trim() === 'Describe your edits'
+        ) {
+          match = true;
+        }
+        if (match) {
+          let cur = el;
+          for (let i = 0; i < 5; i++) {
+            if (cur.parentElement && cur.parentElement.tagName !== 'BODY' && cur.parentElement.tagName !== 'HTML') {
+              cur = cur.parentElement;
+            }
+          }
+          if (cur && !cur.classList.contains('force-hide-radix')) {
+            cur.classList.add('force-hide-radix');
+            cur.style.setProperty('display', 'none', 'important');
+          }
+        }
+      });
+
+      // Hide stray model labels on canvas cards (outside buttons/menus)
+      document.querySelectorAll('div, span, p').forEach((el) => {
+        if (el.childNodes.length === 1 && el.childNodes[0].nodeType === 3) {
+          const txt = el.textContent || '';
+          if (txt.includes('Veo 3.1') || txt.includes('Omni') || txt.includes('[Lower Priority]')) {
+            if (!el.closest('button') && !el.closest('[role="menuitem"]') && !el.closest('[role="menu"]')) {
+              el.style.setProperty('display', 'none', 'important');
+            }
+          }
+        }
+      });
+
+      // Hide "Not enough AI credits to upscale" tooltip
+      document.querySelectorAll('div[role="tooltip"], div, span').forEach((el) => {
+        if (el.textContent && el.textContent.trim() === 'Not enough AI credits to upscale') {
+          el.style.setProperty('display', 'none', 'important');
+          el.style.setProperty('opacity', '0', 'important');
+          el.style.setProperty('pointer-events', 'none', 'important');
+        }
+      });
+
+      updateConcurrentTileJobs();
+      checkForNewGeneratedMedia();
+    }
+
+    isLockedBySubmission = false;
+
+    // Hide sign-out buttons & x2/x3/x4 batch multiplier tabs
+    const allButtons = document.querySelectorAll('button');
+    allButtons.forEach((b) => {
+      if (runHeavyDomPass && (b.textContent || '').trim().includes('sign out')) {
+        if (b.getAttribute('data-hide-signout') !== 'true') {
+          b.setAttribute('data-hide-signout', 'true');
+        }
+      }
+      const role = b.getAttribute('role');
+      if (role === 'tab' || role === 'radio') {
+        const t = (b.textContent || '').trim().toLowerCase();
+        if (['x2', 'x3', 'x4', '2x', '3x', '4x'].includes(t)) {
+          if (b.getAttribute('data-hide-tab') !== 'true') {
+            b.setAttribute('data-hide-tab', 'true');
+          }
+        }
+      }
+    });
+
+    // Update total credits link (a[href*='flow_ai_credits_page']) with database credits
+    const totalCreditsLink = document.querySelector("a[href*='flow_ai_credits_page']");
+    if (totalCreditsLink) {
+      const balStr = fakeBalance.toString();
+      if (totalCreditsLink.getAttribute('data-fake-total-credits') !== balStr) {
+        totalCreditsLink.setAttribute('data-fake-total-credits', balStr);
+      }
+    }
+
+    // Enforce Image-Only Account rules if credentials.imageOnly is true
+    if (isImageOnlyAccount()) {
+      if (document.body && document.body.getAttribute('data-flow-image-only') !== 'true') {
+        document.body.setAttribute('data-flow-image-only', 'true');
+      }
+      // Hide Video tab, Frames tab, Video models, Durations (4s/6s/8s/10s), Apps/Tools, and credit cost line
+      document.querySelectorAll('button, [role="tab"], [role="radio"]').forEach((b) => {
+        const cleanLbl = getButtonCleanLabel(b).toLowerCase();
+        if (
+          cleanLbl === 'video' ||
+          cleanLbl === 'videos' ||
+          cleanLbl === 'frames' ||
+          cleanLbl === '4s' ||
+          cleanLbl === '6s' ||
+          cleanLbl === '8s' ||
+          cleanLbl === '10s' ||
+          cleanLbl === 'apps' ||
+          cleanLbl === 'tools' ||
+          cleanLbl === 'agent'
+        ) {
+          if (b.getAttribute('data-hide-image-only') !== 'true') {
+            b.setAttribute('data-hide-image-only', 'true');
+          }
+        }
+        if (b.getAttribute('aria-haspopup') === 'menu') {
+          const bt = (b.textContent || '');
+          if (bt.includes('Veo') || bt.includes('Omni') || bt.includes('Lower Priority')) {
+            if (b.getAttribute('data-hide-image-only') !== 'true') {
+              b.setAttribute('data-hide-image-only', 'true');
+            }
+          }
+        }
+      });
+
+      // Hide "Generating will use X credits" in Image-Only mode (0 cost)
+      const creditMenuLinkImg = document.querySelector('a[href*="g1_ai_credit_menu"]');
+      if (creditMenuLinkImg) {
+        const creditRow = creditMenuLinkImg.parentElement || creditMenuLinkImg;
+        creditRow.style.setProperty('display', 'none', 'important');
+      }
+
+      // Ensure Flow is switched to Image tab
+      const allModeBtns = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]'));
+      const imgTabBtn = allModeBtns.find((b) => getButtonCleanLabel(b).toLowerCase() === 'image');
+      if (imgTabBtn) {
+        const imgSelected =
+          imgTabBtn.getAttribute('aria-selected') === 'true' ||
+          imgTabBtn.getAttribute('aria-pressed') === 'true' ||
+          imgTabBtn.classList.contains('active') ||
+          imgTabBtn.classList.contains('selected');
+        if (!imgSelected && now - (initPakflowDomEngine._lastImgTabClick || 0) > 600) {
+          initPakflowDomEngine._lastImgTabClick = now;
+          simulateClick(imgTabBtn);
+          try { imgTabBtn.click(); } catch (e) {}
+          if (initPakflowDomEngine._autoOpenedForImageSwitch) {
+            initPakflowDomEngine._autoOpenedForImageSwitch = false;
+            setTimeout(() => {
+              try {
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+              } catch (e) {}
+            }, 180);
+          }
+        }
+      } else {
+        // Settings popover is closed; check if the bottom prompt pill button still says "Video"
+        const videoPillBtn = Array.from(document.querySelectorAll('button')).find((b) => {
+          const txt = (b.textContent || '').trim();
+          return /\bVideo\b/i.test(txt) && (/(4s|6s|8s|10s|x[1-4])/i.test(txt) || txt.includes('·'));
+        });
+        if (videoPillBtn && now - (initPakflowDomEngine._lastImageSwitchAttempt || 0) > 1500) {
+          initPakflowDomEngine._lastImageSwitchAttempt = now;
+          initPakflowDomEngine._autoOpenedForImageSwitch = true;
+          simulateClick(videoPillBtn);
+          try { videoPillBtn.click(); } catch (e) {}
+        }
+      }
+
+      isImageModeActive = true;
+      document.querySelectorAll('button[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
+      document.querySelectorAll('a[data-fake-credits]').forEach((a) => a.removeAttribute('data-fake-credits'));
+      return;
+    }
+
+    // Detect Image Mode vs Video Mode on normal (Video + Image) accounts
+    const imgTabSelected = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]')).find(
+      (b) =>
+        (b.getAttribute('aria-selected') === 'true' || b.getAttribute('aria-pressed') === 'true' || b.classList.contains('active')) &&
+        getButtonCleanLabel(b).toLowerCase() === 'image'
+    );
+    const nanoMenuTrigger = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(
+      (b) => b.textContent && b.textContent.includes('Nano')
+    );
+    const imagePillActive = Array.from(document.querySelectorAll('button')).find((b) => {
+      const txt = (b.textContent || '').trim();
+      return /\bImage\b/i.test(txt) && txt.includes('·');
+    });
+    isImageModeActive = !!(imgTabSelected || nanoMenuTrigger || imagePillActive);
+
+    if (isImageModeActive) {
+      setupState = 6;
+      document.querySelectorAll('button[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
+      document.querySelectorAll('a[data-fake-credits]').forEach((a) => a.removeAttribute('data-fake-credits'));
+      // Hide credit cost line in Image mode since Image generation is 0 cost
+      const creditMenuLinkImg = document.querySelector('a[href*="g1_ai_credit_menu"]');
+      if (creditMenuLinkImg && creditMenuLinkImg.parentElement) {
+        creditMenuLinkImg.parentElement.style.setProperty('display', 'none', 'important');
+      }
+      const subBtn = Array.from(document.querySelectorAll('button')).find(
+        (b) => b.textContent && b.textContent.includes('arrow_forward')
+      );
+      if (subBtn) subBtn.removeAttribute('data-hide-submit');
+      return;
+    }
+
+    const modelMenuBtn = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(
+      (b) =>
+        b.textContent &&
+        (b.textContent.includes('Veo') || b.textContent.includes('Omni') || b.textContent.includes('Lower Priority'))
+    );
+    const submitBtn = Array.from(document.querySelectorAll('button')).find(
+      (b) => b.textContent && b.textContent.includes('arrow_forward')
+    );
+
+    if (submitBtn) {
+      submitBtn.removeAttribute('data-hide-submit');
+    }
+
+    if (!fakeModelName) {
+      fakeModelName = 'Veo 3.1 - Lite';
+    }
+
+    // Spoof modelMenuBtn with fakeModelName, hide [Lower Priority] menu items, and spoof credits link
+    if (modelMenuBtn) {
+      try {
+        const btnRect = modelMenuBtn.getBoundingClientRect();
+        const iconEl = modelMenuBtn.querySelector('i, .google-symbols, mat-icon, svg');
+        const hasLeftIcon = iconEl && btnRect.width > 0 && (iconEl.getBoundingClientRect().left - btnRect.left < 32);
+        modelMenuBtn.style.setProperty('--fake-model-left', hasLeftIcon ? '34px' : '14px');
+      } catch (e) {}
+      if (modelMenuBtn.getAttribute('data-fake-model') !== fakeModelName) {
+        modelMenuBtn.setAttribute('data-fake-model', fakeModelName);
+      }
+    }
+
+    document.querySelectorAll('[role="menuitem"], [role="option"]').forEach((mi) => {
+      const txt = cleanText(mi.textContent);
+      if (txt.includes('Lower Priority')) {
+        mi.setAttribute('data-hide-lp', 'true');
+      } else if (matchKnownModelName(txt) === fakeModelName) {
+        mi.setAttribute('data-fake-active', 'true');
+      } else {
+        mi.removeAttribute('data-fake-active');
+      }
+    });
+
+    const creditMenuLink = document.querySelector('a[href*="g1_ai_credit_menu"]');
+    if (creditMenuLink && creditMap[fakeModelName]) {
+      if (creditMenuLink.parentElement) {
+        creditMenuLink.parentElement.style.removeProperty('display');
+      }
+      if (creditMenuLink.getAttribute('data-fake-credits') !== creditMap[fakeModelName]) {
+        creditMenuLink.setAttribute('data-fake-credits', creditMap[fakeModelName]);
+      }
+    }
+
+    if (document.body && document.body.getAttribute('data-pakflow-boot-hide') === 'true') {
+      document.body.removeAttribute('data-pakflow-boot-hide');
+    }
+  }, 50);
+})();
+
+function enforceModelRestrictions() {
+  // Handled by PakFlow 50ms loop (data-hide-lp="true" hides [Lower Priority] while keeping standard models visible)
 }
 
 function autoSelectLowerPriorityModel() {
-  try {
-    const host = (location.hostname || '').toLowerCase();
-    if (!host.includes('flow.google.com') && !host.includes('labs.google')) return;
-    if (!window.__flowBlockedModelKickAt) window.__flowBlockedModelKickAt = 0;
-    const now = Date.now();
-    if (now - window.__flowBlockedModelKickAt < 1800) return;
-
-    // If the visible model trigger still shows a blocked label, open menu and pick an allowed item
-    const triggers = Array.from(document.querySelectorAll(
-      'button[aria-label="Select model family"], button.mat-mdc-menu-trigger .model-select-trigger-content, .model-select-trigger-content'
-    ));
-    let needsSwitch = false;
-    for (const tr of triggers) {
-      const t = modelLabelFromEl(tr);
-      if (isBlockedModelLabel(t)) { needsSwitch = true; break; }
-    }
-    if (!needsSwitch) return;
-
-    window.__flowBlockedModelKickAt = now;
-    // Prefer already-open allowed menu item (lower priority first, then any non-blocked model)
-    const items = Array.from(document.querySelectorAll(
-      'flow-menu-item button, button.mat-mdc-menu-item, [role="menuitem"], button.flow-internal-menu-item'
-    )).filter((el) => {
-      if (!isElementVisible(el)) return false;
-      if (el.getAttribute('data-flow-blocked-model') === '1') return false;
-      if (el.closest('[data-flow-blocked-model="1"]')) return false;
-      const t = modelLabelFromEl(el);
-      if (!t || t.length > 120) return false;
-      if (isBlockedModelLabel(t)) return false;
-      return /veo|omni|banana|nano|flash|lite|fast|quality|priority/i.test(t);
-    });
-    items.sort((a, b) => {
-      const score = (el) => {
-        const t = modelLabelFromEl(el).toLowerCase();
-        if (/lower\s*priority/.test(t)) return 0;
-        if (/banana|nano/.test(t)) return 1;
-        return 2;
-      };
-      return score(a) - score(b);
-    });
-    if (items[0]) {
-      hardClick(items[0]);
-      return;
-    }
-    // Open first model family trigger so the menu mounts, then next tick will pick
-    const openBtn = document.querySelector('button[aria-label="Select model family"]');
-    if (openBtn && isElementVisible(openBtn)) hardClick(openBtn);
-  } catch (e) {}
+  // Handled by PakFlow setupState (0 -> 6) state machine & click redirection
 }
 
+function renameLowerPriorityText(_element) {}
+function dismissVideoModelMenus() {}
+
 // =========================================================================
-// GOOGLE AUTO-LOGIN Ã¢â‚¬â€ fill/submit patterned on Veo Shio v1.5.15 automation.js
+// GOOGLE AUTO-LOGIN
 // =========================================================================
 
 function fillInputValue(inputEl, value) {
@@ -1100,31 +2800,45 @@ function clickElement(el) {
 function findAuthenticatorOption() {
   const isAuthText = (raw) => {
     const t = String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    if (!t || t.length > 180) return false;
+    if (!t || t.length > 220) return false;
     // Must look like THIS option alone — not a parent that lists every method
-    if (/one-time security code|security key|tap yes|use your passkey|try another way|phone or tablet|eligible device/.test(t) &&
+    if (/one-time security code|security key|tap yes|use your passkey|try another way|phone or tablet|eligible device|text message|voice call|backup code/.test(t) &&
         !/authenticator/.test(t)) return false;
     if (/one-time security code|tap yes on your phone|use your passkey|can.?t find an eligible/.test(t)) return false;
     return (
       /google authenticator/.test(t) ||
-      (/authenticator app/.test(t) && /code|verification/.test(t)) ||
+      /^authenticator$/.test(t) ||
+      (/authenticator/.test(t) && /app|code|verification|google/.test(t)) ||
       (/verification code/.test(t) && /authenticator/.test(t)) ||
-      (/code from/.test(t) && /authenticator/.test(t))
+      (/get a verification code/.test(t) && /authenticator/.test(t)) ||
+      (/code from/.test(t) && /authenticator/.test(t)) ||
+      /authentication app/.test(t)
     );
   };
 
-  // Prefer dedicated challenge nodes (Google Glif)
-  const preferred = Array.from(document.querySelectorAll(
+  const clickableSel =
     '[data-challengeid], [data-challengetype], [data-action="selectchallenge"], ' +
-    'li[jsname], div[role="link"], div[role="button"], button, a[role="link"], a'
-  ));
+    'li[jsname], div[role="link"], div[role="button"], button, a[role="link"], a';
+
+  // Challenge type 6 / TOTP / totp — Google's machine id for Authenticator
+  const byType = Array.from(document.querySelectorAll('[data-challengetype], [data-challengeid]')).filter((el) => {
+    if (!isElementVisible(el)) return false;
+    const typ = String(el.getAttribute('data-challengetype') || el.getAttribute('data-challengeid') || '').toLowerCase();
+    return typ === '6' || typ === 'totp' || /totp|authenticator/.test(typ);
+  });
+  if (byType[0]) {
+    return byType[0].closest(clickableSel) || byType[0];
+  }
+
+  // Prefer dedicated challenge nodes (Google Glif)
+  const preferred = Array.from(document.querySelectorAll(clickableSel));
   const rowHits = preferred.filter((el) => {
     if (!isElementVisible(el)) return false;
     const label = el.getAttribute?.('aria-label') || '';
     const own = (el.innerText || el.textContent || '');
     // Prefer elements whose own text is the authenticator line (not a huge list)
     const ownNorm = own.replace(/\s+/g, ' ').trim();
-    if (ownNorm.length > 180) return false;
+    if (ownNorm.length > 220) return false;
     return isAuthText(label) || isAuthText(ownNorm);
   });
   // Smallest matching row wins (avoids outer wrappers)
@@ -1142,7 +2856,7 @@ function findAuthenticatorOption() {
     let node;
     while ((node = walker.nextNode())) {
       const t = (node.nodeValue || '').replace(/\s+/g, ' ').trim();
-      if (!t || t.length > 120) continue;
+      if (!t || t.length > 140) continue;
       if (!/authenticator/i.test(t)) continue;
       if (!isAuthText(t) && !/google authenticator/i.test(t)) continue;
       let el = node.parentElement;
@@ -1161,88 +2875,100 @@ function findAuthenticatorOption() {
   return null;
 }
 
-function findGoogleNextButton(kind) {
-  const rootSel = kind === 'password' ? '#passwordNext' : kind === 'totp' ? '#totpNext' : '#identifierNext';
-  let next =
-    document.querySelector(rootSel + ' button') ||
-    document.querySelector(rootSel);
-  if (next && isElementVisible(next)) return next;
-
-  // Newer Google UI: jsname / role=button labeled Next
-  next = Array.from(document.querySelectorAll('button, div[role="button"]')).find((b) => {
-    if (!isElementVisible(b)) return false;
-    const t = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
-    return /^next$/i.test(t);
-  });
-  return next || null;
-}
-
 function submitGoogleNext(kind, input) {
   if (DEBUG_FILL_ONLY) {
     console.log('[Flow Preload] DEBUG_FILL_ONLY — skip Next click:', kind);
     return false;
   }
-  // Never auto-Next while a text captcha is waiting for the user
-  try {
-    if (autoLoginState.captchaPaused || detectGoogleTextCaptcha()) {
-      const ca = findGoogleTextCaptchaInput();
-      if (ca && !(ca.value || '').trim()) {
-        console.log('[Flow Preload] skip Next — text captcha empty');
-        return false;
-      }
-      if (!ca && detectGoogleTextCaptcha()) {
-        console.log('[Flow Preload] skip Next — text captcha visible');
-        return false;
-      }
-    }
-  } catch (e) {}
+  // Host CDP owns identifier/password Next
+  if (window.__flowHostOwnsNext && (kind === 'password' || kind === 'identifier')) {
+    return false;
+  }
   const pathKey = `${kind}:${location.pathname}`;
-  // Do not hard-block retries — Google often paints Next after fill
+  if (autoLoginState.submittedKeys.has(pathKey + ':submit')) return false;
 
-  const next = findGoogleNextButton(kind);
-
-  if (next && isElementVisible(next)) {
-    autoLoginState.lastActionTime = Date.now();
-    try {
-      next.removeAttribute('disabled');
-      next.setAttribute('aria-disabled', 'false');
-    } catch (e) {}
-    try { next.focus(); } catch (e) {}
-    try { next.click(); } catch (e) {}
-    autoLoginState.submittedKeys.add(pathKey + ':submit');
-    return true;
+  // Never Next while Glif top bar / busy spinner is running
+  if (isGoogleProcessing()) {
+    console.log('[Flow Preload] Next deferred — page still loading:', kind);
+    return false;
   }
 
-  // Fallback: Enter on the input (works when Next is delayed/hidden)
-  if (input && input.isConnected) {
+  const rootSel = kind === 'password' ? '#passwordNext' : '#identifierNext';
+  // Prefer real Next button — never form.submit()
+  let next =
+    document.querySelector(rootSel + ' button') ||
+    document.querySelector(rootSel);
+
+  // Fallback: visible button whose label is exactly Next (ignore "Forgot email?")
+  if (!next || !isElementVisible(next)) {
+    next = Array.from(document.querySelectorAll('button')).find(b => {
+      const t = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
+      return /^next$/i.test(t) && isElementVisible(b);
+    });
+  }
+
+  if (next && isElementVisible(next)) {
+    // Disabled / aria-busy Next = still settling
     try {
-      input.focus();
-      const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-      input.dispatchEvent(new KeyboardEvent('keydown', opts));
-      input.dispatchEvent(new KeyboardEvent('keypress', opts));
-      input.dispatchEvent(new KeyboardEvent('keyup', opts));
-      if (input.form) {
-        try { input.form.requestSubmit(); } catch (e) {}
+      if (next.disabled || next.getAttribute('aria-disabled') === 'true' ||
+          next.getAttribute('aria-busy') === 'true') {
+        return false;
       }
-      autoLoginState.lastActionTime = Date.now();
-      autoLoginState.submittedKeys.add(pathKey + ':submit');
-      return true;
     } catch (e) {}
+    autoLoginState.submittedKeys.add(pathKey + ':submit');
+    autoLoginState.lastActionTime = Date.now();
+    try { next.focus(); } catch (e) {}
+    try { next.click(); } catch (e) {}
+    return true;
   }
   return false;
 }
 
 function isGoogleProcessing() {
   try {
-    const progressBar = document.querySelector('[role="progressbar"], .vxxSae, [aria-busy="true"]');
-    if (progressBar) {
+    // Only the thin Glif top strip — generic [role=progressbar] false-positives blocked Next forever
+    const nodes = document.querySelectorAll('.vxxSae, .XhSMyb, [role="progressbar"]');
+    for (const progressBar of nodes) {
       const style = window.getComputedStyle(progressBar);
-      if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && progressBar.offsetWidth > 0) {
-        return true;
-      }
+      const r = progressBar.getBoundingClientRect();
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) < 0.05) continue;
+      if (r.top >= 0 && r.top < 180 && r.height > 0 && r.height <= 6 && r.width > 40) return true;
     }
+    if (document.body && document.body.getAttribute('aria-busy') === 'true') return true;
   } catch (e) {}
   return false;
+}
+
+/** Wait until Glif finishes loading, then click Next (retries; no reload). */
+function submitGoogleNextWhenReady(kind, input, opts = {}) {
+  if (DEBUG_FILL_ONLY) return;
+  const maxMs = opts.maxMs || 12000;
+  const started = Date.now();
+  const tick = () => {
+    if (Date.now() - started > maxMs) {
+      console.warn('[Flow Preload] Next wait timed out:', kind);
+      return;
+    }
+    if (isGoogleProcessing()) {
+      setTimeout(tick, 350);
+      return;
+    }
+    // Password must still be present
+    if (kind === 'password' && input) {
+      if (!input.isConnected || !(input.value || '').length) {
+        setTimeout(tick, 350);
+        return;
+      }
+    }
+    // Settle briefly after bar disappears
+    if (!pathSettled('next-ready:' + kind, 500)) {
+      setTimeout(tick, 200);
+      return;
+    }
+    const ok = submitGoogleNext(kind, input);
+    if (!ok) setTimeout(tick, 400);
+  };
+  setTimeout(tick, opts.initialDelayMs || 800);
 }
 
 function hasGoogleAuthError() {
@@ -1277,6 +3003,7 @@ function resetAutoLoginState() {
   autoLoginState.pathSeenAt = {};
   autoLoginState.lastPath = '';
   autoLoginState.pwdUiReloadTried = false;
+  autoLoginState.selectionUiReloadTried = false;
   autoLoginState.otpRequested = false;
   autoLoginState.otpFilled = false;
   autoLoginState.captchaPaused = false;
@@ -1293,60 +3020,8 @@ function notifyAuthHost(channel, data) {
   try { ipcRenderer.sendToHost(channel, data || null); } catch (e) {}
 }
 
-/** Visible Google text-captcha input (classic "Type the text you hear or see"). */
-function findGoogleTextCaptchaInput() {
-  try {
-    const candidates = Array.from(document.querySelectorAll(
-      'input[name="ca"], input[name="captcha"], input[name="Captcha"], input#ca, input#captcha, ' +
-      'input[name="captchaEntered"], input[autocomplete="off"]'
-    ));
-    for (const el of candidates) {
-      if (!isElementVisible(el)) continue;
-      if (el.type === 'hidden' || el.type === 'password' || el.type === 'email') continue;
-      const hint = (
-        (el.getAttribute('aria-label') || '') + ' ' +
-        (el.placeholder || '') + ' ' +
-        (el.name || '') + ' ' +
-        (el.id || '')
-      ).toLowerCase();
-      if (/captcha|type the text|hear or see|characters you see|ca\b/i.test(hint)) return el;
-    }
-    // Placeholder-only match on any visible text input
-    const byPh = Array.from(document.querySelectorAll('input[type="text"], input:not([type])')).find((el) => {
-      if (!isElementVisible(el)) return false;
-      const ph = ((el.placeholder || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
-      return /type the text you hear or see|type the text|characters you see|hear or see/i.test(ph);
-    });
-    return byPh || null;
-  } catch (e) {
-    return null;
-  }
-}
-
-function detectGoogleTextCaptcha() {
-  try {
-    if (findGoogleTextCaptchaInput()) return true;
-    const imgs = Array.from(document.querySelectorAll(
-      '#captchaimg, img#captchaimg, img[src*="Captcha" i], img[src*="captcha" i], img[alt*="captcha" i]'
-    ));
-    for (const img of imgs) {
-      if (!isElementVisible(img)) continue;
-      const r = img.getBoundingClientRect();
-      if (r.width >= 40 && r.height >= 20) return true;
-    }
-    const text = ((document.body && document.body.innerText) || '').slice(0, 2500);
-    if (/type the text you hear or see|type the text|characters you see in the (?:box|image)/i.test(text)) {
-      return true;
-    }
-  } catch (e) {}
-  return false;
-}
-
 function detectGoogleCaptcha() {
   try {
-    // Classic text captcha on /identifier (no special URL) — treat as captcha immediately
-    if (detectGoogleTextCaptcha()) return true;
-
     const frames = Array.from(document.querySelectorAll(
       'iframe[src*="recaptcha" i], iframe[src*="Recaptcha"], iframe[title*="reCAPTCHA" i], ' +
       'iframe[src*="challenges.cloudflare.com" i], iframe[src*="hcaptcha" i]'
@@ -1355,23 +3030,76 @@ function detectGoogleCaptcha() {
       if (src.includes('badge')) return false; // footer badge ≠ challenge
       const r = f.getBoundingClientRect();
       // Challenge / checkbox widgets are sizable; ignore tiny/hidden frames
-      return r.width >= 100 && r.height >= 60 && r.bottom > 0 && r.top < window.innerHeight;
+      return r.width >= 80 && r.height >= 40 && r.bottom > 0 && r.top < window.innerHeight;
     });
     if (frames.length) return true;
 
-    const widgets = document.querySelectorAll(
-      '.g-recaptcha, #recaptcha, [data-sitekey], #captchaimg, img#captchaimg'
-    );
-    for (const w of widgets) {
-      const r = w.getBoundingClientRect();
-      if (r.width >= 100 && r.height >= 60 && isElementVisible(w)) return true;
+    // Identifier image captcha (#captchaimg) — often smaller than recaptcha widgets
+    const captchaImgs = Array.from(document.querySelectorAll(
+      '#captchaimg, img#captchaimg, img[src*="Captcha" i], img[src*="captcha" i], img[alt*="captcha" i]'
+    )).filter((img) => {
+      if (!isElementVisible(img)) return false;
+      const r = img.getBoundingClientRect();
+      return r.width >= 20 && r.height >= 12;
+    });
+    if (captchaImgs.length) return true;
+
+    // Any captcha-named / "Type the text you hear or see" field = captcha (no copyHit required)
+    const captchaInputs = Array.from(document.querySelectorAll(
+      'input[name="ca"], input#ca, input[name="captcha"], input[id*="captcha" i], ' +
+      'input[aria-label*="Type the text" i], input[aria-label*="hear or see" i], ' +
+      'input[aria-label*="characters" i], input[placeholder*="Type the text" i], ' +
+      'input[placeholder*="hear or see" i], input[placeholder*="characters" i]'
+    )).filter(isElementVisible);
+    if (captchaInputs.length) return true;
+
+    // User rule: any ADDITIONAL visible text field beyond email/identifier = captcha
+    const path = location.pathname || '';
+    const onCredStep = /identifier|challenge\/pwd|signin\/v2\/sl\/pwd/i.test(path);
+    if (onCredStep || /accounts\.google\.com/i.test(location.hostname || '')) {
+      const textInputs = Array.from(document.querySelectorAll('input')).filter((el) => {
+        if (!isElementVisible(el)) return false;
+        const t = String(el.getAttribute('type') || 'text').toLowerCase();
+        if (['hidden', 'password', 'submit', 'button', 'checkbox', 'radio', 'file', 'image', 'reset'].includes(t)) {
+          return false;
+        }
+        // text / email / tel / search / no type
+        return true;
+      });
+      const isPrimaryId = (el) => {
+        const typ = String(el.getAttribute('type') || '').toLowerCase();
+        const meta = [
+          el.name, el.id, el.autocomplete, el.getAttribute('aria-label'), el.placeholder
+        ].map((x) => String(x || '').toLowerCase()).join(' ');
+        return typ === 'email' ||
+          /^(email|identifier|username)$/i.test(String(el.name || el.id || '')) ||
+          /identifierid|\bidentifier\b|\bemail\b|\busername\b|account name|phone number/i.test(meta);
+      };
+      const extras = textInputs.filter((el) => !isPrimaryId(el));
+      // Extra text field (e.g. captcha) on identifier = captcha
+      if (extras.length >= 1 && /identifier/i.test(path)) return true;
+      if (onCredStep && textInputs.length >= 2) return true;
+      // Placeholder / label copy alone
+      if (textInputs.some((el) => {
+        const meta = [
+          el.placeholder, el.getAttribute('aria-label'), el.name, el.id
+        ].map((x) => String(x || '')).join(' ');
+        return /type the text|hear or see|enter the characters|captcha/i.test(meta);
+      })) return true;
     }
 
-    const text = ((document.body && document.body.innerText) || '').slice(0, 2500);
-    // Real challenge copy — not the footer "protected by reCAPTCHA"
-    if (/unusual traffic from your computer|select all (?:images|squares)|i.?m not a robot|verify it.?s you|couldn.?t sign you in/i.test(text)) {
-      if (frames.length || widgets.length || /unusual traffic|select all (?:images|squares)/i.test(text)) return true;
-    }
+    const widgets = Array.from(document.querySelectorAll(
+      '.g-recaptcha, #recaptcha, [data-sitekey]'
+    )).filter((w) => {
+      const r = w.getBoundingClientRect();
+      return r.width >= 80 && r.height >= 40 && isElementVisible(w);
+    });
+    if (widgets.length) return true;
+
+    const text = ((document.body && document.body.innerText) || '').slice(0, 3000);
+    const copyHit = /type the text you hear or see|type the text|enter the characters|unusual traffic from your computer|select all (?:images|squares)|i.?m not a robot|verify it.?s you|couldn.?t sign you in/i.test(text);
+    if (copyHit && /captcha|hear or see|type the text/i.test(text)) return true;
+    if (/unusual traffic|select all (?:images|squares)/i.test(text)) return true;
   } catch (e) {}
   return false;
 }
@@ -1443,14 +3171,13 @@ function syncGoogleAuthChrome() {
     return { captcha: false };
   }
 
-  // URL-level recaptcha OR classic text captcha on identifier — lift cover immediately
+  // URL-level recaptcha challenge — lift cover immediately (no debounce)
   const urlIsRecaptcha = /challenge\/recaptcha|\/recaptcha/i.test(path + location.search);
-  const textCaptchaNow = detectGoogleTextCaptcha();
-  if (urlIsRecaptcha || textCaptchaNow) {
+  if (urlIsRecaptcha) {
     autoLoginState.captchaHits = 2;
     autoLoginState.captchaMisses = 0;
     if (!autoLoginState.captchaPaused) {
-      console.log('[Flow Preload]', textCaptchaNow ? 'text captcha' : 'reCAPTCHA URL', '— pausing auto-login');
+      console.log('[Flow Preload] reCAPTCHA URL — pausing auto-login');
       autoLoginState.captchaPaused = true;
       autoLoginState.overlayDismissed = false;
       showCaptchaBanner();
@@ -1472,7 +3199,8 @@ function syncGoogleAuthChrome() {
     autoLoginState.captchaHits = 0;
   }
 
-  const captchaConfirmed = autoLoginState.captchaHits >= 2;
+  // 1 hit is enough — identifier image captcha must lift cover immediately
+  const captchaConfirmed = autoLoginState.captchaHits >= 1;
   const captchaCleared = autoLoginState.captchaMisses >= 3;
 
   if (captchaConfirmed) {
@@ -1526,11 +3254,26 @@ function runGoogleAutoLogin() {
   // Flow / Labs: if already in workspace, stop. Never auto-click "Sign in" here —
   // that restarted Google OAuth while the SPA was still hydrating (login loop).
   // AppShell owns AddSession when a fresh Google login is required.
+  if (hostname.includes('gemini.google.com') || hostname.includes('bard.google.com')) {
+    removeAutoLoginOverlay();
+    removeCaptchaBanner();
+    const geminiSignIn = document.querySelector('a[href*="accounts.google.com/ServiceLogin"], a[aria-label*="Sign in" i]');
+    if (geminiSignIn && isVisible(geminiSignIn) && !autoLoginState.geminiSignInClicked) {
+      autoLoginState.geminiSignInClicked = true;
+      autoLoginState.lastActionTime = now;
+      simulateClick(geminiSignIn);
+      return;
+    }
+    autoLoginState.done = true;
+    notifyAuthHost('auth:auto-login', { overlay: false, captcha: false, done: true });
+    return;
+  }
+
   if (hostname.includes('flow.google.com') || hostname.includes('labs.google')) {
     removeAutoLoginOverlay();
     removeCaptchaBanner();
-    // Stay on /about or /landing — bouncing to root blinks and races AppShell login start.
-    const isWorkspace = !!(
+    const isAboutOrLanding = /^\/(about|landing)/i.test(pathname) || /\/fx\/.*\/tools\/flow\/about/i.test(pathname);
+    const isWorkspace = !isAboutOrLanding && !!(
       document.querySelector('flow-app, flow-app-root, flow-projects-page, [data-testid*="project"]') ||
       (document.querySelector('header, flow-app-header, [role="banner"]') &&
         document.querySelector('[role="main"], [role="tablist"], textarea, [contenteditable="true"]'))
@@ -1540,7 +3283,21 @@ function runGoogleAutoLogin() {
       notifyAuthHost('auth:auto-login', { overlay: false, captcha: false, done: true });
       return;
     }
-    // No guest CTAs — AppShell owns fresh Google login when needed
+    if (isAboutOrLanding && credentials.email) {
+      if (!autoLoginState.aboutPageEnteredAt) autoLoginState.aboutPageEnteredAt = now;
+      if (now - autoLoginState.aboutPageEnteredAt > 1800 && (!autoLoginState.lastAboutClickAt || now - autoLoginState.lastAboutClickAt > 6000)) {
+        const cta = Array.from(document.querySelectorAll('button, a[role="button"], a')).find(el => {
+          if (!isVisible(el)) return false;
+          const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          return /^(sign in|create with flow|get started|launch flow|try flow)$/i.test(t);
+        });
+        if (cta) {
+          autoLoginState.lastAboutClickAt = now;
+          autoLoginState.lastActionTime = now;
+          simulateClick(cta);
+        }
+      }
+    }
     return;
   }
 
@@ -1551,7 +3308,7 @@ function runGoogleAutoLogin() {
   if (/CheckCookie|LoginDoneHtml|chtml=LoginDone/i.test(location.href + pathname)) {
     if (!autoLoginState.submittedKeys.has('checkcookie-continue')) {
       autoLoginState.submittedKeys.add('checkcookie-continue');
-      let dest = 'https://flow.google.com/';
+      let dest = credentials.targetUrl || 'https://flow.google.com/';
       try {
         const cont = new URL(location.href).searchParams.get('continue');
         if (cont && /^https:\/\//i.test(cont)) dest = cont;
@@ -1584,23 +3341,30 @@ function runGoogleAutoLogin() {
     return;
   }
 
-  // Progress bar can linger on Glif — never block identifier/email forever
+  // Progress bar on password/identifier — wait; do not reload, do not Next yet
   const onIdentifierPath = /signin\/identifier|\/identifier(?:\/|$)/i.test(pathname);
-  const on2faPath = /\/challenge\/(totp|selection|sk|iap|dp|ootp)/i.test(pathname);
-  if (isGoogleProcessing() && !onPwdChallenge && !on2faPath && !onIdentifierPath) {
-    if (!pathSettled('processing-wait', 2000)) return;
+  const on2faPath = /\/challenge\/(totp|selection|sk|iap|dp|ootp|skotp)/i.test(pathname);
+  if (isGoogleProcessing()) {
+    // Allow fill while loading, but block submit paths further down via submitGoogleNext
+    if ((onPwdChallenge || onIdentifierPath) && !pathSettled('processing-wait', 400)) return;
+    if (!onPwdChallenge && !on2faPath && !onIdentifierPath && !pathSettled('processing-wait', 2000)) return;
   }
 
   // Google SPA: URL often updates before the new form paints
   if (autoLoginState.lastPath !== pathname) {
     const wasPwd = /\/challenge\/pwd/i.test(autoLoginState.lastPath || '');
     const nowPwd = /\/challenge\/pwd/i.test(pathname);
+    const nowPostPwd = /\/challenge\/(selection|totp|skotp|sk|iap|dp|ootp)/i.test(pathname);
     const prev = autoLoginState.lastPath;
     autoLoginState.lastPath = pathname;
-    // Staying on password challenge — do not reset fill/submit (path flicker caused loops)
+    // Staying on password — keep keys. Leaving pwd → selection/totp — KEEP passwordSubmitted
+    // so we never re-fill/re-Next. Only clear on identifier bounce or forceReset.
     if (wasPwd && nowPwd) {
-      // keep passwordSubmitted / keys
-    } else {
+      // keep
+    } else if (wasPwd && nowPostPwd) {
+      autoLoginState.passwordSubmitted = true;
+      autoLoginState.passwordFilled = true;
+    } else if (!nowPwd && !nowPostPwd) {
       autoLoginState.emailSubmitted = false;
       autoLoginState.passwordSubmitted = false;
       autoLoginState.emailFilled = false;
@@ -1664,6 +3428,21 @@ function runGoogleAutoLogin() {
       (/enter code/i.test(pageText) && /authenticator/i.test(pageText))
     );
 
+  // Host owns 2FA CDP — still allow inject fallback if host stalls (skotp / chooser)
+  const host2faStalled = (() => {
+    if (!window.__flowHostOwns2fa) return false;
+    const key = 'host2fa-watch:' + pathname;
+    if (!autoLoginState.submittedKeys.has(key)) {
+      autoLoginState.submittedKeys.add(key);
+      autoLoginState._host2faSince = now;
+      return false;
+    }
+    return now - (autoLoginState._host2faSince || now) > 4500;
+  })();
+  if (window.__flowHostOwns2fa && (onSecurityCodeScreen || onChallengeChooser) && !host2faStalled) {
+    return;
+  }
+
   // "Get a code to sign in" / g.co/sc / skotp → Try another way FIRST (before authenticator pick)
   if (!DEBUG_FILL_ONLY && onSecurityCodeScreen && !totpReady) {
     const tryAnother =
@@ -1682,15 +3461,28 @@ function runGoogleAutoLogin() {
   }
 
   // Selection screen: click "Get a verification code from the Google Authenticator app"
+  // Keep cover on — only auto-select; do not wait for user.
   if (!DEBUG_FILL_ONLY && !totpReady && (onChallengeChooser || /authenticator/i.test(pageText))) {
     const authTarget = findAuthenticatorOption();
     if (authTarget) {
-      const retryBucket = Math.floor(now / 2000);
+      const retryBucket = Math.floor(now / 1400);
       console.log('[Flow Preload] Selecting Google Authenticator TOTP option');
       autoLoginState.submittedKeys.delete('auth-app:' + pathname + ':' + (retryBucket - 1));
       clickOnce('auth-app:' + pathname + ':' + retryBucket, authTarget);
       return;
     }
+    // URL already /challenge/selection but SPA still shows password card — wait, do not reload
+    if (/\/challenge\/selection/i.test(pathname)) {
+      const pwdStill =
+        document.querySelector('input[name="Passwd"], input[type="password"], input[autocomplete="current-password"]');
+      const chooserReady =
+        /choose how you want to sign in|choose a way/i.test(pageText) ||
+        /authenticator/i.test(pageText);
+      if (pwdStill && isElementVisible(pwdStill) && !chooserReady) {
+        return; // host DriveAuthenticator waits; reloading bounced to password
+      }
+    }
+    return;
   }
 
   // TOTP code field: request OTP from host, then fill + Next
@@ -1746,8 +3538,11 @@ function runGoogleAutoLogin() {
   );
   const passwordInput = passwordInputEarly;
 
-  // Password: only when field is actually painted — submit ONCE (no click loops)
-  if (onPwdChallenge || pwdFieldReady) {
+  // Password: only on /challenge/pwd — never while selection/totp paints Passwd (SPA lag)
+  const onPostPwdPath = /\/challenge\/(selection|totp|skotp|sk|iap|dp|ootp)/i.test(pathname);
+  if (onPostPwdPath) return;
+  if (onPwdChallenge || (pwdFieldReady && !onChallengeChooser && !onSecurityCodeScreen)) {
+    if (!onPwdChallenge && !pwdFieldReady) return;
     if (!pwdFieldReady) {
       pathSettled('challenge-form', 500);
       return;
@@ -1755,21 +3550,24 @@ function runGoogleAutoLogin() {
     if (!pathSettled('pwd-ready', 400)) return;
     if (!credentials.password) return;
 
-    // Host already submitted this password step
+    // Host already submitted / scheduled CDP Next
     try {
       const st = window.__flowHostAuto;
       const pwdKey = 'pwd:' + pathname.split('/').slice(0, 5).join('/');
-      if (st && st[pwdKey] === 'submitted') {
-        autoLoginState.passwordSubmitted = true;
+      if (st && (st[pwdKey] === 'submitted' || st[pwdKey] === 'cdp-scheduled' || st[pwdKey] === 'filled')) {
+        autoLoginState.passwordSubmitted = st[pwdKey] === 'submitted';
+        autoLoginState.passwordFilled = true;
+        // Host owns Next — fill only if empty
+        if ((passwordInput.value || '') !== credentials.password) {
+          fillInputValue(passwordInput, credentials.password);
+        }
         return;
       }
     } catch (e) {}
 
     if (autoLoginState.passwordSubmitted) {
-      const stuckTooLong = now - autoLoginState.lastActionTime > 8000;
-      const wrongPwd = hasGoogleAuthError();
-      // Retry if wrong password OR still on /challenge/pwd with no progress (Next click was a no-op)
-      if (stuckTooLong && autoLoginState.attempts < 2 && (wrongPwd || onPwdChallenge)) {
+      // Only retry on a clear wrong-password alert — not generic page text
+      if (hasGoogleAuthError() && now - autoLoginState.lastActionTime > 8000 && autoLoginState.attempts < 1) {
         autoLoginState.attempts += 1;
         autoLoginState.passwordSubmitted = false;
         autoLoginState.submittedKeys.delete(`password:${pathname}:fill`);
@@ -1780,7 +3578,6 @@ function runGoogleAutoLogin() {
             delete window.__flowHostAuto[pwdKey];
           }
         } catch (e) {}
-        console.warn('[Flow Preload] Password step stuck — retry submit', { wrongPwd, attempts: autoLoginState.attempts });
       } else {
         return;
       }
@@ -1797,29 +3594,28 @@ function runGoogleAutoLogin() {
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.passwordFilled = true;
       autoLoginState.lastActionTime = now;
-      if (DEBUG_FILL_ONLY) {
-        console.log('[Flow Preload] DEBUG_FILL_ONLY — password filled, wait for manual Next');
-        return;
-      }
-    }
-
-    // Keep clicking Next until navigation — previously we set passwordSubmitted
-    // even when click failed, which froze on /challenge/pwd until manual reload.
-    if (!DEBUG_FILL_ONLY && !autoLoginState.passwordSubmitted) {
-      if (now - (autoLoginState.lastActionTime || 0) < 700) return;
-      const clicked = submitGoogleNext('password', passwordInput);
-      if (clicked) {
-        autoLoginState.passwordSubmitted = true;
-        autoLoginState.lastActionTime = now;
-        try {
-          window.__flowHostAuto = window.__flowHostAuto || {};
-          window.__flowHostAuto['pwd:' + location.pathname.split('/').slice(0, 5).join('/')] = 'submitted';
-        } catch (e) {}
-        console.log('[Flow Preload] Password Next clicked');
-      } else if (now - (autoLoginState.lastActionTime || 0) > 10000 && !autoLoginState.pwdUiReloadTried) {
-        autoLoginState.pwdUiReloadTried = true;
-        console.warn('[Flow Preload] Password Next never appeared — cache reload');
-        try { ipcRenderer.sendToHost('auth:stuck-pwd'); } catch (e) {}
+      // Host CDP owns Next when __flowHostOwnsNext — do not submitGoogleNextWhenReady
+      if (window.__flowHostOwnsNext || DEBUG_FILL_ONLY) {
+        console.log('[Flow Preload] Password filled — host owns Next');
+        // If host CDP never advances, DOM-click Next after stall (password loop fix)
+        const watchKey = `host-next-watch:password:${pathname}`;
+        if (!autoLoginState.submittedKeys.has(watchKey)) {
+          autoLoginState.submittedKeys.add(watchKey);
+          setTimeout(() => {
+            try {
+              if (!/\/challenge\/pwd/i.test(location.pathname || '')) return;
+              const pwd = document.querySelector('input[name="Passwd"], input[type="password"]');
+              if (!pwd || !(pwd.value || '').length) return;
+              console.warn('[Flow Preload] Host Next stalled on password — DOM fallback');
+              const owned = window.__flowHostOwnsNext;
+              window.__flowHostOwnsNext = false;
+              submitGoogleNext('password', pwd);
+              window.__flowHostOwnsNext = owned;
+            } catch (e) {}
+          }, 6000);
+        }
+      } else if (!autoLoginState.passwordSubmitted) {
+        submitGoogleNextWhenReady('password', passwordInput, { initialDelayMs: 900, maxMs: 14000 });
       }
     }
     return;
@@ -1851,8 +3647,24 @@ function runGoogleAutoLogin() {
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.emailFilled = true;
       autoLoginState.lastActionTime = now;
-      if (DEBUG_FILL_ONLY) {
-        console.log('[Flow Preload] DEBUG_FILL_ONLY — email filled, wait for manual Next');
+      if (DEBUG_FILL_ONLY || window.__flowHostOwnsNext) {
+        console.log('[Flow Preload] Email filled — host owns Next / fill-only');
+        const watchKey = `host-next-watch:identifier:${pathname}`;
+        if (window.__flowHostOwnsNext && !autoLoginState.submittedKeys.has(watchKey)) {
+          autoLoginState.submittedKeys.add(watchKey);
+          setTimeout(() => {
+            try {
+              if (/\/challenge\/pwd/i.test(location.pathname || '')) return;
+              const em = document.querySelector('input#identifierId, input[type="email"]');
+              if (!em || !(em.value || '').trim()) return;
+              console.warn('[Flow Preload] Host Next stalled on identifier — DOM fallback');
+              const owned = window.__flowHostOwnsNext;
+              window.__flowHostOwnsNext = false;
+              submitGoogleNext('identifier', em);
+              window.__flowHostOwnsNext = owned;
+            } catch (e) {}
+          }, 6000);
+        }
       } else {
         setTimeout(() => {
           if (!emailInput.isConnected) return;
@@ -1869,6 +3681,7 @@ function runGoogleAutoLogin() {
     // If still on identifier after fill+Next, retry Next once (first click often ignored)
     if (
       !DEBUG_FILL_ONLY &&
+      !window.__flowHostOwnsNext &&
       autoLoginState.emailFilled &&
       now - autoLoginState.lastActionTime > 3500 &&
       autoLoginState.attempts < 3 &&
@@ -1908,7 +3721,7 @@ function dismissGoogleInterstitials() {
   const path = (location.pathname || '').toLowerCase();
   const bodySlice = ((document.body && document.body.innerText) || '').slice(0, 2800);
   const onGds = host.includes('gds.google.com');
-  const onFlow = host.includes('flow.google.com') || host.includes('labs.google');
+  const onFlow = host.includes('flow.google.com') || host.includes('labs.google') || host.includes('gemini.google.com');
   const onAccounts = host.includes('accounts.google.com') || host.includes('accounts.youtube.com');
   // Never interrupt password / TOTP / method chooser — but selfie / precollection IS skippable
   const onHardAuth =
@@ -1985,8 +3798,9 @@ function dismissGoogleInterstitials() {
       if (!window.__flowHomeAddrSeenAt) window.__flowHomeAddrSeenAt = now;
       if (now - window.__flowHomeAddrSeenAt > 1800 && now - window.__flowHomeAddrBounceAt > 2500) {
         window.__flowHomeAddrBounceAt = now;
-        console.log('[Flow Preload] Bouncing off gds homeaddress → Flow');
-        location.replace('https://flow.google.com/');
+        const bounceUrl = credentials.targetUrl || 'https://flow.google.com/';
+        console.log('[Flow Preload] Bouncing off gds homeaddress →', bounceUrl);
+        location.replace(bounceUrl);
         return true;
       }
     } catch (e) {}
@@ -2083,8 +3897,9 @@ function dismissGoogleInterstitials() {
       const now = Date.now();
       if (now - window.__flowRecoveryBounceAt > 2500) {
         window.__flowRecoveryBounceAt = now;
-        console.log('[Flow Preload] Bouncing off Google recovery interstitial (gds only)');
-        location.replace('https://flow.google.com/');
+        const bounceUrl = credentials.targetUrl || 'https://flow.google.com/';
+        console.log('[Flow Preload] Bouncing off Google recovery interstitial (gds only) →', bounceUrl);
+        location.replace(bounceUrl);
         return true;
       }
     } catch (e) {}
@@ -2097,15 +3912,20 @@ function dismissGoogleInterstitials() {
 function isProtectedMediaNode(el) {
   if (!el || !el.closest) return false;
   try {
-    // Always allow hiding known chrome targets (credits / ULTRA / account / projects grid / model menu)
+    // Never hide top-right profile button, avatar, or ULTRA tier chip
+    if (
+      el.closest(
+        '.header-user-button, flow-user-tier-chip, .tier-chip, [aria-label="ULTRA tier"], ' +
+        '[aria-label="Account details"], .account-switcher-placeholder, #flow-my-projects-dock, #flow-saved-projects-backdrop'
+      )
+    ) {
+      return true;
+    }
+    // Always allow hiding known chrome targets (credits banner / projects grid / delete-button)
     if (
       el.closest(
         'flow-credit-banner, .credit-banner, .credit-banner-container, ' +
-        'flow-user-tier-chip, .tier-chip, .header-user-button, ' +
-        '.projects-grid, flow-menu-item.delete-button, ' +
-        'flow-menu-item, [role="menuitem"], .mat-mdc-menu-panel, .mat-mdc-menu-content, ' +
-        '.cdk-overlay-container, [data-flow-blocked-model="1"], ' +
-        '#gb, .boqOnegoogleliteOgbOneGoogleBar, [aria-label="Account details"]'
+        '.projects-grid, flow-menu-item.delete-button, [data-flow-blocked-model="1"]'
       )
     ) {
       return false;
@@ -2176,15 +3996,7 @@ function hideFlowChromeTargets() {
       'flow-menu-item.delete-button',
       'flow-credit-banner',
       '.credit-banner',
-      '.credit-banner-container',
-      'flow-user-tier-chip',
-      '.tier-chip',
-      '.header-user-button',
-      '[aria-label="Account details"]',
-      '[aria-label="ULTRA tier"]',
-      '#gb',
-      '.boqOnegoogleliteOgbOneGoogleBar',
-      '.account-switcher-placeholder'
+      '.credit-banner-container'
     ];
     sels.forEach((sel) => {
       document.querySelectorAll(sel).forEach((el) => hideEl(el));
@@ -2200,97 +4012,20 @@ function hideFlowChromeTargets() {
 function hideUltraControls() {
   try {
     hideFlowChromeTargets();
-    // Only prompt/settings chips — never walk every div (that blanked All media)
-    const roots = document.querySelectorAll(
-      'flow-prompt, [class*="prompt"], [class*="model"], [class*="settings"], [role="listbox"], [role="menu"], header, flow-user-tier-chip'
-    );
-    const scan = (root) => {
-      root.querySelectorAll('button, [role="button"], [role="radio"], [role="tab"], [role="option"], label, span').forEach((el) => {
-        if (!el || el.getAttribute('data-flow-hidden') === '1') return;
-        if (el.childElementCount > 4) return;
-        const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '')
-          .replace(/\s+/g, ' ')
-          .trim();
-        if (!t || t.length > 24) return;
-        if (!/^ultra$/i.test(t) && !/ULTRA tier/i.test(t)) return;
-        const target =
-          el.closest('flow-user-tier-chip, button, [role="button"], [role="radio"], [role="tab"], [role="option"], label') || el;
-        hideEl(target);
-      });
-    };
-    if (!roots.length) return;
-    roots.forEach(scan);
   } catch (e) {}
 }
 
 function killAccountPopupNow() {
-  // Never scrub Google sign-in / captcha pages — the needle "protected by recaptcha"
-  // was matching the real challenge UI and hideEl()'d the whole page (0×0 blank).
+  // PakFlow mode: keep the account/credits popup open so the user sees:
+  // - "45000 Google Flow credits" (a[href*='flow_ai_credits_page']::after)
+  // - "Google Ultra Plan 20x" (a.upsell-link span.mdc-button__label::after)
+  // Only hide sign-out buttons and switch-account email links inside the popup.
   try {
     const host = (location.hostname || '').toLowerCase();
     if (host.includes('accounts.google.com') || host.includes('accounts.youtube.com')) return;
-    const path = (location.pathname || '').toLowerCase();
-    if (path.includes('recaptcha') || path.includes('captcha') || /\/challenge\//.test(path)) return;
   } catch (e) {}
-
-  const needles = [
-    'sign out of all accounts',
-    'visible watermarking',
-    'credits refresh daily',
-    'create avatar',
-  ];
-
-  const all = document.querySelectorAll(
-    'div, section, aside, dialog, [role="dialog"], [role="menu"], [role="presentation"], [role="listbox"], [role="alertdialog"]'
-  );
-  for (const el of all) {
-    if (!el || el.getAttribute('data-flow-hidden') === '1') continue;
-    if (el.childElementCount > 90) continue;
-    const raw = el.innerText || el.textContent || '';
-    if (!raw || raw.length > 1000) continue;
-    const t = raw.toLowerCase().replace(/\s+/g, ' ');
-    // Never treat reCAPTCHA footer copy as an account popup
-    if (t.includes('recaptcha') || t.includes('captcha')) continue;
-    const hit = needles.some((n) => t.includes(n));
-    const hasEmail = /[\w.+-]+@[\w.-]+\.\w+/.test(t);
-    if (!hit && !(hasEmail && (t.includes('google') || t.includes('sign out') || t.includes('watermark')))) continue;
-
-    let panel =
-      el.closest('[role="dialog"], [role="menu"], [role="presentation"], dialog, [data-menu], .mat-mdc-menu-panel') ||
-      el;
-    let p = panel;
-    for (let i = 0; i < 6 && p && p !== document.body; i++) {
-      const r = p.getBoundingClientRect();
-      if (r.width > 180 && r.width < 560 && r.height > 160 && r.height < 780) {
-        panel = p;
-        break;
-      }
-      p = p.parentElement;
-    }
-    hideEl(panel);
-    try {
-      panel.querySelectorAll('button, a, li, label, input, div').forEach((row) => {
-        const rt = (row.innerText || '').toLowerCase();
-        if (needles.some((n) => rt.includes(n)) || /@/.test(rt)) hideEl(row);
-      });
-    } catch (e) {}
-  }
-
-  document.querySelectorAll('button, a, li, label, span, div, p').forEach((el) => {
-    if (el.childElementCount > 8) return;
-    const t = (el.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    if (!t || t.length > 140) return;
-    if (t.includes('recaptcha') || t.includes('captcha')) return;
-    if (
-      t === 'sign out of all accounts' ||
-      t === 'visible watermarking' ||
-      t === 'credits refresh daily' ||
-      t === 'create avatar' ||
-      needles.some((n) => t === n)
-    ) {
-      hideEl(el.closest('button, a, li, label, [role="menuitem"], div') || el);
-    }
-  });
+  purgeSignoutElements();
+  document.querySelectorAll('a.switch-account-link, a[href*="myaccount.google.com"]').forEach((el) => hideEl(el));
 }
 
 function hideTransientAccountUi() {
@@ -2330,7 +4065,7 @@ function ensureNewProjectClickable() {
 function hideExistingProjects() {
   try {
     const host = (location.hostname || '').toLowerCase();
-    if (host.includes('accounts.google.com') || host.includes('accounts.youtube.com')) return;
+    if (!host.includes('flow.google.com') && !host.includes('labs.google')) return;
   } catch (e) {}
   if (/\/project\//i.test(window.location.pathname || '')) {
     ensureNewProjectClickable();
@@ -2392,11 +4127,7 @@ function maskFlowWorkspace() {
   if (!isFlow) return;
 
   const profileSelectors = [
-    'header [aria-label*="Google Account" i]',
-    'header [aria-label*="Account menu" i]',
-    'header a[href*="myaccount.google.com"]',
-    'header button[aria-label*="Manage your Google Account" i]',
-    'header img[src*="googleusercontent.com"]'
+    'a.switch-account-link'
   ];
   profileSelectors.forEach(sel => {
     try {
@@ -2419,43 +4150,6 @@ function maskFlowWorkspace() {
 
 function hideAccountPrivacyPanels() {
   killAccountPopupNow();
-  const exactHide = [
-    'sign out of all accounts',
-    'visible watermarking',
-    'credits refresh daily',
-    'create avatar'
-  ];
-  const candidates = document.querySelectorAll(
-    'button, a, li, label, [role="menuitem"], [role="menu"], [role="dialog"], div, span'
-  );
-  for (const el of candidates) {
-    if (!el || el.childElementCount > 40) continue;
-    const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-    if (!txt || txt.length > 320) continue;
-    const lower = txt.toLowerCase();
-
-    if (exactHide.some(n => lower === n || lower.includes(n))) {
-      const row = el.closest('[role="menuitem"], button, li, label, div') || el;
-      hideEl(row);
-      if (lower.includes('sign out of all accounts') || lower.includes('credits refresh daily')) {
-        const panel = el.closest('[role="menu"], [role="dialog"], [role="presentation"], .mat-mdc-menu-panel, div');
-        if (panel) {
-          const pt = (panel.innerText || '').toLowerCase();
-          if (pt.includes('sign out') || pt.includes('watermark') || pt.includes('@')) hideEl(panel);
-        }
-      }
-      continue;
-    }
-
-    if (
-      /[\w.+-]+@[\w.-]+\.\w+/.test(txt) &&
-      txt.length < 160
-    ) {
-      const panel = el.closest('[role="menu"], [role="dialog"], [role="presentation"], .mat-mdc-menu-panel');
-      if (panel) hideEl(panel);
-      else hideEl(el);
-    }
-  }
 }
 
 function hideGalleryEditControls() {
@@ -2518,26 +4212,16 @@ window.addEventListener('click', (e) => {
   if (target.closest('[data-flow-new-project="1"]') || /new project/i.test((target.innerText || '').trim())) {
     return;
   }
-  if (target.closest(
-    '[aria-label*="Google Account" i], [aria-label*="Account menu" i], [aria-label*="Manage your Google Account" i], a[href*="myaccount.google.com"]'
-  )) {
+  if (target.closest('a[href*="myaccount.google.com"]')) {
     e.preventDefault();
     e.stopPropagation();
-    setTimeout(killAccountPopupNow, 0);
-    setTimeout(killAccountPopupNow, 50);
-    setTimeout(killAccountPopupNow, 150);
     return;
   }
   const label = ((target.innerText || target.getAttribute?.('aria-label')) || '').toLowerCase();
-  if (
-    label.includes('sign out of all accounts') ||
-    label.includes('visible watermarking') ||
-    label.includes('credits refresh daily') ||
-    label.includes('create avatar')
-  ) {
+  if (label.includes('sign out of all accounts') || label.includes('sign out')) {
     e.preventDefault();
     e.stopPropagation();
-    hideEl(target.closest('button, a, li, div') || target);
+    hideEl(target.closest('button, a, li') || target);
   }
   // If user clicked something that opens account UI, scrub it immediately
   setTimeout(killAccountPopupNow, 30);
@@ -2545,14 +4229,14 @@ window.addEventListener('click', (e) => {
 
 // Continuously scrub account popup as soon as it mounts
 (function installAccountKillerObserver() {
-  const onGoogleAuth = () => {
+  const isFlowPage = () => {
     try {
       const host = (location.hostname || '').toLowerCase();
-      return host.includes('accounts.google.com') || host.includes('accounts.youtube.com');
+      return host.includes('flow.google.com') || host.includes('labs.google');
     } catch (e) { return false; }
   };
   const run = () => {
-    if (onGoogleAuth()) return;
+    if (!isFlowPage()) return;
     try {
       // Inside a project, keep the killer light — heavy scans blanked All media
       if (/\/project\//i.test(location.pathname || '')) {
@@ -2656,34 +4340,8 @@ function applyCssRules() {
       opacity: 0 !important;
     }
 
-    /* ULTRA tier chip */
-    flow-user-tier-chip,
-    .tier-chip,
-    [aria-label="ULTRA tier"],
-    [aria-label*="ULTRA tier" i] {
-      display: none !important;
-      visibility: hidden !important;
-      pointer-events: none !important;
-      width: 0 !important;
-      height: 0 !important;
-      overflow: hidden !important;
-      opacity: 0 !important;
-    }
-
-    /* Account details / Google avatar switcher */
-    .header-user-button,
-    [aria-label="Account details"],
-    .account-switcher-placeholder,
-    #gb,
-    .boqOnegoogleliteOgbOneGoogleBar,
-    header [aria-label*="Google Account" i],
-    header [aria-label*="Account menu" i],
-    header a[href*="myaccount.google.com"],
-    header button[aria-label*="Manage your Google Account" i],
-    header button[aria-label*="Account" i],
-    header img[src*="googleusercontent.com"],
-    a.gb_C[aria-label*="Google Account" i],
-    img.gb_X.gbii {
+    /* Account switcher / Google bar (keep .header-user-button & tier-chip visible for PakFlow credits menu) */
+    a.switch-account-link {
       display: none !important;
       visibility: hidden !important;
       pointer-events: none !important;
@@ -2731,24 +4389,7 @@ function applyCssRules() {
     }
   `;
 
-  if (maskingRules.cssSelectorsToHide && Array.isArray(maskingRules.cssSelectorsToHide)) {
-    maskingRules.cssSelectorsToHide.forEach(sel => {
-      if (sel && sel.trim()) {
-        css += `
-          ${sel} {
-            display: none !important;
-            visibility: hidden !important;
-            opacity: 0 !important;
-            pointer-events: none !important;
-          }
-        `;
-      }
-    });
-  }
-
-  if (maskingRules.customCss) {
-    css += '\n' + maskingRules.customCss;
-  }
+  // Keep profile & header icons visible
 
   // Do NOT append Google Sign-in layout overrides here (breaks /challenge/pwd UI)
 
@@ -2801,11 +4442,15 @@ ipcRenderer.on('apply-credentials', (event, creds) => {
 });
 
 function applyCredentialsFromHost(creds) {
-  if (!creds || !creds.email) return;
+  if (!creds) return;
+  if (creds.imageOnly !== undefined) {
+    window.__flowSetImageOnlyMode(!!creds.imageOnly);
+  }
+  if (!creds.email) return;
   const prevEmail = (credentials.email || '').toLowerCase();
   const nextEmail = String(creds.email || '').toLowerCase();
   const forceReset = !!creds.forceReset || (prevEmail && nextEmail && prevEmail !== nextEmail);
-  credentials = { ...credentials, ...creds };
+  credentials = { ...credentials, ...creds, imageOnly: creds.imageOnly !== undefined ? !!creds.imageOnly : !!credentials.imageOnly };
   console.log('[Flow Preload] Credentials applied for:', credentials.email, forceReset ? '(reset)' : '');
   const onFlow =
     (location.hostname || '').includes('flow.google.com') ||
@@ -2879,43 +4524,42 @@ function driveGoogle2faClicks() {
     try { ipcRenderer.sendToHost('cdp-click', { x, y, kind }); } catch (e) {}
   };
 
-  // g.co/sc / security-key prompt → Try another way
-  if (/\/challenge\/sk/i.test(path)) {
-    const tryAnother = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], span')).find((el) =>
+  // Host owns 2FA CDP — inject driveGoogle2faClicks is backup only
+  if (window.__flowHostOwns2fa) return;
+
+  // g.co/sc / skotp security-code prompt → Try another way
+  const onSkotp =
+    /\/challenge\/skotp/i.test(path) ||
+    /\/challenge\/sk(?:\/|$)/i.test(path) ||
+    (/g\.co\/sc|get a code to sign in|enter security code/i.test((document.body && document.body.innerText) || '') &&
+      !/choose how you want to sign in|authenticator app/i.test((document.body && document.body.innerText) || ''));
+  if (onSkotp) {
+    const tryAnother = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], span, div')).find((el) =>
       /^try another way$/i.test((el.innerText || '').replace(/\s+/g, ' ').trim()) && visible(el)
     );
     if (tryAnother) sendClick(tryAnother, 'try-another');
     return;
   }
 
-  // Method list → Google Authenticator
+  // Method list → Google Authenticator (reuse shared finder + CDP)
   if (/\/challenge\/selection/i.test(path)) {
-    const isAuth = (raw) => {
-      const t = String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      if (!t || t.length > 180) return false;
-      if (/one-time security code|tap yes|use your passkey|can.?t find an eligible/.test(t)) return false;
-      return /google authenticator/.test(t) || (/authenticator/.test(t) && /code|verification|app/.test(t));
-    };
-    const cands = Array.from(document.querySelectorAll(
-      '[data-challengeid], [data-challengetype], li, div[role="link"], div[role="button"], button, a'
-    )).filter((el) => visible(el) && isAuth(el.getAttribute('aria-label') || el.innerText || ''));
-    cands.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
-    const el = cands[0] && (cands[0].closest('[data-challengeid], [data-challengetype], li, [role="link"], [role="button"], button, a') || cands[0]);
-    if (el) sendClick(el, 'auth-app');
+    const el = typeof findAuthenticatorOption === 'function' ? findAuthenticatorOption() : null;
+    if (el && visible(el)) sendClick(el, 'auth-app');
   }
 }
 
 // Periodic polling — keep Flow light to avoid black-screen freezes
 setInterval(() => {
-  const host = location.hostname || '';
+  const host = (location.hostname || '').toLowerCase();
   const onGoogleAuth = host.includes('accounts.google.com') || host.includes('accounts.youtube.com');
   const onGds = host.includes('gds.google.com');
   const onFlow = host.includes('flow.google.com') || host.includes('labs.google');
+  const onGemini = host.includes('gemini.google.com') || host.includes('bard.google.com');
   if (onGoogleAuth) driveGoogle2faClicks();
   runGoogleAutoLogin();
   // gds homeaddress / recovery: dismiss every tick (also covered inside auto-login)
-  if (onGds || !onGoogleAuth) dismissGoogleInterstitials();
-  if (onGoogleAuth || onGds) return;
+  if (onGds || (!onGoogleAuth && !onGemini)) dismissGoogleInterstitials();
+  if (onGoogleAuth || onGds || onGemini) return;
   if (onFlow) {
     maskFlowWorkspace();
     enforceModelRestrictions();
@@ -2925,10 +4569,6 @@ setInterval(() => {
     hideUltraControls();
     return;
   }
-  maskFlowWorkspace();
-  enforceModelRestrictions();
-  autoSelectLowerPriorityModel();
-  checkForNewGeneratedMedia();
 }, 700);
 
 document.addEventListener('DOMContentLoaded', () => {

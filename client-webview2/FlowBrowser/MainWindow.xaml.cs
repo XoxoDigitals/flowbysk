@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -40,6 +40,11 @@ public partial class MainWindow : Window
     /// <summary>0=off, 1=cover, 2=captcha — only transition when this changes.</summary>
     int _authUiMode = -1;
     Window? _authCoverWindow;
+    TextBlock? _authCoverTitleText;
+    TextBlock? _authCoverSubText;
+    bool _toolTransitionCoverActive;
+    bool _flowCredImageOnly;
+    DispatcherTimer? _toolTransitionTimer;
     DispatcherTimer? _authCoverPinTimer;
     DispatcherTimer? _flowOverlayMaxTimer;
     readonly CredChannelHost _credChannel = new();
@@ -63,6 +68,7 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")]
     static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 
+    readonly ZexTtsService _zexTts = new();
 
     public MainWindow()
     {
@@ -97,6 +103,7 @@ public partial class MainWindow : Window
         Loaded += async (_, _) => await InitAsync();
         Closing += (_, _) =>
         {
+            CloseWorkflowWindow();
             // Keep durable WebView profiles (Google cookies). Only wipe extracted www temp.
             WwwExtractor.WipeTempWww();
         };
@@ -106,52 +113,59 @@ public partial class MainWindow : Window
     {
         try
         {
-            // Purge old TEMP GUID profiles BEFORE extracting www (ui-* must stay afterward)
-            RuntimeProfiles.CleanupLegacyTempProfiles();
+            await Task.Run(() =>
+            {
+                // Purge old TEMP GUID profiles BEFORE extracting www (ui-* must stay afterward)
+                RuntimeProfiles.CleanupLegacyTempProfiles();
 
-            _wwwRoot = WwwExtractor.ResolveWwwRoot();
-            // Strip UTF-8 BOM — WebView2 document-created scripts can fail oddly with BOM
-            _flowInject = File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
+                _wwwRoot = WwwExtractor.ResolveWwwRoot();
+                // Strip UTF-8 BOM — WebView2 document-created scripts can fail oddly with BOM
+                _flowInject = File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
+                LoadVeoContentBundle();
 
-            // v6.1+: durable LocalAppData profiles + session.bin (cookies survive close)
-            DataPaths.EnsureDurableProfiles();
-            DataPaths.MigrateFromLegacy();
-            _shellUserData = RuntimeProfiles.CreateShell();
-            _flowUserData = RuntimeProfiles.CreateFlow();
-            Directory.CreateDirectory(_shellUserData);
-            Directory.CreateDirectory(_flowUserData);
+                // v6.1+: durable LocalAppData profiles + session.bin (cookies survive close)
+                DataPaths.EnsureDurableProfiles();
+                DataPaths.MigrateFromLegacy();
+                _shellUserData = RuntimeProfiles.CreateShell();
+                _flowUserData = RuntimeProfiles.CreateFlow();
+                Directory.CreateDirectory(_shellUserData);
+                Directory.CreateDirectory(_flowUserData);
+            });
 
+            const string bgFlags = "--disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding";
 #if DEBUG
             var flowOpts = new CoreWebView2EnvironmentOptions(
-                additionalBrowserArguments: "--remote-debugging-port=9223");
+                additionalBrowserArguments: "--remote-debugging-port=9223 " + bgFlags);
             var shellOpts = new CoreWebView2EnvironmentOptions(
-                additionalBrowserArguments: "--remote-debugging-port=9222");
+                additionalBrowserArguments: "--remote-debugging-port=9222 " + bgFlags);
 #else
             // Release: NEVER expose CDP — users were dumping cookies via ports 9222/9223
-            var flowOpts = new CoreWebView2EnvironmentOptions();
-            var shellOpts = new CoreWebView2EnvironmentOptions();
+            var flowOpts = new CoreWebView2EnvironmentOptions(additionalBrowserArguments: bgFlags);
+            var shellOpts = new CoreWebView2EnvironmentOptions(additionalBrowserArguments: bgFlags);
 #endif
-            var shellEnv = await CoreWebView2Environment.CreateAsync(
+            var shellEnvTask = CoreWebView2Environment.CreateAsync(
                 browserExecutableFolder: null,
                 userDataFolder: _shellUserData,
                 options: shellOpts);
-            var flowEnv = await CoreWebView2Environment.CreateAsync(
+            var flowEnvTask = CoreWebView2Environment.CreateAsync(
                 browserExecutableFolder: null,
                 userDataFolder: _flowUserData,
                 options: flowOpts);
 
+            var shellEnv = await shellEnvTask;
             await ShellView.EnsureCoreWebView2Async(shellEnv);
-            await FlowView.EnsureCoreWebView2Async(flowEnv);
-
             ConfigureShell();
-            ConfigureFlow();
-
             _shellReady = true;
+            SetShellMode("full");
+            // Navigate ShellView first so login / workspace UI paints immediately while FlowView warms up
+            ShellView.CoreWebView2.Navigate("https://app.flowbrowser.localhost/ui/app-shell.html");
+
+            var flowEnv = await flowEnvTask;
+            await FlowView.EnsureCoreWebView2Async(flowEnv);
+            ConfigureFlow();
             _flowReady = true;
 
-            SetShellMode("full");
-            // Prefer *.localhost (secure context) + avoid .local DNS delay. Host ECDH does not need subtle.
-            ShellView.CoreWebView2.Navigate("https://app.flowbrowser.localhost/ui/app-shell.html");
+            _ = InitBulkViewAsync(shellEnv);
         }
         catch (Exception ex)
         {
@@ -169,27 +183,14 @@ public partial class MainWindow : Window
         }
     }
 
-    void ApplyLockedBrowserSettings(CoreWebView2 core)
+    void ConfigureShell()
     {
+        var core = ShellView.CoreWebView2;
         core.Settings.AreDefaultContextMenusEnabled = false;
         core.Settings.AreDevToolsEnabled = false;
         core.Settings.AreBrowserAcceleratorKeysEnabled = false;
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
-        // Cancel any residual context-menu request (Inspect / Open DevTools).
-        core.ContextMenuRequested -= Core_ContextMenuRequestedBlock;
-        core.ContextMenuRequested += Core_ContextMenuRequestedBlock;
-    }
-
-    void Core_ContextMenuRequestedBlock(object? sender, CoreWebView2ContextMenuRequestedEventArgs e)
-    {
-        e.Handled = true;
-    }
-
-    void ConfigureShell()
-    {
-        var core = ShellView.CoreWebView2;
-        ApplyLockedBrowserSettings(core);
         // Suppress native alert/confirm — clipped in frameless window (use in-app modal instead)
         core.ScriptDialogOpening += (_, e) =>
         {
@@ -206,18 +207,6 @@ public partial class MainWindow : Window
             }
         };
         core.WebMessageReceived += Shell_WebMessageReceived;
-        // Belt-and-suspenders: block right-click + common DevTools shortcuts in shell DOM.
-        _ = core.AddScriptToExecuteOnDocumentCreatedAsync(@"
-(() => {
-  const block = (e) => { try { e.preventDefault(); e.stopPropagation(); } catch (_) {} return false; };
-  document.addEventListener('contextmenu', block, true);
-  document.addEventListener('keydown', (e) => {
-    const k = (e.key || '').toLowerCase();
-    if (k === 'f12') return block(e);
-    if (e.ctrlKey && e.shiftKey && (k === 'i' || k === 'j' || k === 'c')) return block(e);
-    if (e.ctrlKey && k === 'u') return block(e);
-  }, true);
-})();");
         core.SetVirtualHostNameToFolderMapping(
             "app.flowbrowser.localhost",
             _wwwRoot,
@@ -232,27 +221,24 @@ public partial class MainWindow : Window
     void ConfigureFlow()
     {
         var core = FlowView.CoreWebView2;
-        // Never allow F12 / right-click Inspect on the Google/Flow view (password leak).
-        ApplyLockedBrowserSettings(core);
+        core.Settings.AreDefaultContextMenusEnabled = false;
+        // Never allow F12 / DevTools on the Google/Flow view (password leak).
+        core.Settings.AreDevToolsEnabled = false;
+        core.Settings.AreBrowserAcceleratorKeysEnabled = false;
+        core.Settings.IsStatusBarEnabled = false;
+        core.Settings.IsZoomControlEnabled = false;
 
         // Real Edge WebView2 — no Electron UA spoofing needed
         core.WebMessageReceived += Flow_WebMessageReceived;
-        _ = core.AddScriptToExecuteOnDocumentCreatedAsync(@"
-(() => {
-  const block = (e) => { try { e.preventDefault(); e.stopPropagation(); } catch (_) {} return false; };
-  document.addEventListener('contextmenu', block, true);
-  document.addEventListener('keydown', (e) => {
-    const k = (e.key || '').toLowerCase();
-    if (k === 'f12') return block(e);
-    if (e.ctrlKey && e.shiftKey && (k === 'i' || k === 'j' || k === 'c')) return block(e);
-    if (e.ctrlKey && k === 'u') return block(e);
-  }, true);
-})();");
-        // Re-lock settings after navigations (some Edge builds re-enable menus).
-        core.NavigationCompleted += (_, __) =>
-        {
-            try { ApplyLockedBrowserSettings(core); } catch { /* ignore */ }
-        };
+
+        core.SetVirtualHostNameToFolderMapping(
+            "app.flowbrowser.localhost",
+            _wwwRoot,
+            CoreWebView2HostResourceAccessKind.Allow);
+        core.SetVirtualHostNameToFolderMapping(
+            "flowbrowser.local",
+            _wwwRoot,
+            CoreWebView2HostResourceAccessKind.Allow);
 
         // Port of Electron webRequest.onCompleted — drives credit deduction
         core.WebResourceResponseReceived += (_, e) =>
@@ -315,17 +301,15 @@ public partial class MainWindow : Window
                 return;
             }
 
-            // Top-level page navigation allowlist only (Flow + Google login)
+            // Top-level page navigation allowlist only (Flow + Gemini + Studio + Google login)
             if (!IsAllowedFlowNavigation(uri))
             {
                 e.Cancel = true;
                 Debug.WriteLine("[NavLock] blocked top-level: " + uri);
-                // During an active Google sign-in, NEVER force-redirect to Flow.
-                // Post-TOTP handoff often hits myaccount/oauth hosts; canceling + navigating
-                // to flow.google.com aborts cookies and loops ServiceLogin → /about → login.
-                if (_authLoginActive || _captchaActive || IsGoogleAuthRelatedUrl(cur))
+                // During an active Google sign-in OR when already on a valid workspace page, NEVER force-redirect to Flow.
+                if (_authLoginActive || _captchaActive || IsGoogleAuthRelatedUrl(cur) || IsFlowWorkspaceUrl(cur))
                 {
-                    Debug.WriteLine("[NavLock] skip fallback during auth handoff");
+                    Debug.WriteLine("[NavLock] keep current page after blocking: " + uri);
                     return;
                 }
                 var fallback = string.IsNullOrWhiteSpace(_flowCredTarget)
@@ -367,9 +351,20 @@ public partial class MainWindow : Window
                 return;
             }
             UpdateAuthOverlayFromUrl(url);
+            NotifyBulkFlowUrl(url);
             PostToShell(new { type = "flow-event", @event = "did-navigate", url });
             PostToShell(new { type = "flow-event", @event = "did-finish-load", url });
             PostToShell(new { type = "flow-event", @event = "dom-ready", url });
+            if (_flowReady && FlowView.CoreWebView2 != null)
+            {
+                var imgFlag = _flowCredImageOnly ? "true" : "false";
+                _ = FlowView.CoreWebView2.ExecuteScriptAsync(
+                    $"try {{ document.documentElement.style.opacity = '1'; if (window.__flowSetImageOnlyMode) window.__flowSetImageOnlyMode({imgFlag}); }} catch(e) {{}}");
+            }
+            if (_toolTransitionCoverActive && IsFlowWorkspaceUrl(url) && !IsGoogleAuthRelatedUrl(url) && !IsAboutBlank(url))
+            {
+                _ = CompleteToolTransitionCoverAsync();
+            }
             _ = ProbeGoogleTextCaptchaAsync(url);
             _ = TryHostGoogleAutofillAsync(url);
         };
@@ -377,6 +372,7 @@ public partial class MainWindow : Window
         {
             var url = core.Source ?? "";
             UpdateAuthOverlayFromUrl(url);
+            NotifyBulkFlowUrl(url);
             PostToShell(new { type = "flow-event", @event = "did-navigate-in-page", url });
             PostToShell(new { type = "flow-event", @event = "page-title-updated", url });
             _ = ProbeGoogleTextCaptchaAsync(url);
@@ -395,10 +391,10 @@ public partial class MainWindow : Window
                 return;
             }
             Debug.WriteLine("[NavLock] blocked popup: " + e.Uri);
-            // During Google sign-in / TOTP, never yank the tab to Flow (aborts Next handoff).
-            if (_authLoginActive || _captchaActive || IsGoogleAuthRelatedUrl(cur))
+            // During Google sign-in / TOTP or when already on a valid workspace tool, never yank the tab to Flow.
+            if (_authLoginActive || _captchaActive || IsGoogleAuthRelatedUrl(cur) || IsFlowWorkspaceUrl(cur))
             {
-                Debug.WriteLine("[NavLock] skip popup fallback during auth handoff");
+                Debug.WriteLine("[NavLock] skip popup fallback");
                 return;
             }
             var fallback = string.IsNullOrWhiteSpace(_flowCredTarget)
@@ -408,6 +404,7 @@ public partial class MainWindow : Window
         };
         core.DownloadStarting += (_, e) =>
         {
+            ApplyVeoDownloadPath(e);
             var name = e.ResultFilePath;
             try { name = Path.GetFileName(e.ResultFilePath); } catch { /* ignore */ }
             PostToShell(new
@@ -441,6 +438,7 @@ public partial class MainWindow : Window
         };
 
         _ = core.AddScriptToExecuteOnDocumentCreatedAsync(_flowInject);
+        InjectVeoContentBundle(core);
     }
 
     void SetShellMode(string mode)
@@ -452,6 +450,7 @@ public partial class MainWindow : Window
             {
                 // WebView2 uses native HWNDs — ZIndex cannot cover Flow. Hide it while overlays show.
                 FlowView.Visibility = Visibility.Collapsed;
+                BulkView.Visibility = Visibility.Collapsed;
                 ShellView.Height = double.NaN;
                 ShellView.VerticalAlignment = VerticalAlignment.Stretch;
                 ShellView.Margin = new Thickness(0);
@@ -462,22 +461,35 @@ public partial class MainWindow : Window
             }
             else
             {
-                FlowView.Visibility = Visibility.Visible;
                 ShellView.Height = _chromeHeight;
                 ShellView.VerticalAlignment = VerticalAlignment.Top;
                 ShellView.Margin = new Thickness(0);
-                FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
                 Panel.SetZIndex(ShellView, 10);
                 Panel.SetZIndex(FlowView, 1);
-                SyncOverlayMargins();
+                SyncBulkLayout();
                 ApplyAuthOverlayState();
+                FlowView.Visibility = Visibility.Visible;
+                SyncAuthCoverBounds();
+                PinAuthCoverAboveWebView();
             }
         });
+    }
+
+    static bool IsGoogleRecoveryOrResetUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        var u = url.ToLowerInvariant();
+        return u.Contains("/signin/recovery")
+               || u.Contains("/accountrecovery")
+               || u.Contains("/findyouraccount")
+               || u.Contains("/passwordreset")
+               || u.Contains("/signin/usernamerecovery");
     }
 
     static bool IsGoogleAuthUrl(string? url)
     {
         if (string.IsNullOrWhiteSpace(url)) return false;
+        if (IsGoogleRecoveryOrResetUrl(url)) return false;
         try
         {
             var host = new Uri(url).Host;
@@ -500,12 +512,22 @@ public partial class MainWindow : Window
             return host == "flow.google.com"
                    || host.EndsWith(".flow.google.com")
                    || host == "labs.google"
-                   || host.EndsWith(".labs.google");
+                   || host.EndsWith(".labs.google")
+                   || host == "gemini.google.com"
+                   || host.EndsWith(".gemini.google.com")
+                   || host == "bard.google.com"
+                   || host == "aistudio.google.com"
+                   || host == "app.flowbrowser.localhost"
+                   || host == "flowbrowser.local";
         }
         catch
         {
             var u = url.ToLowerInvariant();
-            return u.Contains("flow.google.com") || u.Contains("labs.google");
+            return u.Contains("flow.google.com")
+                   || u.Contains("labs.google")
+                   || u.Contains("gemini.google.com")
+                   || u.Contains("app.flowbrowser.localhost")
+                   || u.Contains("flowbrowser.local");
         }
     }
 
@@ -515,6 +537,7 @@ public partial class MainWindow : Window
     static bool IsGoogleAuthRelatedUrl(string? url)
     {
         if (string.IsNullOrWhiteSpace(url)) return false;
+        if (IsGoogleRecoveryOrResetUrl(url)) return false;
         if (IsGoogleAuthUrl(url)) return true;
         try
         {
@@ -652,15 +675,12 @@ public partial class MainWindow : Window
                 _ = FinishCheckCookieHandoffAsync(url);
                 return;
             }
+            _toolTransitionCoverActive = false;
+            SetAuthCoverCopy("Signing you in…", "Automatic Google login is running. Please wait.");
             _authLoginActive = true;
             _onGoogleAuth = true;
-            // After recaptcha, Google lands on /challenge/pwd — clear sticky captcha so
-            // AuthCover + host autofill resume. Live text-captcha probe can re-lift.
-            if (IsGooglePasswordOrIdentifierUrl(url) && !IsGoogleRecaptchaChallengeUrl(url))
-            {
-                _captchaActive = false;
-                _textCaptchaMisses = 0;
-            }
+            // Do NOT clear _captchaActive on /identifier|/pwd — classic text captcha
+            // lives on those URLs. Clearing here re-covered the page and blocked the user.
             ApplyAuthOverlayState();
             _ = ProbeGoogleTextCaptchaAsync(url);
             return;
@@ -675,16 +695,8 @@ public partial class MainWindow : Window
 
         if (IsFlowWorkspaceUrl(url))
         {
-            // Keep cover briefly (avoids flicker on Flow→Google bounce), then force-clear
-            // after FlowOverlayMaxHold so login never leaves the user stuck under overlay.
-            if (_authLoginActive)
-            {
-                _onGoogleAuth = true;
-                ApplyAuthOverlayState();
-                ScheduleFlowOverlayMaxClear();
-                return;
-            }
             CancelFlowOverlayMaxClear();
+            _authLoginActive = false;
             _onGoogleAuth = false;
             _captchaActive = false;
             ApplyAuthOverlayState();
@@ -828,22 +840,6 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>Password or email step — resume cover/autofill after CAPTCHA solve.</summary>
-    static bool IsGooglePasswordOrIdentifierUrl(string? url)
-    {
-        if (string.IsNullOrWhiteSpace(url)) return false;
-        try
-        {
-            var path = new Uri(url).AbsolutePath.ToLowerInvariant();
-            return path.Contains("/challenge/pwd") || path.Contains("/identifier");
-        }
-        catch
-        {
-            var u = url.ToLowerInvariant();
-            return u.Contains("/challenge/pwd") || u.Contains("/identifier");
-        }
-    }
-
     static bool IsGoogleLogoutUrl(string? url)
     {
         if (string.IsNullOrWhiteSpace(url)) return false;
@@ -893,12 +889,17 @@ public partial class MainWindow : Window
 
     void HandleAuthOverlayCommand(bool show, bool captcha, bool done)
     {
-        if (done)
+        if (done || (!show && !captcha))
         {
             // Ignore premature done while still on Google auth (reload / inject race)
             var cur = FlowView.CoreWebView2?.Source ?? "";
             if (IsGoogleAuthRelatedUrl(cur))
             {
+                if (!done)
+                {
+                    ApplyAuthOverlayState();
+                    return;
+                }
                 Debug.WriteLine("[AuthOverlay] ignore done — still on Google auth");
                 _authLoginActive = true;
                 _onGoogleAuth = true;
@@ -935,19 +936,9 @@ public partial class MainWindow : Window
             ApplyAuthOverlayState();
             return;
         }
+        // Keep cover lifted if a text captcha is still on the page (probe confirms)
         _onGoogleAuth = true;
         _authLoginActive = true;
-        // Shell says captcha:false (e.g. landed on /challenge/pwd). Clear sticky flag
-        // immediately so overlay + autofill resume; probe re-lifts if text captcha remains.
-        if (_captchaActive && IsGooglePasswordOrIdentifierUrl(live))
-        {
-            _captchaActive = false;
-            _textCaptchaMisses = 0;
-            ApplyAuthOverlayState();
-            _ = ProbeGoogleTextCaptchaAsync(live);
-            _ = TryHostGoogleAutofillAsync(live);
-            return;
-        }
         if (_captchaActive)
         {
             _ = ProbeGoogleTextCaptchaAsync(live);
@@ -956,15 +947,14 @@ public partial class MainWindow : Window
         }
         _captchaActive = false;
         ApplyAuthOverlayState();
-        if (IsGooglePasswordOrIdentifierUrl(live))
-            _ = TryHostGoogleAutofillAsync(live);
     }
 
     void SyncOverlayMargins()
     {
         var top = _shellMode == "full" ? 0 : _chromeHeight;
-        AuthOverlay.Margin = new Thickness(0, top, 0, 0);
-        CaptchaBanner.Margin = new Thickness(0, top, 0, 0);
+        var right = RightBulkMargin;
+        AuthOverlay.Margin = new Thickness(0, top, right, 0);
+        CaptchaBanner.Margin = new Thickness(0, top, right, 0);
     }
 
     void ApplyAuthOverlayState()
@@ -980,7 +970,7 @@ public partial class MainWindow : Window
                 want = AuthUiOff;
             else if ((_authLoginActive || _onGoogleAuth) && _captchaActive)
                 want = AuthUiCaptcha;
-            else if (_authLoginActive || _onGoogleAuth)
+            else if (_authLoginActive || _onGoogleAuth || _toolTransitionCoverActive)
                 want = AuthUiCover;
             else
                 want = AuthUiOff;
@@ -1095,8 +1085,7 @@ public partial class MainWindow : Window
             HorizontalAlignment = HorizontalAlignment.Center,
             MaxWidth = 420
         };
-        panel.Children.Add(spinBorder);
-        panel.Children.Add(new TextBlock
+        _authCoverTitleText = new TextBlock
         {
             Text = "Signing you in…",
             FontSize = 22,
@@ -1104,8 +1093,8 @@ public partial class MainWindow : Window
             Foreground = new SolidColorBrush(Color.FromRgb(0xF8, 0xFA, 0xFC)),
             HorizontalAlignment = HorizontalAlignment.Center,
             Margin = new Thickness(0, 0, 0, 8)
-        });
-        panel.Children.Add(new TextBlock
+        };
+        _authCoverSubText = new TextBlock
         {
             Text = "Automatic Google login is running. Please wait.",
             FontSize = 14,
@@ -1113,7 +1102,10 @@ public partial class MainWindow : Window
             TextWrapping = TextWrapping.Wrap,
             TextAlignment = TextAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center
-        });
+        };
+        panel.Children.Add(spinBorder);
+        panel.Children.Add(_authCoverTitleText);
+        panel.Children.Add(_authCoverSubText);
 
         // Opaque (no AllowsTransparency) — transparent covers flicker and show Google UI through
         _authCoverWindow = new Window
@@ -1150,30 +1142,130 @@ public partial class MainWindow : Window
             _authCoverWindow.Hide();
     }
 
+    void SetAuthCoverCopy(string title, string subtitle)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            EnsureAuthCoverWindow();
+            if (_authCoverTitleText != null) _authCoverTitleText.Text = title;
+            if (_authCoverSubText != null) _authCoverSubText.Text = subtitle;
+        });
+    }
+
+    void StartToolTransitionCover(string? targetUrl)
+    {
+        var u = (targetUrl ?? "").ToLowerInvariant();
+        string title = "Opening Workspace…";
+        string sub = "Preparing your workspace environment…";
+        if (u.Contains("gemini.google.com") || u.Contains("bard.google.com"))
+        {
+            title = "Opening Google Gemini…";
+            sub = "Loading Gemini Pro workspace…";
+        }
+        else if (u.Contains("zextts"))
+        {
+            title = "Opening TTS Studio…";
+            sub = "Initializing AI Voice & Podcast Studio…";
+        }
+        else if (u.Contains("accountchooser") || u.Contains("accounts.google.com"))
+        {
+            title = "Switching Google Account…";
+            sub = "Activating selected Google account…";
+        }
+        else if (u.Contains("flow.google.com") || u.Contains("labs.google"))
+        {
+            title = "Opening Google Flow…";
+            sub = "Loading Google Flow Studio…";
+        }
+
+        Dispatcher.Invoke(() =>
+        {
+            SetAuthCoverCopy(title, sub);
+            _toolTransitionCoverActive = true;
+            if (_flowReady && FlowView.CoreWebView2 != null)
+            {
+                _ = FlowView.CoreWebView2.ExecuteScriptAsync("try { document.documentElement.style.opacity = '0'; } catch(e) {}");
+            }
+            if (_toolTransitionTimer != null)
+            {
+                _toolTransitionTimer.Stop();
+                _toolTransitionTimer = null;
+            }
+            _toolTransitionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(4200) };
+            _toolTransitionTimer.Tick += (_, _) =>
+            {
+                _toolTransitionTimer?.Stop();
+                _toolTransitionTimer = null;
+                if (_toolTransitionCoverActive)
+                {
+                    _toolTransitionCoverActive = false;
+                    if (_flowReady && FlowView.CoreWebView2 != null)
+                        _ = FlowView.CoreWebView2.ExecuteScriptAsync("try { document.documentElement.style.opacity = '1'; } catch(e) {}");
+                    ApplyAuthOverlayState();
+                }
+            };
+            _toolTransitionTimer.Start();
+            ApplyAuthOverlayState();
+        });
+    }
+
+    async Task CompleteToolTransitionCoverAsync()
+    {
+        await Task.Delay(320);
+        await Dispatcher.InvokeAsync(() =>
+        {
+            _toolTransitionTimer?.Stop();
+            _toolTransitionTimer = null;
+            _toolTransitionCoverActive = false;
+            if (_flowReady && FlowView.CoreWebView2 != null)
+                _ = FlowView.CoreWebView2.ExecuteScriptAsync("try { document.documentElement.style.opacity = '1'; } catch(e) {}");
+            ApplyAuthOverlayState();
+        });
+    }
+
     void SyncAuthCoverBounds()
     {
         if (_authCoverWindow == null || !_authCoverWindow.IsVisible) return;
         if (!IsVisible || WindowState == WindowState.Minimized) return;
-        if (FlowView.Visibility != Visibility.Visible || FlowView.ActualWidth < 2 || FlowView.ActualHeight < 2)
-            return;
 
         try
         {
-            var topLeft = FlowView.PointToScreen(new Point(0, 0));
-            var source = PresentationSource.FromVisual(this);
-            if (source?.CompositionTarget != null)
+            if (FlowView.Visibility == Visibility.Visible && FlowView.ActualWidth >= 2 && FlowView.ActualHeight >= 2)
             {
-                var dip = source.CompositionTarget.TransformFromDevice.Transform(topLeft);
-                _authCoverWindow.Left = dip.X;
-                _authCoverWindow.Top = dip.Y;
+                var topLeft = FlowView.PointToScreen(new Point(0, 0));
+                var source = PresentationSource.FromVisual(this);
+                if (source?.CompositionTarget != null)
+                {
+                    var dip = source.CompositionTarget.TransformFromDevice.Transform(topLeft);
+                    _authCoverWindow.Left = dip.X;
+                    _authCoverWindow.Top = dip.Y;
+                }
+                else
+                {
+                    _authCoverWindow.Left = topLeft.X;
+                    _authCoverWindow.Top = topLeft.Y;
+                }
+                _authCoverWindow.Width = Math.Max(2, FlowView.ActualWidth);
+                _authCoverWindow.Height = Math.Max(2, FlowView.ActualHeight);
             }
-            else
+            else if (ActualWidth >= 2 && ActualHeight > _chromeHeight)
             {
-                _authCoverWindow.Left = topLeft.X;
-                _authCoverWindow.Top = topLeft.Y;
+                var topLeft = PointToScreen(new Point(0, _chromeHeight));
+                var source = PresentationSource.FromVisual(this);
+                if (source?.CompositionTarget != null)
+                {
+                    var dip = source.CompositionTarget.TransformFromDevice.Transform(topLeft);
+                    _authCoverWindow.Left = dip.X;
+                    _authCoverWindow.Top = dip.Y;
+                }
+                else
+                {
+                    _authCoverWindow.Left = topLeft.X;
+                    _authCoverWindow.Top = topLeft.Y;
+                }
+                _authCoverWindow.Width = Math.Max(2, ActualWidth - RightBulkMargin);
+                _authCoverWindow.Height = Math.Max(2, ActualHeight - _chromeHeight);
             }
-            _authCoverWindow.Width = Math.Max(2, FlowView.ActualWidth);
-            _authCoverWindow.Height = Math.Max(2, FlowView.ActualHeight);
         }
         catch
         {
@@ -1186,39 +1278,49 @@ public partial class MainWindow : Window
     /// </summary>
     async Task EnsureFlowReadyToNavigateAsync()
     {
+        for (var i = 0; i < 80 && !_flowReady; i++)
+            await Task.Delay(50);
+
         await Dispatcher.InvokeAsync(() =>
         {
             if (_shellMode == "full")
             {
                 _shellMode = "chrome";
-                FlowView.Visibility = Visibility.Visible;
                 ShellView.Height = _chromeHeight;
                 ShellView.VerticalAlignment = VerticalAlignment.Top;
                 ShellView.Margin = new Thickness(0);
-                FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
                 Panel.SetZIndex(ShellView, 10);
                 Panel.SetZIndex(FlowView, 1);
-                SyncOverlayMargins();
+                SyncBulkLayout();
                 ApplyAuthOverlayState();
+                FlowView.Visibility = Visibility.Visible;
+                SyncAuthCoverBounds();
+                PinAuthCoverAboveWebView();
             }
             else
             {
+                ApplyAuthOverlayState();
                 FlowView.Visibility = Visibility.Visible;
                 SyncAuthCoverBounds();
+                PinAuthCoverAboveWebView();
             }
         });
-        await Task.Delay(60);
+        await Task.Delay(30);
     }
 
     async Task NavigateFlowSafeAsync(string url)
     {
         try
         {
+            if (!IsAboutBlank(url))
+                StartToolTransitionCover(url);
             await EnsureFlowReadyToNavigateAsync();
             await Dispatcher.InvokeAsync(() =>
             {
                 if (FlowView.CoreWebView2 == null) return;
                 FlowView.Visibility = Visibility.Visible;
+                SyncAuthCoverBounds();
+                PinAuthCoverAboveWebView();
                 FlowView.CoreWebView2.Navigate(url);
             });
         }
@@ -1238,11 +1340,11 @@ public partial class MainWindow : Window
 
     void PostToShell(object payload)
     {
-        if (!_shellReady || ShellView.CoreWebView2 == null) return;
+        if (!_shellReady) return;
         try
         {
             var json = JsonSerializer.Serialize(payload);
-            Dispatcher.Invoke(() => ShellView.CoreWebView2.PostWebMessageAsJson(json));
+            Dispatcher.Invoke(() => { if (ShellView.CoreWebView2 != null) ShellView.CoreWebView2.PostWebMessageAsJson(json); });
         }
         catch (Exception ex)
         {
@@ -1252,11 +1354,11 @@ public partial class MainWindow : Window
 
     void PostToFlow(object payload)
     {
-        if (!_flowReady || FlowView.CoreWebView2 == null) return;
+        if (!_flowReady) return;
         try
         {
             var json = JsonSerializer.Serialize(payload);
-            Dispatcher.Invoke(() => FlowView.CoreWebView2.PostWebMessageAsJson(json));
+            Dispatcher.Invoke(() => { if (FlowView.CoreWebView2 != null) FlowView.CoreWebView2.PostWebMessageAsJson(json); });
         }
         catch (Exception ex)
         {
@@ -1344,17 +1446,13 @@ public partial class MainWindow : Window
             }
             else if (_captchaActive && !IsGoogleRecaptchaChallengeUrl(u))
             {
-                // On /challenge/pwd after CAPTCHA solve, restore cover on first miss.
-                // Elsewhere keep a short debounce so SPA flicker does not re-cover mid-type.
                 _textCaptchaMisses++;
-                var need = IsGooglePasswordOrIdentifierUrl(u) ? 1 : 3;
-                if (_textCaptchaMisses >= need)
+                // Require a few misses so SPA flicker does not re-cover mid-type
+                if (_textCaptchaMisses >= 4)
                 {
                     _captchaActive = false;
                     _textCaptchaMisses = 0;
                     ApplyAuthOverlayState();
-                    if (IsGooglePasswordOrIdentifierUrl(u))
-                        _ = TryHostGoogleAutofillAsync(u);
                 }
             }
         }
@@ -1373,15 +1471,14 @@ public partial class MainWindow : Window
             var u = url ?? FlowView.CoreWebView2.Source ?? "";
             if (!u.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase)) return;
             // Never autofill / inject page overlays on recaptcha — blanks the challenge
-            if (IsGoogleRecaptchaChallengeUrl(u)) return;
+            if (_captchaActive || IsGoogleRecaptchaChallengeUrl(u)) return;
 
             // Debounce — HistoryChanged fires often on Google SPA and was spawning fill loops
             var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (nowMs - _lastAutofillKickMs < 1200) return;
             _lastAutofillKickMs = nowMs;
 
-            // Probe first — sticky recaptcha flag is cleared on /pwd navigation; this
-            // only keeps fill paused when a live text captcha is still on the page.
+            // Probe first — text captcha on /identifier has no special URL
             await ProbeGoogleTextCaptchaAsync(u);
             if (_captchaActive) return;
 
@@ -1520,6 +1617,36 @@ public partial class MainWindow : Window
     try {{ document.getElementById('__flow_host_ol_style__')?.remove(); }} catch (e) {{}}
   }} catch (e) {{}}
 
+  // AccountChooser support — pick the target email if already signed in, or click 'Use another account'
+  const accountRows = Array.from(document.querySelectorAll('[data-identifier], [data-email]')).filter(el => visible(el));
+  if (accountRows.length > 0 && email) {{
+    const targetLower = email.toLowerCase().trim();
+    const matchRow = accountRows.find(el => {{
+      const id = (el.getAttribute('data-identifier') || el.getAttribute('data-email') || '').toLowerCase().trim();
+      return id === targetLower;
+    }});
+    if (matchRow) {{
+      const acKey = 'ac:' + targetLower;
+      if (!st[acKey]) {{
+        st[acKey] = true;
+        const clickTarget = matchRow.closest('li, [role=""link""], [role=""button""], div[jsaction]') || matchRow;
+        try {{ clickTarget.click(); }} catch (e) {{ try {{ matchRow.click(); }} catch (e2) {{}} }}
+        return {{ ok:true, step:'account-chooser-match', email }};
+      }}
+    }} else {{
+      const useAnother = Array.from(document.querySelectorAll('li, [role=""link""], [role=""button""], div[jsaction]')).find(el => {{
+        if (!visible(el)) return false;
+        const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        return /use another account|add another account/i.test(t);
+      }});
+      if (useAnother && !st['ac_another']) {{
+        st['ac_another'] = true;
+        try {{ useAnother.click(); }} catch (e) {{}}
+        return {{ ok:true, step:'account-chooser-use-another' }};
+      }}
+    }}
+  }}
+
   // TOTP / SetSID — do not re-fill email/password; Next is handled by FillTotp / inject
   const totpEl = document.querySelector('input[name=""totpPin""], input#totpPin, input[autocomplete=""one-time-code""]');
   if (totpEl && visible(totpEl)) {{
@@ -1629,6 +1756,32 @@ public partial class MainWindow : Window
     {
         var root = ParseMessage(e);
         if (root.ValueKind != JsonValueKind.Object) return;
+        if (TryHandleVeoFlowMessage(root)) return;
+
+        if (root.TryGetProperty("type", out var zexTypeEl) && zexTypeEl.GetString() == "zextts-invoke")
+        {
+            var id = root.TryGetProperty("id", out var idEl) ? idEl.GetInt32() : 0;
+            var cmd = root.TryGetProperty("cmd", out var cmdEl) ? cmdEl.GetString() ?? "" : "";
+            JsonElement payload = default;
+            if (root.TryGetProperty("payload", out var pEl)) payload = pEl.Clone();
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var res = await _zexTts.HandleCommandAsync(
+                        cmd,
+                        payload,
+                        this,
+                        (eventName, detail) => PostToFlow(new { type = "zextts-event", eventName, detail }));
+                    PostToFlow(new { type = "zextts-result", id, result = res });
+                }
+                catch (Exception ex)
+                {
+                    PostToFlow(new { type = "zextts-result", id, error = ex.Message });
+                }
+            });
+            return;
+        }
 
         if (!root.TryGetProperty("type", out var typeEl) || typeEl.GetString() != "toHost") return;
         var channel = root.TryGetProperty("channel", out var ch) ? ch.GetString() : "";
@@ -1777,9 +1930,7 @@ public partial class MainWindow : Window
                     if (_shellMode != "full")
                     {
                         ShellView.Height = _chromeHeight;
-                        FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
-                        SyncOverlayMargins();
-                        SyncAuthCoverBounds();
+                        SyncBulkLayout();
                     }
                 });
                 break;
@@ -1823,6 +1974,14 @@ public partial class MainWindow : Window
                         _flowCredPassword = pw.GetString();
                     if (credData.TryGetProperty("targetUrl", out var tu))
                         _flowCredTarget = tu.GetString();
+                    if (credData.TryGetProperty("imageOnly", out var ioEl))
+                        _flowCredImageOnly = ioEl.ValueKind == JsonValueKind.True;
+                    PostToBulkAndWorkflow(new { type = "veo-account-mode", imageOnly = _flowCredImageOnly });
+                    if (FlowView.CoreWebView2 != null)
+                    {
+                        var imgFlag = _flowCredImageOnly ? "true" : "false";
+                        _ = FlowView.CoreWebView2.ExecuteScriptAsync($"window.__flowSetImageOnlyMode && window.__flowSetImageOnlyMode({imgFlag});");
+                    }
                     var url = FlowView.CoreWebView2?.Source ?? "";
                     _ = TryHostGoogleAutofillAsync(url);
                 }
@@ -1836,8 +1995,27 @@ public partial class MainWindow : Window
                     _flowCredPassword = pw2.GetString();
                 if (root.TryGetProperty("targetUrl", out var tu2))
                     _flowCredTarget = tu2.GetString();
+                if (root.TryGetProperty("imageOnly", out var ioEl2))
+                    _flowCredImageOnly = ioEl2.ValueKind == JsonValueKind.True;
+                PostToBulkAndWorkflow(new { type = "veo-account-mode", imageOnly = _flowCredImageOnly });
+                if (FlowView.CoreWebView2 != null)
+                {
+                    var imgFlag = _flowCredImageOnly ? "true" : "false";
+                    _ = FlowView.CoreWebView2.ExecuteScriptAsync($"window.__flowSetImageOnlyMode && window.__flowSetImageOnlyMode({imgFlag});");
+                }
                 var url2 = FlowView.CoreWebView2?.Source ?? "";
                 _ = TryHostGoogleAutofillAsync(url2);
+                break;
+            }
+            case "prepareToolSwitch":
+            {
+                var targetUrl = root.TryGetProperty("url", out var tuEl) ? tuEl.GetString() : "";
+                StartToolTransitionCover(targetUrl);
+                break;
+            }
+            case "clearFlowAppCookies":
+            {
+                await ClearFlowOnlyCookiesAsync();
                 break;
             }
             case "cdpClick":
@@ -1857,6 +2035,11 @@ public partial class MainWindow : Window
             {
                 var mode = root.TryGetProperty("mode", out var m) ? m.GetString() : "chrome";
                 SetShellMode(mode == "full" ? "full" : "chrome");
+                break;
+            }
+            case "toggleBulkPanel":
+            {
+                ToggleBulkPanel();
                 break;
             }
             case "authOverlay":
@@ -1980,10 +2163,17 @@ public partial class MainWindow : Window
                 _credChannel.Clear();
                 return new { success = true };
             case "getDeviceId":
-                return new { deviceId = GetStableDeviceId(), client = "windows-exe/8.0.0" };
+                return new { deviceId = GetStableDeviceId(), client = "windows-exe/" + AppVersion(), version = AppVersion() };
             default:
                 throw new InvalidOperationException("Unknown command: " + cmd);
         }
+    }
+
+    /// <summary>Real EXE version (from csproj Version) for X-Flow-Client and the toolbar label.</summary>
+    static string AppVersion()
+    {
+        var v = typeof(MainWindow).Assembly.GetName().Version;
+        return v == null ? "0.0.0" : $"{v.Major}.{v.Minor}.{v.Build}";
     }
 
     static string GetStableDeviceId()
@@ -2001,6 +2191,33 @@ public partial class MainWindow : Window
         using var sha = System.Security.Cryptography.SHA256.Create();
         var hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(fallback));
         return "win-" + Convert.ToHexString(hash).ToLowerInvariant()[..32];
+    }
+
+    /// <summary>
+    /// Clears ONLY flow.google.com and labs.google session cookies while keeping accounts.google.com
+    /// and gemini.google.com cookies intact so all Google accounts remain signed in simultaneously.
+    /// </summary>
+    async Task ClearFlowOnlyCookiesAsync()
+    {
+        if (FlowView.CoreWebView2 == null) return;
+        try
+        {
+            var flowHosts = new[]
+            {
+                "https://flow.google.com",
+                "https://labs.google"
+            };
+            foreach (var host in flowHosts)
+            {
+                var cookies = await FlowView.CoreWebView2.CookieManager.GetCookiesAsync(host);
+                foreach (var cookie in cookies)
+                    FlowView.CoreWebView2.CookieManager.DeleteCookie(cookie);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("ClearFlowOnlyCookies: " + ex.Message);
+        }
     }
 
     async Task ClearFlowSessionAsync()

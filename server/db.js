@@ -7,6 +7,7 @@ const { sealForStorage, openFromStorage, isEncrypted } = require('./secretsCrypt
 
 const RUNTIME_KEY = 'flow_browser_runtime';
 const USER_META_KEY = 'flow_browser_user_meta';
+const SERVER_META_KEY = 'flow_browser_server_meta';
 const DATA_JSON = path.join(__dirname, 'data.json');
 const DATA_BAK = path.join(__dirname, 'data.json.bak');
 
@@ -91,6 +92,23 @@ async function patchRuntime(patch) {
 
 async function getUserMetaMap() {
   return (await getJsonSetting(USER_META_KEY, {})) || {};
+}
+
+async function getServerMetaMap() {
+  return (await getJsonSetting(SERVER_META_KEY, {})) || {};
+}
+
+let serverMetaQueue = Promise.resolve();
+async function patchServerMeta(serverId, patch) {
+  const run = async () => {
+    const map = await getServerMetaMap();
+    map[serverId] = { ...(map[serverId] || {}), ...patch };
+    await setJsonSetting(SERVER_META_KEY, map);
+    return map[serverId];
+  };
+  const next = serverMetaQueue.then(run, run);
+  serverMetaQueue = next.catch(() => {});
+  return next;
 }
 
 let userMetaQueue = Promise.resolve();
@@ -861,6 +879,14 @@ class Database {
     return next;
   }
 
+  async refundUserCredits(id, amount) {
+    await this.ready();
+    const current = await getStdBalance(id);
+    const next = current + Math.abs(Number(amount) || 0);
+    await setStdBalance(id, next, { type: 'REFUND', reason: 'refund_credit' });
+    return next;
+  }
+
   async bumpSessionVersion(userId) {
     await this.ready();
     const map = await getUserMetaMap();
@@ -909,7 +935,10 @@ class Database {
   async getServers() {
     await this.ready();
     try {
-      const rows = await prisma.sharedGoogleAccount.findMany({ orderBy: { createdAt: 'asc' } });
+      const [rows, serverMetaMap] = await Promise.all([
+        prisma.sharedGoogleAccount.findMany({ orderBy: { createdAt: 'asc' } }),
+        getServerMetaMap(),
+      ]);
       return rows.map((s) => {
         const passwordPlain = openFromStorage(s.password || '');
         const totpPlain = openFromStorage(s.totpSecret || '');
@@ -932,6 +961,11 @@ class Database {
         const cookieMeta = s.cookieMeta && typeof s.cookieMeta === 'object' ? s.cookieMeta : null;
         const cookieVersion = Number(s.cookieVersion) || 0;
         const hasCookies = !!(s.cookieExportEnc && String(s.cookieExportEnc).trim()) && cookieVersion > 0;
+        const srvMeta = (serverMetaMap && serverMetaMap[s.id]) || {};
+        const imageOnly = srvMeta.imageOnly !== undefined
+          ? !!srvMeta.imageOnly
+          : srvMeta.accountType === 'image' || !!(cookieMeta && cookieMeta.imageOnly);
+        const accountType = imageOnly ? 'image' : 'all';
         return {
           id: s.id,
           name: s.name,
@@ -940,6 +974,8 @@ class Database {
           password: passwordPlain,
           totpSecret: totpNorm,
           isActive: s.isActive !== false,
+          imageOnly,
+          accountType,
           createdAt: s.createdAt.toISOString(),
           hasCookies,
           cookieVersion,
@@ -1019,6 +1055,11 @@ class Database {
         isActive: serverData.isActive !== undefined ? !!serverData.isActive : true,
       },
     });
+    const imageOnly = !!serverData.imageOnly || serverData.accountType === 'image';
+    await patchServerMeta(row.id, {
+      imageOnly,
+      accountType: imageOnly ? 'image' : 'all',
+    });
     return this.getServerById(row.id);
   }
 
@@ -1032,7 +1073,18 @@ class Database {
     if (updates.totpSecret !== undefined) data.totpSecret = sealForStorage(normalizeTotpSecret(updates.totpSecret));
     if (updates.isActive !== undefined) data.isActive = !!updates.isActive;
     try {
-      await prisma.sharedGoogleAccount.update({ where: { id }, data });
+      if (Object.keys(data).length > 0) {
+        await prisma.sharedGoogleAccount.update({ where: { id }, data });
+      }
+      if (updates.imageOnly !== undefined || updates.accountType !== undefined) {
+        const imageOnly = updates.imageOnly !== undefined
+          ? !!updates.imageOnly
+          : updates.accountType === 'image';
+        await patchServerMeta(id, {
+          imageOnly,
+          accountType: imageOnly ? 'image' : 'all',
+        });
+      }
     } catch {
       return null;
     }
@@ -1043,6 +1095,11 @@ class Database {
     await this.ready();
     try {
       await prisma.sharedGoogleAccount.delete({ where: { id } });
+      const srvMeta = await getServerMetaMap();
+      if (srvMeta[id]) {
+        delete srvMeta[id];
+        await setJsonSetting(SERVER_META_KEY, srvMeta);
+      }
     } catch {
       return false;
     }

@@ -31,8 +31,9 @@ const forceUpdatePayload = {
   error: 'Please download the latest Flow Browser.',
 };
 
-/** Only /api/v8/client is live (traditional login). v2–v7 → FORCE_UPDATE. */
+/** Both /api/v8/client and /api/v9/client are live (traditional login). v2–v7 → FORCE_UPDATE. */
 const clientV8Routes = require('./routes/client-v8');
+const clientV9Routes = require('./routes/client-v9');
 app.use('/api/v2/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -52,6 +53,7 @@ app.use('/api/v7/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
 app.use('/api/v8/client', clientV8Routes);
+app.use('/api/v9/client', clientV9Routes);
 app.use('/api/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -83,7 +85,7 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
-        clientApiVersion: 'v8',
+        clientApiVersion: 'v9',
       },
     });
   } catch (err) {

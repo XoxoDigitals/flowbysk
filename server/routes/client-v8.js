@@ -16,18 +16,9 @@ const { lookupCountry, clientIpFromReq } = require('../geoIp');
 
 const GOOGLE_SESSION_LOCK_MS = 60 * 60 * 1000; // 60 minutes after successful Google login
 
-function googleLockState(user) {
-  const untilRaw = user?.googleSessionLockUntil || null;
-  if (!untilRaw) return { locked: false, lockedUntil: null, retryAfterSeconds: 0 };
-  const until = new Date(untilRaw);
-  if (Number.isNaN(until.getTime())) return { locked: false, lockedUntil: null, retryAfterSeconds: 0 };
-  const ms = until.getTime() - Date.now();
-  if (ms <= 0) return { locked: false, lockedUntil: until.toISOString(), retryAfterSeconds: 0 };
-  return {
-    locked: true,
-    lockedUntil: until.toISOString(),
-    retryAfterSeconds: Math.ceil(ms / 1000),
-  };
+function googleLockState(_user) {
+  // Allow users to switch and sign into multiple Google accounts (Video + Image-only + Gemini) without a 60m lock
+  return { locked: false, lockedUntil: null, retryAfterSeconds: 0 };
 }
 
 function googleLockResponse(state) {
@@ -183,6 +174,8 @@ function publicServerPayload(server) {
     targetUrl: server.targetUrl,
     emailMasked: credChannel.maskEmail(server.email || ''),
     hasTotp: !!(server.totpSecret && String(server.totpSecret).trim()),
+    imageOnly: !!server.imageOnly,
+    accountType: server.imageOnly ? 'image' : 'all',
   };
 }
 
@@ -345,7 +338,13 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
       success: true,
       token,
       user: publicUser(freshUser || user),
-      servers: availableServers.map((s) => ({ id: s.id, name: s.name })),
+      servers: availableServers.map((s) => ({
+        id: s.id,
+        name: s.name,
+        targetUrl: s.targetUrl,
+        imageOnly: !!s.imageOnly,
+        accountType: s.imageOnly ? 'image' : 'all',
+      })),
       activeServer: publicServerPayload(activeServer),
       settings: await clientSettingsPayload(),
       ...(channel
@@ -427,6 +426,8 @@ router.post('/verify-session', requireUserAuth, async (req, res) => {
       targetUrl: s.targetUrl,
       emailMasked: credChannel.maskEmail(s.email),
       hasTotp: !!(s.totpSecret && String(s.totpSecret).trim()),
+      imageOnly: !!s.imageOnly,
+      accountType: s.imageOnly ? 'image' : 'all',
     })),
     activeServer: publicServerPayload(activeServer),
     settings: await clientSettingsPayload(),
@@ -486,6 +487,17 @@ router.post('/request-server-change', requireUserAuth, async (req, res) => {
   res.json({ success: true, server: publicServerPayload(targetServer), load });
 });
 
+router.post('/refund-credit', requireUserAuth, async (req, res) => {
+  const { amount = 1, reason = 'refund_failed_generation' } = req.body;
+  const user = req.user;
+  const remaining = typeof db.refundUserCredits === 'function'
+    ? await db.refundUserCredits(user.id, amount)
+    : (Number(user.credits) || 0) + Math.abs(Number(amount) || 0);
+  await db.addLog(user.id, user.username, 'refund_credit', { amount, remaining, reason });
+  const credits = Math.max(0, remaining);
+  res.json({ success: true, credits });
+});
+
 router.post('/use-credit', requireUserAuth, async (req, res) => {
   const { amount = 1, reason = 'generation' } = req.body;
   const user = req.user;
@@ -527,6 +539,8 @@ router.get('/extension-status', requireUserAuth, async (req, res) => {
       id: s.id,
       name: s.name,
       emailMasked: credChannel.maskEmail(s.email || ''),
+      imageOnly: !!s.imageOnly,
+      accountType: s.imageOnly ? 'image' : 'all',
     })),
   });
 });
