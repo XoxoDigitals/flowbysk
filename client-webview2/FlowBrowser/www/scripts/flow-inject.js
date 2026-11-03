@@ -126,11 +126,16 @@ let credentials = {
   email: '',
   password: '',
   targetUrl: 'https://flow.google.com',
-  imageOnly: false
+  imageOnly: false,
+  serverId: ''
 };
 try {
   if (sessionStorage.getItem('__flow_image_only') === '1') {
     credentials.imageOnly = true;
+  }
+  const savedSrvId = sessionStorage.getItem('__flow_active_server_id');
+  if (savedSrvId) {
+    credentials.serverId = savedSrvId;
   }
 } catch (e) {}
 
@@ -138,8 +143,19 @@ function isImageOnlyAccount() {
   return !!credentials.imageOnly;
 }
 
-window.__flowSetImageOnlyMode = function (flag) {
+window.__flowSetImageOnlyMode = function (flag, serverId) {
   credentials.imageOnly = !!flag;
+  if (serverId !== undefined && serverId !== null && String(serverId).trim() !== '') {
+    const nextSrvId = String(serverId).trim();
+    const changedSrv = credentials.serverId !== nextSrvId;
+    credentials.serverId = nextSrvId;
+    try {
+      sessionStorage.setItem('__flow_active_server_id', credentials.serverId);
+    } catch (e) {}
+    if (changedSrv && typeof loadSavedProjectsFromDevice === 'function') {
+      loadSavedProjectsFromDevice();
+    }
+  }
   try {
     sessionStorage.setItem('__flow_image_only', credentials.imageOnly ? '1' : '0');
   } catch (e) {}
@@ -1310,16 +1326,22 @@ function ensureProfileIconVisible() {
 }
 
 // =========================================================================
-// SAVED PROJECTS HISTORY ENGINE (Auto-Save & "My Projects" Modal on Device)
+// SAVED PROJECTS HISTORY ENGINE (Auto-Save & "My Projects" Modal on Device — Scoped Per Account)
 // =========================================================================
-const SAVED_PROJECTS_KEY = 'flow_saved_projects_v1';
 let savedProjectsList = [];
 let lastAutoSavedProjectId = '';
 let lastAutoSaveCheckAt = 0;
 
+function getPerAccountProjectsKey() {
+  const srvId = String(credentials.serverId || '').trim() || 'default_srv';
+  return 'flow_saved_projects_v2_' + srvId;
+}
+
 function loadSavedProjectsFromDevice() {
+  savedProjectsList = [];
+  const key = getPerAccountProjectsKey();
   try {
-    const raw = localStorage.getItem(SAVED_PROJECTS_KEY);
+    const raw = localStorage.getItem(key);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) savedProjectsList = parsed;
@@ -1327,9 +1349,9 @@ function loadSavedProjectsFromDevice() {
   } catch (e) {}
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.get([SAVED_PROJECTS_KEY], (res) => {
-        if (res && Array.isArray(res[SAVED_PROJECTS_KEY]) && res[SAVED_PROJECTS_KEY].length > 0) {
-          mergeSavedProjects(res[SAVED_PROJECTS_KEY], false);
+      chrome.storage.local.get([key], (res) => {
+        if (res && Array.isArray(res[key]) && res[key].length > 0) {
+          mergeSavedProjects(res[key], false, true);
         }
       });
     }
@@ -1337,32 +1359,40 @@ function loadSavedProjectsFromDevice() {
   try {
     ipcRenderer.sendToHost('saved-projects:load');
   } catch (e) {}
+  if (typeof updateMyProjectsUI === 'function') updateMyProjectsUI();
 }
 
-function mergeSavedProjects(incoming, persistBack = true) {
+function mergeSavedProjects(incoming, persistBack = true, replaceAll = false) {
   if (!Array.isArray(incoming)) return;
+  const currentSrvId = String(credentials.serverId || '').trim();
   const map = new Map();
-  savedProjectsList.forEach((p) => {
-    if (p && p.id) map.set(p.id, p);
-  });
+  if (!replaceAll) {
+    savedProjectsList.forEach((p) => {
+      if (!p || !p.id) return;
+      if (currentSrvId && p.serverId && p.serverId !== currentSrvId) return;
+      map.set(p.id, p);
+    });
+  }
   incoming.forEach((p) => {
     if (!p || !p.id) return;
+    if (currentSrvId && p.serverId && p.serverId !== currentSrvId) return;
     const existing = map.get(p.id);
     if (!existing || (p.updatedAt || 0) >= (existing.updatedAt || 0)) {
-      map.set(p.id, { ...existing, ...p });
+      map.set(p.id, { ...existing, ...p, serverId: p.serverId || currentSrvId || '' });
     }
   });
   savedProjectsList = Array.from(map.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const key = getPerAccountProjectsKey();
   try {
-    localStorage.setItem(SAVED_PROJECTS_KEY, JSON.stringify(savedProjectsList));
+    localStorage.setItem(key, JSON.stringify(savedProjectsList));
   } catch (e) {}
   if (persistBack) {
     try {
-      ipcRenderer.sendToHost('saved-projects:save', { projects: savedProjectsList });
+      ipcRenderer.sendToHost('saved-projects:save', { projects: savedProjectsList, serverId: currentSrvId });
     } catch (e) {}
     try {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ [SAVED_PROJECTS_KEY]: savedProjectsList });
+        chrome.storage.local.set({ [key]: savedProjectsList });
       }
     } catch (e) {}
   }
@@ -1370,8 +1400,15 @@ function mergeSavedProjects(incoming, persistBack = true) {
 }
 
 ipcRenderer.on('apply-saved-projects', (event, data) => {
-  if (data && Array.isArray(data.projects)) {
-    mergeSavedProjects(data.projects, false);
+  if (!data) return;
+  if (data.serverId && String(data.serverId).trim() !== '') {
+    credentials.serverId = String(data.serverId).trim();
+    try {
+      sessionStorage.setItem('__flow_active_server_id', credentials.serverId);
+    } catch (e) {}
+  }
+  if (Array.isArray(data.projects)) {
+    mergeSavedProjects(data.projects, false, !!data.replace);
   }
 });
 
@@ -1431,10 +1468,13 @@ function detectCurrentProjectTitle() {
 
 function getScopedSavedProjectsList() {
   const isGem = isGeminiHostUrl();
+  const currentSrvId = String(credentials.serverId || '').trim();
   return savedProjectsList.filter((p) => {
     if (!p || !p.id) return false;
     const itemIsGem = p.kind === 'gemini' || String(p.id).startsWith('gemini_') || String(p.url || '').includes('gemini.google.com');
-    return isGem ? itemIsGem : !itemIsGem;
+    if (isGem !== itemIsGem) return false;
+    if (!isGem && currentSrvId && p.serverId && p.serverId !== currentSrvId) return false;
+    return true;
   });
 }
 
@@ -1456,6 +1496,7 @@ function saveCurrentProjectToDevice(manual = false) {
   const projId = getCurrentProjectIdFromUrl();
   if (!projId) return false;
   const isGem = isGeminiHostUrl();
+  const currentSrvId = String(credentials.serverId || '').trim();
   const rawGemId = isGem ? projId.replace(/^gemini_/, '') : '';
   const fullUrl = isGem
     ? window.location.origin + '/app/' + rawGemId
@@ -1468,6 +1509,7 @@ function saveCurrentProjectToDevice(manual = false) {
   const entry = {
     id: projId,
     kind: isGem ? 'gemini' : 'flow',
+    serverId: currentSrvId,
     url: fullUrl,
     title: (existing && existing.customTitle) || detectedTitle || (existing && existing.title) || (isGem ? 'Google Gemini Chat' : 'Google Flow Project'),
     savedAt: existing && existing.savedAt ? existing.savedAt : now.toLocaleString(),
@@ -1477,15 +1519,16 @@ function saveCurrentProjectToDevice(manual = false) {
 
   const filtered = savedProjectsList.filter((p) => p && p.id !== projId);
   savedProjectsList = [entry, ...filtered];
+  const key = getPerAccountProjectsKey();
   try {
-    localStorage.setItem(SAVED_PROJECTS_KEY, JSON.stringify(savedProjectsList));
+    localStorage.setItem(key, JSON.stringify(savedProjectsList));
   } catch (e) {}
   try {
-    ipcRenderer.sendToHost('saved-projects:save', { projects: savedProjectsList });
+    ipcRenderer.sendToHost('saved-projects:save', { projects: savedProjectsList, serverId: currentSrvId });
   } catch (e) {}
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.set({ [SAVED_PROJECTS_KEY]: savedProjectsList });
+      chrome.storage.local.set({ [key]: savedProjectsList });
     }
   } catch (e) {}
   updateMyProjectsUI();
@@ -1494,15 +1537,17 @@ function saveCurrentProjectToDevice(manual = false) {
 
 function deleteSavedProject(projId) {
   savedProjectsList = savedProjectsList.filter((p) => p && p.id !== projId);
+  const key = getPerAccountProjectsKey();
+  const currentSrvId = String(credentials.serverId || '').trim();
   try {
-    localStorage.setItem(SAVED_PROJECTS_KEY, JSON.stringify(savedProjectsList));
+    localStorage.setItem(key, JSON.stringify(savedProjectsList));
   } catch (e) {}
   try {
-    ipcRenderer.sendToHost('saved-projects:save', { projects: savedProjectsList });
+    ipcRenderer.sendToHost('saved-projects:save', { projects: savedProjectsList, serverId: currentSrvId });
   } catch (e) {}
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.set({ [SAVED_PROJECTS_KEY]: savedProjectsList });
+      chrome.storage.local.set({ [key]: savedProjectsList });
     }
   } catch (e) {}
   updateMyProjectsUI();
@@ -4483,8 +4528,11 @@ ipcRenderer.on('apply-credentials', (event, creds) => {
 
 function applyCredentialsFromHost(creds) {
   if (!creds) return;
-  if (creds.imageOnly !== undefined) {
-    window.__flowSetImageOnlyMode(!!creds.imageOnly);
+  if (creds.imageOnly !== undefined || creds.serverId !== undefined) {
+    window.__flowSetImageOnlyMode(
+      creds.imageOnly !== undefined ? !!creds.imageOnly : !!credentials.imageOnly,
+      creds.serverId !== undefined ? creds.serverId : credentials.serverId
+    );
   }
   if (!creds.email) return;
   const prevEmail = (credentials.email || '').toLowerCase();

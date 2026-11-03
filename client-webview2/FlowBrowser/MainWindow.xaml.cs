@@ -374,8 +374,9 @@ public partial class MainWindow : Window
             if (_flowReady && FlowView.CoreWebView2 != null)
             {
                 var imgFlag = _flowCredImageOnly ? "true" : "false";
+                var srvStr = JsString(_activeFlowServerId);
                 _ = FlowView.CoreWebView2.ExecuteScriptAsync(
-                    $"try {{ document.documentElement.style.opacity = '1'; if (window.__flowSetImageOnlyMode) window.__flowSetImageOnlyMode({imgFlag}); }} catch(e) {{}}");
+                    $"try {{ document.documentElement.style.opacity = '1'; if (window.__flowSetImageOnlyMode) window.__flowSetImageOnlyMode({imgFlag}, {srvStr}); }} catch(e) {{}}");
             }
             if (_toolTransitionCoverActive && IsFlowWorkspaceUrl(url) && !IsGoogleAuthRelatedUrl(url) && !IsAboutBlank(url))
             {
@@ -2000,11 +2001,14 @@ public partial class MainWindow : Window
                         _flowCredTarget = tu.GetString();
                     if (credData.TryGetProperty("imageOnly", out var ioEl))
                         _flowCredImageOnly = ioEl.ValueKind == JsonValueKind.True;
+                    if (credData.TryGetProperty("serverId", out var srvEl) && srvEl.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(srvEl.GetString()))
+                        _activeFlowServerId = srvEl.GetString()!;
                     PostToBulkAndWorkflow(new { type = "veo-account-mode", imageOnly = _flowCredImageOnly });
                     if (FlowView.CoreWebView2 != null)
                     {
                         var imgFlag = _flowCredImageOnly ? "true" : "false";
-                        _ = FlowView.CoreWebView2.ExecuteScriptAsync($"window.__flowSetImageOnlyMode && window.__flowSetImageOnlyMode({imgFlag});");
+                        var srvStr = JsString(_activeFlowServerId);
+                        _ = FlowView.CoreWebView2.ExecuteScriptAsync($"window.__flowSetImageOnlyMode && window.__flowSetImageOnlyMode({imgFlag}, {srvStr});");
                     }
                     var url = FlowView.CoreWebView2?.Source ?? "";
                     _ = TryHostGoogleAutofillAsync(url);
@@ -2021,11 +2025,14 @@ public partial class MainWindow : Window
                     _flowCredTarget = tu2.GetString();
                 if (root.TryGetProperty("imageOnly", out var ioEl2))
                     _flowCredImageOnly = ioEl2.ValueKind == JsonValueKind.True;
+                if (root.TryGetProperty("serverId", out var srvEl2) && srvEl2.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(srvEl2.GetString()))
+                    _activeFlowServerId = srvEl2.GetString()!;
                 PostToBulkAndWorkflow(new { type = "veo-account-mode", imageOnly = _flowCredImageOnly });
                 if (FlowView.CoreWebView2 != null)
                 {
                     var imgFlag = _flowCredImageOnly ? "true" : "false";
-                    _ = FlowView.CoreWebView2.ExecuteScriptAsync($"window.__flowSetImageOnlyMode && window.__flowSetImageOnlyMode({imgFlag});");
+                    var srvStr2 = JsString(_activeFlowServerId);
+                    _ = FlowView.CoreWebView2.ExecuteScriptAsync($"window.__flowSetImageOnlyMode && window.__flowSetImageOnlyMode({imgFlag}, {srvStr2});");
                 }
                 var url2 = FlowView.CoreWebView2?.Source ?? "";
                 _ = TryHostGoogleAutofillAsync(url2);

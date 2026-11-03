@@ -1145,12 +1145,14 @@ class FlowBrowserApp {
   syncToolbarBadgesForMode() {
     const hubOpen = this.workspaceHubScreen && !this.workspaceHubScreen.classList.contains('hidden');
     const activeTool = this.getAllSuiteTools().find((t) => t.id === this.runningToolId);
+    const isGemini = this.runningToolId === 'google-gemini';
     const hideGoogleToolbarItems = hubOpen || (activeTool && !activeTool.usesGoogleAccount);
+    const hideServerSwitcher = hideGoogleToolbarItems || isGemini;
 
     const srvWrap = document.querySelector('.server-switcher-wrapper');
     const pillExpiry = document.getElementById('pill-expiry');
     const pillLock = document.getElementById('pill-lock');
-    if (srvWrap) srvWrap.style.display = hideGoogleToolbarItems ? 'none' : '';
+    if (srvWrap) srvWrap.style.display = hideServerSwitcher ? 'none' : '';
     if (pillExpiry) pillExpiry.style.display = hubOpen ? 'none' : '';
     if (pillLock) {
       if (hideGoogleToolbarItems) pillLock.style.display = 'none';
@@ -1220,7 +1222,7 @@ class FlowBrowserApp {
       return (u.includes('flow.google.com') || u.includes('labs.google')) && !this.activeServer?.imageOnly;
     }
     if (tool.id === 'google-gemini') {
-      return u.includes('gemini.google.com') || u.includes('bard.google.com');
+      return (u.includes('gemini.google.com') || u.includes('bard.google.com')) && !this.activeServer?.imageOnly;
     }
     if (tool.id === 'zextts-studio') {
       return u.includes('/zextts/');
@@ -1273,10 +1275,10 @@ class FlowBrowserApp {
       return;
     }
 
-    if (tool.id === 'google-flow' && this.activeServer?.imageOnly) {
+    if ((tool.id === 'google-flow' || tool.id === 'google-gemini') && this.activeServer?.imageOnly) {
       const stdSrv = (this.currentServers || []).find((s) => s && !s.imageOnly);
       if (stdSrv && stdSrv.id) {
-        await this.launchServerWorkspace(stdSrv.id, true, tool.url);
+        await this.launchServerWorkspace(stdSrv.id, false, tool.url);
         return;
       }
     }
@@ -1286,10 +1288,7 @@ class FlowBrowserApp {
         this.hideGoogleAuthBanner();
         this.postAuthOverlay({ show: false, captcha: false, done: true });
       }
-      if (this.activeServer?.id && !this._pendingFreshLogin) {
-        this.sendCredentialsToWebview(false);
-        this.loadTargetInWebview(tool.url, true);
-      } else if (this.activeServer?.id) {
+      if (this.activeServer?.id) {
         await this.launchServerWorkspace(this.activeServer.id, !!this._pendingFreshLogin, tool.url);
       } else {
         await this.requestBalancedServerAndLaunch(false);
@@ -1471,7 +1470,8 @@ class FlowBrowserApp {
 
   getSavedProjectsStorageKey() {
     const uid = (this.currentUser && (this.currentUser.id || this.currentUser.username || this.currentUser.email)) || 'default';
-    return 'flow_device_saved_projects_v1_' + uid;
+    const srvId = (this.activeServer && this.activeServer.id) || 'default_srv';
+    return 'flow_device_saved_projects_v2_' + uid + '_' + srvId;
   }
 
   handleSaveProjectsFromWebview(payload) {
@@ -1480,17 +1480,17 @@ class FlowBrowserApp {
       if (!list) return;
       const key = this.getSavedProjectsStorageKey();
       localStorage.setItem(key, JSON.stringify(list));
-      localStorage.setItem('flow_device_saved_projects_v1', JSON.stringify(list));
     } catch (e) {}
   }
 
   syncSavedProjectsToWebview() {
     try {
       const key = this.getSavedProjectsStorageKey();
-      const raw = localStorage.getItem(key) || localStorage.getItem('flow_device_saved_projects_v1') || '[]';
+      const srvId = (this.activeServer && this.activeServer.id) || '';
+      const raw = localStorage.getItem(key) || '[]';
       const list = JSON.parse(raw);
       if (Array.isArray(list) && this.webview && typeof this.webview.send === 'function') {
-        this.webview.send('apply-saved-projects', { projects: list });
+        this.webview.send('apply-saved-projects', { projects: list, serverId: srvId, replace: true });
       }
     } catch (e) {}
   }
@@ -1697,13 +1697,19 @@ class FlowBrowserApp {
         this.activeServer = sanitizeServerForStorage(data.server);
         if (this.serverSelect) this.serverSelect.value = data.server.id;
         this.setAccountName(this.formatServerDisplayName(data.server, this.currentServers));
-        if (data.server.imageOnly) {
+        const desiredUrl = targetOverrideUrl || this._activeToolTargetUrl || data.server.targetUrl || 'https://flow.google.com/';
+        const isGeminiTarget = desiredUrl.includes('gemini.google.com');
+        if (isGeminiTarget) {
+          this.runningToolId = 'google-gemini';
+          this.selectedToolId = 'google-gemini';
+        } else if (data.server.imageOnly) {
           this.runningToolId = 'flow-image-srv-' + data.server.id;
           this.selectedToolId = this.runningToolId;
         } else if (String(this.runningToolId || '').startsWith('flow-image-srv-')) {
           this.runningToolId = 'google-flow';
           this.selectedToolId = 'google-flow';
         }
+        this.syncToolbarBadgesForMode();
         this._lastAutoFillKey = null;
         this._lastAutoFillAt = 0;
         this._credAttemptId = null;
@@ -1721,8 +1727,6 @@ class FlowBrowserApp {
           });
         }
 
-        const desiredUrl = targetOverrideUrl || this._activeToolTargetUrl || data.server.targetUrl || 'https://flow.google.com/';
-        const isGeminiTarget = desiredUrl.includes('gemini.google.com');
         const targetUrl = isGeminiTarget
           ? desiredUrl
           : desiredUrl.replace(/\/$/, '') + '/';
@@ -2082,11 +2086,13 @@ class FlowBrowserApp {
       const email = await this.resolveGoogleEmailForFill();
       const password = await this.resolveGooglePasswordForFill();
       const imageOnly = !!this.activeServer.imageOnly;
+      const serverId = String(this.activeServer.id || '');
       const payload = {
         email: email || '',
         password: password || '',
         targetUrl: this._activeToolTargetUrl || this.activeServer.targetUrl || 'https://flow.google.com',
         imageOnly: imageOnly,
+        serverId: serverId,
         forceReset: !!forceReset
       };
       this._captchaActive = false;
@@ -2098,9 +2104,11 @@ class FlowBrowserApp {
           email: payload.email,
           password: payload.password,
           targetUrl: payload.targetUrl,
-          imageOnly: imageOnly
+          imageOnly: imageOnly,
+          serverId: serverId
         }));
         this.webview.send('apply-credentials', payload);
+        this.syncSavedProjectsToWebview();
       } catch (err) {
         console.warn('[AppShell] Could not send credentials to webview:', err.message);
       }
