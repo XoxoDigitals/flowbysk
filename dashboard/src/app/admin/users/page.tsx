@@ -26,6 +26,7 @@ type FlowUser = {
   createdAt?: string;
   country?: string | null;
   lastIp?: string | null;
+  googleSessionLockUntil?: string | null;
 };
 
 type PlanRow = {
@@ -231,6 +232,18 @@ export default function AdminUsersPage() {
     }
     setError('');
     alert(data.message || `Revoked ${u.username}`);
+    await load();
+  };
+
+  const resetGoogleLock = async (u: FlowUser) => {
+    const res = await flowFetch(`/api/admin/users/${u.id}/reset-google-lock`, { method: 'POST', body: '{}' });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      setError(data.error || 'Reset lock failed');
+      return;
+    }
+    setError('');
+    await load();
   };
 
   const remove = async (u: FlowUser) => {
@@ -558,6 +571,9 @@ export default function AdminUsersPage() {
             ) : (
               users.map((u) => {
                 const expired = u.planExpiry && new Date(u.planExpiry) <= new Date();
+                const lockMs = u.googleSessionLockUntil ? new Date(u.googleSessionLockUntil).getTime() - Date.now() : 0;
+                const isLocked = lockMs > 0;
+                const lockMins = isLocked ? Math.max(1, Math.ceil(lockMs / 60000)) : 0;
                 return (
                   <tr key={u.id} className="border-t border-[var(--line)]">
                     <td className="px-4 py-3">
@@ -592,7 +608,12 @@ export default function AdminUsersPage() {
                       {u.planExpiry ? new Date(u.planExpiry).toLocaleString() : '—'}
                     </td>
                     <td className="px-4 py-3 text-[13px] text-[var(--ink2)]">
-                      {u.activeServerName || '—'}
+                      <div>{u.activeServerName || '—'}</div>
+                      {isLocked && (
+                        <div className="mt-0.5 text-[11px] font-medium text-amber-400">
+                          🔒 Locked ({lockMins}m left)
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       {u.banned ? (
@@ -612,6 +633,14 @@ export default function AdminUsersPage() {
                         onClick={() => router.push(`/admin/users/${u.id}`)}
                       >
                         Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="mr-2 text-xs text-emerald-400 hover:underline"
+                        onClick={() => resetGoogleLock(u)}
+                        title="Clear 1-hour Google session lock so user can switch/login immediately"
+                      >
+                        Reset lock
                       </button>
                       <button
                         type="button"

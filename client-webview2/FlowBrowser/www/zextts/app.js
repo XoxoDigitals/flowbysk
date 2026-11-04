@@ -400,9 +400,35 @@ function setPodProgress(progress, text) {
   if (text) $("podProgressText").textContent = text;
 }
 
+function dataUrlToPlayableUrl(url) {
+  if (!url || typeof url !== "string" || !url.startsWith("data:")) return url;
+  try {
+    const commaIdx = url.indexOf(",");
+    if (commaIdx < 0) return url;
+    const b64 = url.slice(commaIdx + 1);
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const blob = new Blob([bytes], { type: "audio/mpeg" });
+    return URL.createObjectURL(blob);
+  } catch {
+    return url;
+  }
+}
+
 function playUrl(url, path = "", autoplay = true) {
   const player = $("player");
-  $("outPath").value = path;
+  if (path) {
+    $("outPath").value = path;
+    const lastSep = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+    if (lastSep > 0) {
+      const folder = path.slice(0, lastSep);
+      if (!state.outputDir && folder) {
+        state.outputDir = folder;
+        if ($("outputFolder")) $("outputFolder").value = folder;
+      }
+    }
+  }
   if (!url) {
     player.classList.add("hidden");
     $("audioEmpty").classList.remove("hidden");
@@ -410,7 +436,13 @@ function playUrl(url, path = "", autoplay = true) {
   }
   $("audioEmpty").classList.add("hidden");
   player.classList.remove("hidden");
-  player.src = url;
+  if (player._blobUrl) {
+    try { URL.revokeObjectURL(player._blobUrl); } catch {}
+    player._blobUrl = null;
+  }
+  const playable = dataUrlToPlayableUrl(url);
+  if (playable && playable.startsWith("blob:")) player._blobUrl = playable;
+  player.src = playable;
   $("btnReplay").disabled = false;
   if (autoplay) player.play().catch(() => {});
 }
@@ -740,10 +772,29 @@ async function loadVoices(force = false) {
   setEngine(false, "Fetching…");
   setDock("Loading", "Voice catalogue");
   try {
-    const api = await waitApi();
-    const result = await api.list_voices(force);
-    if (!result || !result.ok) throw new Error((result && result.error) || "Failed to list voices");
-    state.voices = result.voices || [];
+    let loadedVoices = [];
+    try {
+      const api = await waitApi(10000);
+      const result = await api.list_voices(force);
+      if (result && result.ok && Array.isArray(result.voices) && result.voices.length > 0) {
+        loadedVoices = result.voices;
+      }
+    } catch {}
+
+    if (!loadedVoices.length) {
+      try {
+        const fallbackResp = await fetch("./voices_fallback.json");
+        if (fallbackResp.ok) {
+          const fallbackArr = await fallbackResp.json();
+          if (Array.isArray(fallbackArr) && fallbackArr.length > 0) {
+            loadedVoices = fallbackArr;
+          }
+        }
+      } catch {}
+    }
+
+    if (!loadedVoices.length) throw new Error("Failed to list voices");
+    state.voices = loadedVoices;
     renderLanguageCountryFilters();
     applyFilters();
     if (!state.selectedVoice && state.voices.length) {
@@ -785,10 +836,7 @@ async function refreshVoices() {
 }
 
 function requireOutputFolder() {
-  if (state.outputDir) return true;
-  toast("Please select an output folder first", "err");
-  setDock("Output folder required", "Open Settings and choose where audio should be saved");
-  return false;
+  return true;
 }
 
 async function onGenerate() {
@@ -868,7 +916,13 @@ async function onPreviewVoice(voiceId, force = false, triggerButton = null) {
     const result = await api.preview_voice(voice, settings.rate, settings.pitch, settings.volume, force);
     if (!result || !result.ok) throw new Error((result && result.error) || "Preview failed");
     const player = $("voicePreviewPlayer");
-    player.src = result.audioUrl;
+    if (player._blobUrl) {
+      try { URL.revokeObjectURL(player._blobUrl); } catch {}
+      player._blobUrl = null;
+    }
+    const playable = dataUrlToPlayableUrl(result.audioUrl);
+    if (playable && playable.startsWith("blob:")) player._blobUrl = playable;
+    player.src = playable;
     if (triggerButton) {
       triggerButton.classList.remove("loading");
       triggerButton.classList.add("playing");
@@ -1120,9 +1174,8 @@ async function boot() {
     }
     const allowed = await checkRemoteAccess(true);
     if (!allowed) return;
-    const online = await checkConnectivity(true);
-    if (online) await loadVoices(false);
-    else setEngine(false, "Offline");
+    await checkConnectivity(true);
+    await loadVoices(false);
     boot.complete = true;
   } catch (error) {
     setEngine(false, "Starting…");

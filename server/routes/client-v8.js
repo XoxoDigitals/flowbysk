@@ -16,9 +16,20 @@ const { lookupCountry, clientIpFromReq } = require('../geoIp');
 
 const GOOGLE_SESSION_LOCK_MS = 60 * 60 * 1000; // 60 minutes after successful Google login
 
-function googleLockState(_user) {
-  // Allow users to switch and sign into multiple Google accounts (Video + Image-only + Gemini) without a 60m lock
-  return { locked: false, lockedUntil: null, retryAfterSeconds: 0 };
+function googleLockState(user) {
+  if (!user || !user.googleSessionLockUntil) {
+    return { locked: false, lockedUntil: null, retryAfterSeconds: 0 };
+  }
+  const untilMs = new Date(user.googleSessionLockUntil).getTime();
+  if (!Number.isFinite(untilMs) || untilMs <= Date.now()) {
+    return { locked: false, lockedUntil: null, retryAfterSeconds: 0 };
+  }
+  const retryAfterSeconds = Math.max(1, Math.ceil((untilMs - Date.now()) / 1000));
+  return {
+    locked: true,
+    lockedUntil: new Date(untilMs).toISOString(),
+    retryAfterSeconds,
+  };
 }
 
 function googleLockResponse(state) {
@@ -443,7 +454,8 @@ router.post('/ack-google-wipe', requireUserAuth, async (req, res) => {
 router.post('/switch-server', requireUserAuth, async (req, res) => {
   const { serverId } = req.body;
   const user = req.user;
-  if (!(await assertNotGoogleSessionLocked(user, res))) return;
+  const isSameServer = !!(serverId && user.activeServerId && String(serverId) === String(user.activeServerId));
+  if (!isSameServer && !(await assertNotGoogleSessionLocked(user, res))) return;
   const availableServers = await getUserServers(user);
   let targetServer = availableServers.find((s) => s.id === serverId);
   if (!targetServer && availableServers.length > 0) targetServer = availableServers[0];
@@ -455,7 +467,8 @@ router.post('/switch-server', requireUserAuth, async (req, res) => {
     serverId: targetServer.id,
     serverName: targetServer.name,
   });
-  res.json({ success: true, server: publicServerPayload(targetServer) });
+  const freshUser = await db.getUserById(user.id);
+  res.json({ success: true, server: publicServerPayload(targetServer), user: publicUser(freshUser || user) });
 });
 
 router.post('/request-server-change', requireUserAuth, async (req, res) => {

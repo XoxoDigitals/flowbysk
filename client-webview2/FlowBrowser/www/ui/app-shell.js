@@ -1024,6 +1024,7 @@ class FlowBrowserApp {
       if (data.user) {
         this.currentUser = { ...(this.currentUser || {}), ...data.user };
         this.updateToolbarUserInfo();
+        this.applyLockFromUser(data.user);
       }
       const purged = await this.purgeStaleAssignedAccount(data.servers, data.activeServer);
       if (!purged) {
@@ -1690,6 +1691,7 @@ class FlowBrowserApp {
         });
         data = await res.json();
         if (data && data.code === 'GOOGLE_SESSION_LOCKED') this.noteGoogleLock(data);
+        if (data && data.user) this.applyLockFromUser(data.user);
       }
       if (data && data.success) {
         const previousServerId = this.activeServer?.id || '';
@@ -1748,19 +1750,18 @@ class FlowBrowserApp {
           await this.sendCredentialsToWebview(false);
           console.log('[AppShell] Restored isolated session for', data.server.name, '->', targetUrl);
           this.loadTargetInWebview(targetUrl, true);
+          if (this.googleLockRemainingMs() <= 0 || serverChanged) {
+            this.reportGoogleFinish('success', { forceLock: true }).catch(() => {});
+          }
         } else {
           this._pendingFreshLogin = false;
           this._freshLoginStarted = true;
           await this.sendCredentialsToWebview(true);
-          const nextEmail = await this.resolveGoogleEmailForFill();
-          const loginUrl = nextEmail
-            ? 'https://accounts.google.com/ServiceLogin?hl=en&Email=' +
-              encodeURIComponent(nextEmail) +
-              '&continue=' +
-              encodeURIComponent(targetUrl)
-            : 'https://accounts.google.com/ServiceLogin?hl=en&continue=' +
-              encodeURIComponent(targetUrl);
-          console.log('[AppShell] Starting isolated Google login for', nextEmail || data.server.name, '->', loginUrl);
+          await this.resolveGoogleEmailForFill();
+          const loginUrl =
+            'https://accounts.google.com/ServiceLogin?hl=en&continue=' +
+            encodeURIComponent(targetUrl);
+          console.log('[AppShell] Starting isolated Google login for', data.server.name, '->', loginUrl);
           this.loadTargetInWebview(loginUrl, true);
         }
       } else {
@@ -1771,6 +1772,9 @@ class FlowBrowserApp {
         );
         this.hideLoadingOverlay();
         // Never leave the workspace blank: reopen the account we are already on.
+        if (this.serverSelect && this.activeServer?.id) {
+          this.serverSelect.value = this.activeServer.id;
+        }
         if (isLock && this.activeServer?.id && this.activeServer.id !== serverId) {
           const keepUrl = (this.activeServer.targetUrl || 'https://flow.google.com').replace(/\/$/, '') + '/';
           this.loadTargetInWebview(keepUrl);
@@ -1889,6 +1893,15 @@ class FlowBrowserApp {
       } catch (e) {}
     }
     if (!value) value = 'about:blank';
+    // Strip/redact any email address or Email= query parameter so account emails NEVER appear in the URL bar
+    try {
+      value = String(value)
+        .replace(/([?&])(email|Email|login_hint)=[^&#]*/g, '$1')
+        .replace(/[?&]+(&)/g, '?')
+        .replace(/\?&/g, '?')
+        .replace(/[?&]$/g, '')
+        .replace(/[a-zA-Z0-9._%+-]+(?:@|%40)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[hidden]');
+    } catch (e) {}
     const urlBar = document.getElementById('debug-url-bar');
     if (urlBar) {
       const isTtsStudio = /zextts|app.flowbrowser.localhost|flowbrowser.local/i.test(value);
@@ -2551,7 +2564,7 @@ class FlowBrowserApp {
    * cancelled/failed closes the attempt so admin never sees it stuck "in progress").
    */
   async reportGoogleFinish(outcome, opts = {}) {
-    const attemptId = this._finishAttemptId;
+    const attemptId = this._finishAttemptId || (opts.forceLock ? 'restored-session' : null);
     if (!attemptId || !this.config?.authToken || !this.config?.serverUrl) return;
     this._finishAttemptId = null;
     try {
@@ -2562,19 +2575,19 @@ class FlowBrowserApp {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.config.authToken}`
         },
-        body: JSON.stringify({ attemptId, outcome })
+        body: JSON.stringify({ attemptId, outcome, serverId: this.activeServer?.id || null })
       });
       const data = await res.json().catch(() => ({}));
       if (outcome === 'success' && data && data.user) this.applyLockFromUser(data.user);
     } catch (e) {}
   }
 
-  /** Landed on Flow after the credential steps ran => Google login completed. */
+  /** Landed on Flow/Gemini after the credential steps ran => Google login completed. */
   maybeReportGoogleSuccess(url) {
-    if (!this._finishAttemptId || !this._credUsedStages?.has('password')) return;
+    if (!this._finishAttemptId) return;
     const href = String(url || '');
     const onGoogleAuth = (u) => u.includes('accounts.google.com') || u.includes('accounts.youtube.com');
-    const onFlow = (u) => u.includes('flow.google.com') || u.includes('labs.google');
+    const onFlow = (u) => u.includes('flow.google.com') || u.includes('labs.google') || u.includes('gemini.google.com');
     // Still inside Google sign-in (OTP / 2FA / challenge): never finish, drop any pending finish.
     if (onGoogleAuth(href)) {
       if (this._finishTimer) { clearTimeout(this._finishTimer); this._finishTimer = null; }
@@ -2585,7 +2598,7 @@ class FlowBrowserApp {
     // Flow is also touched mid-login (continue= bounce) before Google asks for the OTP.
     // Require the page to STAY on Flow: short settle when the OTP was already used,
     // long settle otherwise (Google may still redirect to the 2FA challenge).
-    const settleMs = this._credUsedStages.has('otp') ? 2500 : 12000;
+    const settleMs = this._credUsedStages?.has('otp') ? 2500 : 8000;
     this._finishTimer = setTimeout(() => {
       this._finishTimer = null;
       const cur = String(this.webview?.src || '');

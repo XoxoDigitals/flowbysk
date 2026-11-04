@@ -1297,13 +1297,12 @@ function spoofAccountIdentityInDom() {
   } catch (e) {}
 }
 
-// Ensure top-right profile icon / ULTRA tier pill is NEVER hidden
+// Ensure top-right profile icon / ULTRA tier pill is NEVER hidden, while keeping Account details popup closed until profile avatar is clicked
 function ensureProfileIconVisible() {
   try {
     const targets = document.querySelectorAll(
-      'header button, header a, header img, .header-user-button, .header-user-button *, ' +
-      'flow-user-tier-chip, flow-user-tier-chip *, .tier-chip, [aria-label="ULTRA tier"], ' +
-      '[aria-label="Account details"], [aria-label*="Google Account" i], .account-switcher-placeholder'
+      '.header-user-button, flow-user-tier-chip, .tier-chip, [aria-label="ULTRA tier"], ' +
+      'header button[aria-label*="Google Account" i], header img[src*="googleusercontent.com"], header img[src*="ggpht.com"]'
     );
     targets.forEach((el) => {
       if (!el || el.tagName === 'A' && (el.classList.contains('switch-account-link') || (el.getAttribute('href') || '').includes('myaccount.google.com'))) {
@@ -1324,6 +1323,88 @@ function ensureProfileIconVisible() {
     });
   } catch (e) {}
 }
+
+// Strict click-gate so the Google Account Details popup ONLY appears when clicking the top-right profile avatar icon (J)
+(function initProfilePopupClickGate() {
+  if (window.__flowProfilePopupGateInstalled) return;
+  window.__flowProfilePopupGateInstalled = true;
+
+  function setPopupAllowed(allowed) {
+    try {
+      if (document.documentElement) {
+        if (allowed) document.documentElement.setAttribute('data-flow-profile-popup-open', '1');
+        else document.documentElement.removeAttribute('data-flow-profile-popup-open');
+      }
+    } catch (e) {}
+  }
+
+  function isTierChipTarget(target) {
+    if (!target || !target.closest) return false;
+    return !!target.closest('flow-user-tier-chip, .tier-chip, [aria-label="ULTRA tier"]');
+  }
+
+  function isProfileAvatarClick(target, clientX, clientY) {
+    if (!target || !target.closest) return false;
+    if (isTierChipTarget(target)) return false;
+    const userBtn = target.closest(
+      '.header-user-button, header button[aria-label*="Google Account" i], header button[aria-label*="Account" i], header [aria-label*="Google Account" i]'
+    );
+    if (!userBtn) return false;
+    // Must be in the top header area (top 90px of viewport)
+    const rect = userBtn.getBoundingClientRect();
+    if (rect.top > 90) return false;
+    // If .header-user-button contains both [ULTRA] and (J), only allow clicks on the right avatar side (not the ULTRA badge)
+    const tierEl = userBtn.querySelector('flow-user-tier-chip, .tier-chip, [aria-label="ULTRA tier"]');
+    if (tierEl && typeof clientX === 'number' && clientX > 0) {
+      const tierRect = tierEl.getBoundingClientRect();
+      if (clientX >= tierRect.left && clientX <= tierRect.right + 4 && clientY >= tierRect.top && clientY <= tierRect.bottom) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  document.addEventListener('click', (e) => {
+    try {
+      const t = e.target;
+      if (!t || !t.closest) return;
+
+      // Clicking ULTRA chip itself should never open the account popup
+      if (isTierChipTarget(t) && t.closest('.header-user-button, header')) {
+        e.stopPropagation();
+        e.preventDefault();
+        setPopupAllowed(false);
+        return;
+      }
+
+      // Clicking the profile avatar icon (J) in top-right header
+      if (isProfileAvatarClick(t, e.clientX, e.clientY)) {
+        const currentlyOpen = document.documentElement?.getAttribute('data-flow-profile-popup-open') === '1';
+        const popupEl = document.querySelector('[aria-label="Account details"]');
+        const popupVisible = popupEl && popupEl.getBoundingClientRect().width > 10;
+        if (currentlyOpen && popupVisible) {
+          setPopupAllowed(false);
+        } else {
+          setPopupAllowed(true);
+        }
+        return;
+      }
+
+      // Clicking close button inside Account details popup
+      const inPopup = t.closest('[aria-label="Account details"]');
+      if (inPopup) {
+        const closeBtn = t.closest('button[aria-label*="Close" i], button[aria-label*="close" i], [role="button"][aria-label*="Close" i]');
+        if (closeBtn) {
+          setPopupAllowed(false);
+        }
+        return;
+      }
+
+      // Clicking anywhere else on screen closes / keeps closed the Account details popup
+      setPopupAllowed(false);
+    } catch (err) {}
+  }, true);
+})();
 
 // =========================================================================
 // SAVED PROJECTS HISTORY ENGINE (Auto-Save & "My Projects" Modal on Device — Scoped Per Account)
@@ -1851,7 +1932,8 @@ loadSavedProjectsFromDevice();
         "flow-credit-banner,.credit-banner{display:none!important}" +
         ".mavatar-footer-row,.mavatar-footer-row.collapsed,mavatar-footer-row,expandable-section[storagekey='chats'],[data-test-id='chats-expandable-section'],#sidenav-section-content-chats,#sidenav-section-content-chats .chat-history,#sidenav-section-content-chats .chat-history-list,conversations-list[data-test-id='all-conversations'],[data-test-id='all-conversations'],gem-nav-list-item[data-test-id='conversation']{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;}" +
         "model-response a,model-response a[href],message-content a,message-content a[href],user-query a,user-query a[href],.response-container a,.query-content a,.user-query-container a,.markdown a,chat-window a,main a,[role='main'] a,source-footnote,inline-source-citation,sources-carousel,sources-carousel-inline,fact-check-evaluator,[data-test-id*='source'],button[aria-label*='source' i],button[aria-label*='Google Help' i]{pointer-events:none!important;cursor:text!important;text-decoration:none!important;}" +
-        ".header-user-button,.header-user-button *,flow-user-tier-chip,flow-user-tier-chip *,.tier-chip,[aria-label='ULTRA tier'],[aria-label='Account details'],header button[aria-label*='Account' i],header img[src*='googleusercontent.com'],header img[src*='ggpht.com']{visibility:visible!important;opacity:1!important;pointer-events:auto!important}" +
+        ".header-user-button,flow-user-tier-chip,.tier-chip,[aria-label='ULTRA tier'],header button[aria-label*='Google Account' i],header img[src*='googleusercontent.com'],header img[src*='ggpht.com']{visibility:visible!important;opacity:1!important;pointer-events:auto!important}" +
+        "html:not([data-flow-profile-popup-open='1']) [aria-label='Account details'],html:not([data-flow-profile-popup-open='1']) .account-switcher-placeholder{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}" +
         "#flow-my-projects-dock{position:fixed!important;bottom:18px!important;right:22px!important;left:auto!important;z-index:2147483645!important;display:flex!important;align-items:center!important;gap:10px!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
         "#flow-my-projects-btn,#flow-save-current-project-btn{display:inline-flex!important;align-items:center!important;gap:8px!important;background:rgba(22,19,36,0.94)!important;border:1px solid rgba(139,92,246,0.45)!important;color:#f3f4f6!important;padding:8px 16px!important;border-radius:999px!important;font-size:13px!important;font-weight:600!important;cursor:pointer!important;box-shadow:0 8px 24px rgba(0,0,0,0.6)!important;transition:all .18s ease!important;}" +
         "#flow-my-projects-btn:hover,#flow-save-current-project-btn:hover{background:rgba(38,31,64,0.98)!important;border-color:rgba(167,139,250,0.8)!important;transform:translateY(-1px)!important;}" +

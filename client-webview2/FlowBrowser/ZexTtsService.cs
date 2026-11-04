@@ -28,32 +28,75 @@ internal sealed class ZexTtsService
 
     private static readonly HttpClient Http = CreateHttpClient();
     private static double _clockSkewSeconds;
+    private static DateTime _clockSkewSyncedAtUtc = DateTime.MinValue;
     private List<VoiceDto>? _cachedVoices;
     private readonly string _workRoot;
     private readonly string _previewsDir;
     private readonly string _defaultOutputDir;
+    private readonly string _fallbackOutputDir;
 
     public ZexTtsService()
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         _workRoot = Path.Combine(localAppData, "FlowBrowser", "zextts_work");
         _previewsDir = Path.Combine(_workRoot, "previews");
+        _fallbackOutputDir = Path.Combine(_workRoot, "Output");
         var downloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
         _defaultOutputDir = Path.Combine(downloads, "ZexTTS_Output");
         try
         {
             Directory.CreateDirectory(_workRoot);
             Directory.CreateDirectory(_previewsDir);
+            Directory.CreateDirectory(_fallbackOutputDir);
             Directory.CreateDirectory(_defaultOutputDir);
         }
         catch { /* ignore */ }
 
-        // Pre-warm neural voice catalog in background so TTS STUDIO opens in 0ms
+        // Pre-warm neural voice catalog + clock skew in background so TTS STUDIO opens in 0ms
         _ = Task.Run(async () =>
         {
-            try { await ListVoicesAsync(false).ConfigureAwait(false); }
+            try
+            {
+                await EnsureClockSkewSyncedAsync(false).ConfigureAwait(false);
+                await ListVoicesAsync(false).ConfigureAwait(false);
+            }
             catch { /* ignore */ }
         });
+    }
+
+    private string ResolveWritableOutputDir(string? requestedDir)
+    {
+        var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(requestedDir))
+            candidates.Add(requestedDir.Trim());
+        if (!string.IsNullOrWhiteSpace(_defaultOutputDir))
+            candidates.Add(_defaultOutputDir);
+        try
+        {
+            var docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            if (!string.IsNullOrWhiteSpace(docs))
+                candidates.Add(Path.Combine(docs, "ZexTTS_Output"));
+        }
+        catch { }
+        candidates.Add(_fallbackOutputDir);
+
+        foreach (var dir in candidates)
+        {
+            try
+            {
+                Directory.CreateDirectory(dir);
+                var probeFile = Path.Combine(dir, $".write_probe_{Guid.NewGuid():N}.tmp");
+                File.WriteAllBytes(probeFile, Array.Empty<byte>());
+                File.Delete(probeFile);
+                return dir;
+            }
+            catch
+            {
+                // Try next candidate
+            }
+        }
+        Directory.CreateDirectory(_fallbackOutputDir);
+        return _fallbackOutputDir;
     }
 
     private static HttpClient CreateHttpClient()
@@ -93,8 +136,7 @@ internal sealed class ZexTtsService
                 return new { access = "tox" };
 
             case "get_default_output_folder":
-                try { Directory.CreateDirectory(_defaultOutputDir); } catch { }
-                return new { ok = true, path = _defaultOutputDir };
+                return new { ok = true, path = ResolveWritableOutputDir(null) };
 
             case "check_internet":
             {
@@ -133,76 +175,162 @@ internal sealed class ZexTtsService
 
     private Task<bool> CheckInternetAsync()
     {
+        // Always return true: the user is already authenticated inside Flow Browser's online session,
+        // and NetworkInterface.GetIsNetworkAvailable() can return false on VPN/PPPoE/virtual adapters.
+        return Task.FromResult(true);
+    }
+
+    private List<VoiceDto>? TryLoadBundledFallbackVoices()
+    {
         try
         {
-            return Task.FromResult(System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable());
+            var candidates = new List<string>();
+            try
+            {
+                var www = WwwExtractor.ResolveWwwRoot();
+                if (!string.IsNullOrWhiteSpace(www))
+                    candidates.Add(Path.Combine(www, "zextts", "voices_fallback.json"));
+            }
+            catch { }
+            candidates.Add(Path.Combine(AppContext.BaseDirectory, "www", "zextts", "voices_fallback.json"));
+
+            foreach (var path in candidates)
+            {
+                if (!File.Exists(path)) continue;
+                var json = File.ReadAllText(path);
+                var loaded = JsonSerializer.Deserialize<List<VoiceDto>>(json);
+                if (loaded is { Count: > 0 })
+                    return loaded;
+            }
+        }
+        catch { /* ignore */ }
+        return null;
+    }
+
+    private static async Task EnsureClockSkewSyncedAsync(bool force)
+    {
+        if (!force && (DateTime.UtcNow - _clockSkewSyncedAtUtc).TotalMinutes < 10)
+            return;
+        try
+        {
+            using var req = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"https://{BaseUrl}/voices/list?trustedclienttoken={TrustedClientToken}");
+            AddVoiceHeaders(req);
+            using var resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+            SyncClockSkewFromHeaders(resp);
         }
         catch
         {
-            return Task.FromResult(true);
+            try
+            {
+                using var req2 = new HttpRequestMessage(HttpMethod.Head, "https://www.bing.com/");
+                using var resp2 = await Http.SendAsync(req2, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+                SyncClockSkewFromHeaders(resp2);
+            }
+            catch { /* ignore */ }
         }
     }
 
     private async Task<List<VoiceDto>> ListVoicesAsync(bool force)
     {
         if (!force && _cachedVoices is { Count: > 0 })
+        {
+            _ = EnsureClockSkewSyncedAsync(false);
             return _cachedVoices;
+        }
 
         var cacheFile = Path.Combine(_workRoot, "voices_cache_v2.json");
         if (!force && File.Exists(cacheFile))
         {
             try
             {
-                var cachedJson = await File.ReadAllTextAsync(cacheFile);
+                var cachedJson = await File.ReadAllTextAsync(cacheFile).ConfigureAwait(false);
                 var loaded = JsonSerializer.Deserialize<List<VoiceDto>>(cachedJson);
                 if (loaded is { Count: > 0 })
                 {
                     _cachedVoices = loaded;
+                    _ = EnsureClockSkewSyncedAsync(false);
                     return loaded;
                 }
             }
             catch { /* fetch fresh */ }
         }
 
-        // Also check existing ZexTTS cache or fetch from Microsoft
-        using var req = new HttpRequestMessage(
-            HttpMethod.Get,
-            $"https://{BaseUrl}/voices/list?trustedclienttoken={TrustedClientToken}&Sec-MS-GEC={GenerateSecMsGecV2()}&Sec-MS-GEC-Version={SecMsGecVersion}");
-        AddVoiceHeaders(req);
-        using var resp = await Http.SendAsync(req);
-        SyncClockSkewFromHeaders(resp);
-        resp.EnsureSuccessStatusCode();
-        var raw = await resp.Content.ReadAsStringAsync();
-
-        using var doc = JsonDocument.Parse(raw);
-        var list = new List<VoiceDto>();
-        if (doc.RootElement.ValueKind == JsonValueKind.Array)
+        // Try fetching fresh voice catalog from Microsoft (up to 2 attempts with clock-skew sync)
+        for (int attempt = 1; attempt <= 2; attempt++)
         {
-            foreach (var item in doc.RootElement.EnumerateArray())
+            try
             {
-                var shortName = item.TryGetProperty("ShortName", out var sn) ? sn.GetString() ?? "" : "";
-                if (string.IsNullOrWhiteSpace(shortName)) continue;
-                var friendly = item.TryGetProperty("FriendlyName", out var fn) ? fn.GetString() ?? "" : "";
-                var name = item.TryGetProperty("Name", out var nm) ? nm.GetString() ?? "" : "";
-                var locale = item.TryGetProperty("Locale", out var loc) ? loc.GetString() ?? "" : "";
-                var gender = item.TryGetProperty("Gender", out var gen) ? gen.GetString() ?? "" : "";
-                list.Add(new VoiceDto
+                using var req = new HttpRequestMessage(
+                    HttpMethod.Get,
+                    $"https://{BaseUrl}/voices/list?trustedclienttoken={TrustedClientToken}&Sec-MS-GEC={GenerateSecMsGecV2()}&Sec-MS-GEC-Version={SecMsGecVersion}");
+                AddVoiceHeaders(req);
+                using var resp = await Http.SendAsync(req).ConfigureAwait(false);
+                SyncClockSkewFromHeaders(resp);
+                if (!resp.IsSuccessStatusCode && attempt == 1)
                 {
-                    shortName = shortName,
-                    name = !string.IsNullOrWhiteSpace(friendly) ? friendly : name,
-                    locale = locale,
-                    gender = gender
-                });
+                    continue;
+                }
+                resp.EnsureSuccessStatusCode();
+                var raw = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                using var doc = JsonDocument.Parse(raw);
+                var list = new List<VoiceDto>();
+                if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in doc.RootElement.EnumerateArray())
+                    {
+                        var shortName = item.TryGetProperty("ShortName", out var sn) ? sn.GetString() ?? "" : "";
+                        if (string.IsNullOrWhiteSpace(shortName)) continue;
+                        var friendly = item.TryGetProperty("FriendlyName", out var fn) ? fn.GetString() ?? "" : "";
+                        var name = item.TryGetProperty("Name", out var nm) ? nm.GetString() ?? "" : "";
+                        var locale = item.TryGetProperty("Locale", out var loc) ? loc.GetString() ?? "" : "";
+                        var gender = item.TryGetProperty("Gender", out var gen) ? gen.GetString() ?? "" : "";
+                        list.Add(new VoiceDto
+                        {
+                            shortName = shortName,
+                            name = !string.IsNullOrWhiteSpace(friendly) ? friendly : name,
+                            locale = locale,
+                            gender = gender
+                        });
+                    }
+                }
+
+                if (list.Count > 0)
+                {
+                    _cachedVoices = list;
+                    try
+                    {
+                        await File.WriteAllTextAsync(cacheFile, JsonSerializer.Serialize(list)).ConfigureAwait(false);
+                    }
+                    catch { /* ignore */ }
+                    return list;
+                }
+            }
+            catch
+            {
+                if (attempt == 1)
+                {
+                    await EnsureClockSkewSyncedAsync(true).ConfigureAwait(false);
+                }
             }
         }
 
-        _cachedVoices = list;
-        try
+        // Fallback to bundled 322-voice catalog so TTS models ALWAYS load even if Microsoft list endpoint is blocked
+        var fallback = TryLoadBundledFallbackVoices();
+        if (fallback is { Count: > 0 })
         {
-            await File.WriteAllTextAsync(cacheFile, JsonSerializer.Serialize(list));
+            _cachedVoices = fallback;
+            try
+            {
+                await File.WriteAllTextAsync(cacheFile, JsonSerializer.Serialize(fallback)).ConfigureAwait(false);
+            }
+            catch { /* ignore */ }
+            return fallback;
         }
-        catch { /* ignore */ }
-        return list;
+
+        return _cachedVoices ?? new List<VoiceDto>();
     }
 
     private static void AddVoiceHeaders(HttpRequestMessage req)
@@ -226,6 +354,7 @@ internal sealed class ZexTtsService
                 var serverSec = resp.Headers.Date.Value.ToUnixTimeSeconds();
                 var localSec = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                 _clockSkewSeconds = serverSec - localSec;
+                _clockSkewSyncedAtUtc = DateTime.UtcNow;
             }
         }
         catch { /* ignore */ }
@@ -344,18 +473,15 @@ internal sealed class ZexTtsService
         if (string.IsNullOrWhiteSpace(voice))
             return new { ok = false, error = "Select a voice" };
 
-        if (string.IsNullOrWhiteSpace(outputDir))
-            outputDir = _defaultOutputDir;
-        try { Directory.CreateDirectory(outputDir); }
-        catch (Exception ex) { return new { ok = false, error = "Invalid output folder: " + ex.Message }; }
+        outputDir = ResolveWritableOutputDir(outputDir);
 
         var sw = Stopwatch.StartNew();
-        var chunks = SplitTextIntoChunks(text.Trim(), 2400);
+        var chunks = SplitTextIntoChunks(text.Trim(), 2000);
         emitProgress("generation-progress", new { phase = "start", progress = 0.01, currentChunk = 0, totalChunks = chunks.Count });
 
         var chunkResults = new byte[chunks.Count][];
         int completedCount = 0;
-        using var sem = new SemaphoreSlim(4);
+        using var sem = new SemaphoreSlim(3);
         var tasks = Enumerable.Range(0, chunks.Count).Select(async idx =>
         {
             await sem.WaitAsync().ConfigureAwait(false);
@@ -389,7 +515,16 @@ internal sealed class ZexTtsService
         var safeVoice = Regex.Replace(voice, @"[^a-zA-Z0-9_-]", "_");
         var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         var outFile = Path.Combine(outputDir, $"tts_studio_{safeVoice}_{stamp}.mp3");
-        await File.WriteAllBytesAsync(outFile, finalBytes);
+        try
+        {
+            await File.WriteAllBytesAsync(outFile, finalBytes).ConfigureAwait(false);
+        }
+        catch
+        {
+            Directory.CreateDirectory(_fallbackOutputDir);
+            outFile = Path.Combine(_fallbackOutputDir, $"tts_studio_{safeVoice}_{stamp}.mp3");
+            await File.WriteAllBytesAsync(outFile, finalBytes).ConfigureAwait(false);
+        }
         sw.Stop();
 
         emitProgress("generation-progress", new { phase = "done", progress = 1.0, currentChunk = chunks.Count, totalChunks = chunks.Count });
@@ -411,10 +546,7 @@ internal sealed class ZexTtsService
         var pitch = GetDouble(payload, "pitch", 1.0);
         var volume = GetDouble(payload, "volume", 1.0);
 
-        if (string.IsNullOrWhiteSpace(outputDir))
-            outputDir = _defaultOutputDir;
-        try { Directory.CreateDirectory(outputDir); }
-        catch (Exception ex) { return new { ok = false, error = "Invalid output folder: " + ex.Message }; }
+        outputDir = ResolveWritableOutputDir(outputDir);
 
         var charVoices = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (payload.TryGetProperty("characters", out var charsEl) && charsEl.ValueKind == JsonValueKind.Array)
@@ -449,7 +581,7 @@ internal sealed class ZexTtsService
 
         var lineResults = new byte[lines.Count][];
         int completedCount = 0;
-        using var sem = new SemaphoreSlim(4);
+        using var sem = new SemaphoreSlim(3);
         var tasks = Enumerable.Range(0, lines.Count).Select(async idx =>
         {
             await sem.WaitAsync().ConfigureAwait(false);
@@ -488,7 +620,16 @@ internal sealed class ZexTtsService
         var finalBytes = combined.ToArray();
         var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         var outFile = Path.Combine(outputDir, $"podcast_{jobId}_{stamp}.mp3");
-        await File.WriteAllBytesAsync(outFile, finalBytes);
+        try
+        {
+            await File.WriteAllBytesAsync(outFile, finalBytes).ConfigureAwait(false);
+        }
+        catch
+        {
+            Directory.CreateDirectory(_fallbackOutputDir);
+            outFile = Path.Combine(_fallbackOutputDir, $"podcast_{jobId}_{stamp}.mp3");
+            await File.WriteAllBytesAsync(outFile, finalBytes).ConfigureAwait(false);
+        }
         sw.Stop();
 
         emitProgress("podcast-progress", new { phase = "done", progress = 1.0, current = lines.Count, total = lines.Count });
@@ -543,7 +684,8 @@ internal sealed class ZexTtsService
 
     private static string FormatFullVoiceName(string voice)
     {
-        var m = Regex.Match(voice.Trim(), @"^([a-z]{2,})-([A-Z]{2,})-(.+Neural)$");
+        var trimmed = (voice ?? "").Trim();
+        var m = Regex.Match(trimmed, @"^([a-z]{2,3}(?:-[A-Za-z]{2,4})?)-([A-Z]{2}|\d{3})-(.+Neural)$");
         if (m.Success)
         {
             var lang = m.Groups[1].Value;
@@ -557,10 +699,33 @@ internal sealed class ZexTtsService
             }
             return $"Microsoft Server Speech Text to Speech Voice ({lang}-{region}, {name})";
         }
-        return voice;
+        return trimmed;
     }
 
     private async Task<byte[]> SynthesizeChunkAsync(string text, string voice, double rate, double pitch, double volume)
+    {
+        await EnsureClockSkewSyncedAsync(false).ConfigureAwait(false);
+        Exception? lastErr = null;
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                return await SynthesizeChunkCoreAsync(text, voice, rate, pitch, volume).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                lastErr = ex;
+                if (attempt < 3)
+                {
+                    await EnsureClockSkewSyncedAsync(true).ConfigureAwait(false);
+                    await Task.Delay(350 * attempt).ConfigureAwait(false);
+                }
+            }
+        }
+        throw lastErr ?? new InvalidOperationException("Speech synthesis failed.");
+    }
+
+    private async Task<byte[]> SynthesizeChunkCoreAsync(string text, string voice, double rate, double pitch, double volume)
     {
         var ratePct = (int)Math.Round((rate - 1.0) * 100.0);
         var pitchHz = (int)Math.Round((pitch - 1.0) * 50.0);
@@ -596,7 +761,7 @@ internal sealed class ZexTtsService
         ws.Options.SetRequestHeader("Cookie", $"muid={GenerateMuid()};");
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
-        await ws.ConnectAsync(wssUri, cts.Token);
+        await ws.ConnectAsync(wssUri, cts.Token).ConfigureAwait(false);
 
         var ts = DateTime.UtcNow.ToString("ddd MMM dd yyyy HH:mm:ss 'GMT+0000 (Coordinated Universal Time)'", System.Globalization.CultureInfo.InvariantCulture);
         var configMsg =
@@ -605,7 +770,7 @@ internal sealed class ZexTtsService
             "Path:speech.config\r\n\r\n" +
             "{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":{\"sentenceBoundaryEnabled\":\"true\",\"wordBoundaryEnabled\":\"false\"},\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}\r\n";
 
-        await SendTextAsync(ws, configMsg, cts.Token);
+        await SendTextAsync(ws, configMsg, cts.Token).ConfigureAwait(false);
 
         var requestId = Guid.NewGuid().ToString("N");
         var ssmlMsg =
@@ -615,7 +780,7 @@ internal sealed class ZexTtsService
             "Path:ssml\r\n\r\n" +
             ssml;
 
-        await SendTextAsync(ws, ssmlMsg, cts.Token);
+        await SendTextAsync(ws, ssmlMsg, cts.Token).ConfigureAwait(false);
 
         using var audioOut = new MemoryStream();
         using var frameBuf = new MemoryStream();
@@ -627,7 +792,7 @@ internal sealed class ZexTtsService
             WebSocketReceiveResult result;
             do
             {
-                result = await ws.ReceiveAsync(new ArraySegment<byte>(recvBuf), cts.Token);
+                result = await ws.ReceiveAsync(new ArraySegment<byte>(recvBuf), cts.Token).ConfigureAwait(false);
                 if (result.MessageType == WebSocketMessageType.Close)
                     break;
                 frameBuf.Write(recvBuf, 0, result.Count);
