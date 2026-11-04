@@ -1301,25 +1301,32 @@ function spoofAccountIdentityInDom() {
 function ensureProfileIconVisible() {
   try {
     const targets = document.querySelectorAll(
-      '.header-user-button, flow-user-tier-chip, .tier-chip, [aria-label="ULTRA tier"], ' +
-      'header button[aria-label*="Google Account" i], header img[src*="googleusercontent.com"], header img[src*="ggpht.com"]'
+      'header button, header a, header img, .header-user-button, .header-user-button *, ' +
+      'flow-user-tier-chip, flow-user-tier-chip *, .tier-chip, [aria-label="ULTRA tier"], ' +
+      '[aria-label*="Google Account" i], .account-switcher-placeholder, .account-switcher-placeholder *'
     );
     targets.forEach((el) => {
-      if (!el || el.tagName === 'A' && (el.classList.contains('switch-account-link') || (el.getAttribute('href') || '').includes('myaccount.google.com'))) {
+      if (!el || (el.tagName === 'A' && (el.classList.contains('switch-account-link') || (el.getAttribute('href') || '').includes('myaccount.google.com')))) {
+        return;
+      }
+      if (el.getAttribute('aria-label') === 'Account details' && el.tagName !== 'BUTTON' && !el.classList.contains('header-user-button')) {
+        return;
+      }
+      if (el.closest('[aria-label="Account details"]:not(button):not(.header-user-button):not(.account-switcher-placeholder):not(:has(.header-user-button))')) {
         return;
       }
       if ((el.textContent || '').toLowerCase().includes('sign out')) return;
       if (el.getAttribute('data-flow-hidden') === '1') {
         el.removeAttribute('data-flow-hidden');
         el.removeAttribute('aria-hidden');
-        el.style.removeProperty('display');
-        el.style.removeProperty('visibility');
-        el.style.removeProperty('opacity');
-        el.style.removeProperty('pointer-events');
-        el.style.removeProperty('width');
-        el.style.removeProperty('height');
-        el.style.removeProperty('max-height');
       }
+      el.style.removeProperty('display');
+      el.style.removeProperty('visibility');
+      el.style.removeProperty('opacity');
+      el.style.removeProperty('pointer-events');
+      el.style.removeProperty('width');
+      el.style.removeProperty('height');
+      el.style.removeProperty('max-height');
     });
   } catch (e) {}
 }
@@ -1347,17 +1354,17 @@ function ensureProfileIconVisible() {
     if (!target || !target.closest) return false;
     if (isTierChipTarget(target)) return false;
     const userBtn = target.closest(
-      '.header-user-button, header button[aria-label*="Google Account" i], header button[aria-label*="Account" i], header [aria-label*="Google Account" i]'
+      '.header-user-button, .account-switcher-placeholder, header button[aria-label*="Google Account" i], header button[aria-label*="Account" i], header [aria-label*="Google Account" i], button[aria-label="Account details"]'
     );
     if (!userBtn) return false;
     // Must be in the top header area (top 90px of viewport)
     const rect = userBtn.getBoundingClientRect();
-    if (rect.top > 90) return false;
+    if (rect.top > 90 || rect.height > 90) return false;
     // If .header-user-button contains both [ULTRA] and (J), only allow clicks on the right avatar side (not the ULTRA badge)
     const tierEl = userBtn.querySelector('flow-user-tier-chip, .tier-chip, [aria-label="ULTRA tier"]');
     if (tierEl && typeof clientX === 'number' && clientX > 0) {
       const tierRect = tierEl.getBoundingClientRect();
-      if (clientX >= tierRect.left && clientX <= tierRect.right + 4 && clientY >= tierRect.top && clientY <= tierRect.bottom) {
+      if (tierRect.width > 0 && clientX >= tierRect.left && clientX <= tierRect.right + 2 && clientY >= tierRect.top && clientY <= tierRect.bottom) {
         return false;
       }
     }
@@ -1932,8 +1939,8 @@ loadSavedProjectsFromDevice();
         "flow-credit-banner,.credit-banner{display:none!important}" +
         ".mavatar-footer-row,.mavatar-footer-row.collapsed,mavatar-footer-row,expandable-section[storagekey='chats'],[data-test-id='chats-expandable-section'],#sidenav-section-content-chats,#sidenav-section-content-chats .chat-history,#sidenav-section-content-chats .chat-history-list,conversations-list[data-test-id='all-conversations'],[data-test-id='all-conversations'],gem-nav-list-item[data-test-id='conversation']{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;}" +
         "model-response a,model-response a[href],message-content a,message-content a[href],user-query a,user-query a[href],.response-container a,.query-content a,.user-query-container a,.markdown a,chat-window a,source-footnote,inline-source-citation,sources-carousel,sources-carousel-inline,fact-check-evaluator,[data-test-id*='source'],button[aria-label*='source' i],button[aria-label*='Google Help' i]{pointer-events:none!important;cursor:text!important;text-decoration:none!important;}" +
-        ".header-user-button,flow-user-tier-chip,.tier-chip,[aria-label='ULTRA tier'],header button[aria-label*='Google Account' i],header img[src*='googleusercontent.com'],header img[src*='ggpht.com']{visibility:visible!important;opacity:1!important;pointer-events:auto!important}" +
-        "html:not([data-flow-profile-popup-open='1']) [aria-label='Account details'],html:not([data-flow-profile-popup-open='1']) .account-switcher-placeholder{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}" +
+        "header button,header a,header img,.header-user-button,.header-user-button *,flow-user-tier-chip,.tier-chip,[aria-label='ULTRA tier'],[aria-label*='Google Account' i],.account-switcher-placeholder{visibility:visible!important;opacity:1!important;pointer-events:auto!important}" +
+        "html:not([data-flow-profile-popup-open='1']) [aria-label='Account details']:not(button):not(.header-user-button):not(.account-switcher-placeholder):not(:has(.header-user-button)){display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}" +
         "#flow-my-projects-dock{position:fixed!important;bottom:18px!important;right:22px!important;left:auto!important;z-index:2147483645!important;display:flex!important;align-items:center!important;gap:10px!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
         "#flow-my-projects-btn,#flow-save-current-project-btn{display:inline-flex!important;align-items:center!important;gap:8px!important;background:rgba(22,19,36,0.94)!important;border:1px solid rgba(139,92,246,0.45)!important;color:#f3f4f6!important;padding:8px 16px!important;border-radius:999px!important;font-size:13px!important;font-weight:600!important;cursor:pointer!important;box-shadow:0 8px 24px rgba(0,0,0,0.6)!important;transition:all .18s ease!important;}" +
         "#flow-my-projects-btn:hover,#flow-save-current-project-btn:hover{background:rgba(38,31,64,0.98)!important;border-color:rgba(167,139,250,0.8)!important;transform:translateY(-1px)!important;}" +
