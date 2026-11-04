@@ -2268,7 +2268,7 @@ public partial class MainWindow : Window
         return list.Exists(IsGooglePrimaryAuthCookie);
     }
 
-    string FlowServerCookiesFilePath => Path.Combine(_flowUserData, "flow-isolated-sessions-v2.json");
+    string FlowServerCookiesFilePath => Path.Combine(_flowUserData, "flow-isolated-sessions-v3.json");
 
     void LoadSavedFlowServerCookiesFromDisk()
     {
@@ -2321,7 +2321,7 @@ public partial class MainWindow : Window
             var isOnAuthenticatedWorkspace =
                 curUrl.Contains("labs.google/fx") ||
                 curUrl.Contains("flow.google.com") ||
-                curUrl.Contains("gemini.google.com/app");
+                curUrl.Contains("gemini.google.com");
             if (!isOnAuthenticatedWorkspace) return;
 
             // Snapshot the ENTIRE cookie jar (.google.com, accounts.google.com, labs.google, flow.google.com, gemini.google.com)

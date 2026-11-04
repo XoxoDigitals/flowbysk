@@ -361,7 +361,11 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
   );
 
   const availableServers = await getUserServers(freshUser || user);
+  const standardServers = availableServers.filter((s) => !s.imageOnly);
   let activeServer = await resolveActiveServer(freshUser || user);
+  if (activeServer && activeServer.imageOnly && standardServers.length > 0) {
+    activeServer = await db.pickLeastLoadedServer(standardServers, user.id);
+  }
   if (activeServer && (!freshUser || freshUser.activeServerId !== activeServer.id)) {
     await db.updateUser(user.id, { activeServerId: activeServer.id });
     freshUser = await db.getUserById(user.id);
@@ -505,16 +509,18 @@ router.post('/request-server-change', requireUserAuth, async (req, res) => {
   if (!availableServers.length) {
     return res.status(404).json({ success: false, error: 'No active server nodes available.' });
   }
+  const standardServers = availableServers.filter((s) => !s.imageOnly);
+  const basePool = standardServers.length ? standardServers : availableServers;
   const current = await resolveActiveServer(user);
-  const unlockedOtherServers = availableServers.filter(
+  const unlockedOtherServers = basePool.filter(
     (s) => (!current || s.id !== current.id) && !googleLockState(user, s.id).locked
   );
-  const unlockedAnyServers = availableServers.filter((s) => !googleLockState(user, s.id).locked);
+  const unlockedAnyServers = basePool.filter((s) => !googleLockState(user, s.id).locked);
   const candidatePool = unlockedOtherServers.length
     ? unlockedOtherServers
     : unlockedAnyServers.length
       ? unlockedAnyServers
-      : availableServers;
+      : basePool;
   const targetServer = await db.pickLeastLoadedServer(candidatePool, user.id);
   if (!targetServer) {
     return res.status(404).json({ success: false, error: 'No active server nodes available.' });
@@ -603,7 +609,17 @@ router.get('/extension-status', requireUserAuth, async (req, res) => {
 
 router.post('/extension-start', requireUserAuth, async (req, res) => {
   const user = req.user;
-  const activeServer = await resolveActiveServer(user);
+  const requestedServerId = String(req.body?.serverId || '').trim();
+  const availableServers = await getUserServers(user);
+  let activeServer = requestedServerId
+    ? availableServers.find((s) => s.id === requestedServerId) || null
+    : null;
+  if (!activeServer) {
+    activeServer = await resolveActiveServer(user);
+  } else if (user.activeServerId !== activeServer.id) {
+    await db.updateUser(user.id, { activeServerId: activeServer.id });
+    user.activeServerId = activeServer.id;
+  }
   if (!activeServer || !activeServer.email) {
     return res.status(400).json({
       success: false,

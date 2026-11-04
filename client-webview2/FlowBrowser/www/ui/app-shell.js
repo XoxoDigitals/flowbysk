@@ -972,6 +972,7 @@ class FlowBrowserApp {
 
   async checkAssignedAccountStillExists() {
     if (!this.config?.authToken || !this.config?.serverUrl) return;
+    if (this._switchingServerInFlight) return;
     // Never wipe / force-logout while Google OAuth is mid-flight
     try {
       const live = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || '');
@@ -1028,13 +1029,22 @@ class FlowBrowserApp {
       }
       const purged = await this.purgeStaleAssignedAccount(data.servers, data.activeServer);
       if (!purged) {
-        if (data.activeServer) this.activeServer = sanitizeServerForStorage(data.activeServer);
+        if (data.activeServer && !this._switchingServerInFlight) {
+          const isStandardToolRunning =
+            this.runningToolId === 'google-gemini' || this.runningToolId === 'google-flow';
+          if (!(isStandardToolRunning && this.isImageOnlyServer(data.activeServer))) {
+            this.activeServer = sanitizeServerForStorage(data.activeServer);
+          }
+        }
         this.populateServerSelect(data.servers || []);
         return;
       }
 
-      if (data.activeServer?.id) {
+      const stdServers = this.getStandardServers(data.servers);
+      if (data.activeServer?.id && !this.isImageOnlyServer(data.activeServer)) {
         await this.launchServerWorkspace(data.activeServer.id, true);
+      } else if (stdServers.length > 0) {
+        await this.launchServerWorkspace(stdServers[0].id, true);
       } else if ((data.servers || []).length > 0) {
         await this.launchServerWorkspace(data.servers[0].id, true);
       } else {
@@ -1062,11 +1072,23 @@ class FlowBrowserApp {
     this._toastTimer = setTimeout(() => el.classList.remove('show'), 2800);
   }
 
+  isImageOnlyServer(srv) {
+    if (!srv) return false;
+    if (srv.imageOnly || srv.accountType === 'image') return true;
+    const match = (this.currentServers || []).find((s) => s && s.id === srv.id);
+    return !!(match && (match.imageOnly || match.accountType === 'image'));
+  }
+
+  getStandardServers(list) {
+    const arr = Array.isArray(list) ? list : (this.currentServers || []);
+    return arr.filter((s) => s && !this.isImageOnlyServer(s));
+  }
+
   formatServerDisplayName(srv, allServers) {
     if (!srv) return 'Account';
-    if (!srv.imageOnly) return srv.name || 'Account';
+    if (!this.isImageOnlyServer(srv)) return srv.name || 'Account';
     const list = Array.isArray(allServers) ? allServers : (this.currentServers || []);
-    const imgServers = list.filter((s) => s && s.imageOnly);
+    const imgServers = list.filter((s) => s && this.isImageOnlyServer(s));
     const idx = Math.max(0, imgServers.findIndex((s) => s.id === srv.id));
     const raw = String(srv.name || '').trim();
     if (/^(google|glow)s*flows*images/i.test(raw)) return raw;
@@ -1220,10 +1242,10 @@ class FlowBrowserApp {
       return (u.includes('flow.google.com') || u.includes('labs.google')) && this.activeServer?.id === tool.serverId;
     }
     if (tool.id === 'google-flow') {
-      return (u.includes('flow.google.com') || u.includes('labs.google')) && !this.activeServer?.imageOnly;
+      return (u.includes('flow.google.com') || u.includes('labs.google')) && !this.isImageOnlyServer(this.activeServer);
     }
     if (tool.id === 'google-gemini') {
-      return (u.includes('gemini.google.com') || u.includes('bard.google.com')) && !this.activeServer?.imageOnly;
+      return (u.includes('gemini.google.com') || u.includes('bard.google.com')) && !this.isImageOnlyServer(this.activeServer);
     }
     if (tool.id === 'zextts-studio') {
       return u.includes('/zextts/');
@@ -1276,10 +1298,11 @@ class FlowBrowserApp {
       return;
     }
 
-    if ((tool.id === 'google-flow' || tool.id === 'google-gemini') && this.activeServer?.imageOnly) {
-      const stdSrv = (this.currentServers || []).find((s) => s && !s.imageOnly);
+    if ((tool.id === 'google-flow' || tool.id === 'google-gemini') && (!this.activeServer?.id || this.isImageOnlyServer(this.activeServer))) {
+      const stdList = this.getStandardServers(this.currentServers);
+      const stdSrv = stdList.find((s) => this.googleLockRemainingMs(s.id) <= 0) || stdList[0];
       if (stdSrv && stdSrv.id) {
-        await this.launchServerWorkspace(stdSrv.id, false, tool.url);
+        await this.launchServerWorkspace(stdSrv.id, !!this._pendingFreshLogin, tool.url);
         return;
       }
     }
@@ -1498,7 +1521,9 @@ class FlowBrowserApp {
 
   populateServerSelect(servers = []) {
     this.serverSelect.innerHTML = '';
-    if (servers.length === 0) {
+    const stdServers = this.getStandardServers(servers);
+    const dropdownServers = stdServers.length > 0 ? stdServers : servers;
+    if (dropdownServers.length === 0) {
       const opt = document.createElement('option');
       opt.value = '';
       opt.textContent = 'Default Node';
@@ -1507,16 +1532,16 @@ class FlowBrowserApp {
       return;
     }
 
-    servers.forEach(srv => {
+    dropdownServers.forEach(srv => {
       const opt = document.createElement('option');
       opt.value = srv.id;
       opt.textContent = this.formatServerDisplayName(srv, servers);
       this.serverSelect.appendChild(opt);
     });
-    const current = this.activeServer && servers.find(s => s.id === this.activeServer.id);
-    const activeId = (current && current.id) || (this.activeServer && this.activeServer.id) || servers[0].id;
+    const current = this.activeServer && dropdownServers.find(s => s.id === this.activeServer.id);
+    const activeId = (current && current.id) || dropdownServers[0].id;
     if (activeId) this.serverSelect.value = activeId;
-    const activeSrvObj = current || this.activeServer || servers[0];
+    const activeSrvObj = (this.activeServer && servers.find(s => s.id === this.activeServer.id)) || this.activeServer || dropdownServers[0];
     this.setAccountName(this.formatServerDisplayName(activeSrvObj, servers));
     this.renderWorkspaceHub?.();
   }
@@ -1635,19 +1660,20 @@ class FlowBrowserApp {
         // Login path: stay on the current account and just open Flow (no re-login needed).
       } else if (data && data.success && data.server) {
         console.log('[AppShell] Load-balanced server:', data.server.name, data.server.email, data.load);
-        if (fromButton && this.activeServer && data.server.id === this.activeServer.id) {
-          if (Array.isArray(this.currentServers) && this.currentServers.length > 1) {
-            const idx = this.currentServers.findIndex((s) => s.id === this.activeServer.id);
+        const stdList = this.getStandardServers(this.currentServers);
+        if (fromButton && this.activeServer && (data.server.id === this.activeServer.id || this.isImageOnlyServer(data.server))) {
+          if (stdList.length > 1) {
+            const idx = Math.max(0, stdList.findIndex((s) => s.id === this.activeServer.id));
             let nextSrv = null;
-            for (let offset = 1; offset < this.currentServers.length; offset++) {
-              const cand = this.currentServers[(idx + offset) % this.currentServers.length];
+            for (let offset = 1; offset < stdList.length; offset++) {
+              const cand = stdList[(idx + offset) % stdList.length];
               if (cand && cand.id && this.googleLockRemainingMs(cand.id) <= 0) {
                 nextSrv = cand;
                 break;
               }
             }
             if (!nextSrv) {
-              nextSrv = this.currentServers[(idx + 1) % this.currentServers.length];
+              nextSrv = stdList[(idx + 1) % stdList.length];
             }
             if (nextSrv && nextSrv.id) {
               await this.launchServerWorkspace(nextSrv.id, true);
@@ -1660,7 +1686,8 @@ class FlowBrowserApp {
           return;
         }
         if (data.user) this.applyLockFromUser(data.user);
-        await this.launchServerWorkspace(data.server.id, fromButton);
+        const chosenId = this.isImageOnlyServer(data.server) && stdList.length > 0 ? stdList[0].id : data.server.id;
+        await this.launchServerWorkspace(chosenId, fromButton);
         return;
       }
     } catch (err) {
@@ -1673,25 +1700,43 @@ class FlowBrowserApp {
       }
     }
     if (!fromButton) {
-      if (this.activeServer?.id) await this.launchServerWorkspace(this.activeServer.id);
-      else this.loadTargetInWebview('https://flow.google.com/');
+      const stdList = this.getStandardServers(this.currentServers);
+      if (this.activeServer?.id && !this.isImageOnlyServer(this.activeServer)) {
+        await this.launchServerWorkspace(this.activeServer.id);
+      } else if (stdList.length > 0) {
+        await this.launchServerWorkspace(stdList[0].id);
+      } else if (this.activeServer?.id) {
+        await this.launchServerWorkspace(this.activeServer.id);
+      } else {
+        this.loadTargetInWebview('https://flow.google.com/');
+      }
     }
   }
 
   async launchServerWorkspace(serverId, resetGoogle = false, targetOverrideUrl = '') {
-    const toolLabel = (targetOverrideUrl || this._activeToolTargetUrl || '').includes('gemini.google.com') ? 'Google Gemini' : 'Google Flow';
+    const rawTarget = targetOverrideUrl || this._activeToolTargetUrl || '';
+    const isGeminiOrStandardFlow =
+      rawTarget.includes('gemini.google.com') ||
+      this.runningToolId === 'google-gemini' ||
+      this.runningToolId === 'google-flow';
+    if (isGeminiOrStandardFlow && this.isImageOnlyServer({ id: serverId })) {
+      const stdList = this.getStandardServers(this.currentServers);
+      const stdSrv = stdList.find((s) => this.googleLockRemainingMs(s.id) <= 0) || stdList[0];
+      if (stdSrv && stdSrv.id) {
+        serverId = stdSrv.id;
+      }
+    }
+
+    const toolLabel = rawTarget.includes('gemini.google.com') ? 'Google Gemini' : 'Google Flow';
     this.showLoadingOverlay(
       resetGoogle ? 'Switching account...' : ('Opening ' + toolLabel + '...'),
       resetGoogle ? 'Starting a fresh Google sign-in' : 'Connecting shared Google workspace session'
     );
 
+    this._switchingServerInFlight = true;
     try {
-      // Same account as now: nothing to switch server-side. Calling /switch-server
-      // here hit the 60-minute Google lock and left the app on about:blank.
       let data;
-      if (this.activeServer?.id && this.activeServer.id === serverId) {
-        data = { success: true, server: this.activeServer };
-      } else {
+      try {
         const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/switch-server`, {
           method: 'POST',
           headers: {
@@ -1703,12 +1748,20 @@ class FlowBrowserApp {
         data = await res.json();
         if (data && data.code === 'GOOGLE_SESSION_LOCKED') this.noteGoogleLock(data);
         if (data && data.user) this.applyLockFromUser(data.user);
+      } catch (switchErr) {
+        if (this.activeServer?.id && this.activeServer.id === serverId) {
+          data = { success: true, server: this.activeServer };
+        } else {
+          throw switchErr;
+        }
       }
       if (data && data.success) {
         const previousServerId = this.activeServer?.id || '';
         const serverChanged = !!(previousServerId && previousServerId !== data.server.id);
         this.activeServer = sanitizeServerForStorage(data.server);
-        if (this.serverSelect) this.serverSelect.value = data.server.id;
+        if (this.serverSelect && !this.isImageOnlyServer(data.server)) {
+          this.serverSelect.value = data.server.id;
+        }
         this.setAccountName(this.formatServerDisplayName(data.server, this.currentServers));
         if (serverChanged) {
           this._credFailUntil = 0;
@@ -1719,7 +1772,7 @@ class FlowBrowserApp {
         if (isGeminiTarget) {
           this.runningToolId = 'google-gemini';
           this.selectedToolId = 'google-gemini';
-        } else if (data.server.imageOnly) {
+        } else if (this.isImageOnlyServer(data.server)) {
           this.runningToolId = 'flow-image-srv-' + data.server.id;
           this.selectedToolId = this.runningToolId;
         } else if (String(this.runningToolId || '').startsWith('flow-image-srv-')) {
@@ -1730,11 +1783,10 @@ class FlowBrowserApp {
         this._lastAutoFillKey = null;
         this._lastAutoFillAt = 0;
         this._credAttemptId = null;
-        if (serverChanged || resetGoogle) {
-          this._googleEmailMem = '';
-          this._googlePasswordMem = '';
-          this._credUsedStages = new Set();
-        }
+        this._googleEmailMem = '';
+        this._googlePasswordMem = '';
+        this._googleCredServerId = data.server.id;
+        this._credUsedStages = new Set();
 
         if (this.config?.authToken && this.config?.user) {
           await window.electronAPI.saveSession({
@@ -1799,6 +1851,8 @@ class FlowBrowserApp {
       console.error('Server switch error:', err);
       this.notify('Error communicating with server: ' + err.message, true);
       this.hideLoadingOverlay();
+    } finally {
+      this._switchingServerInFlight = false;
     }
   }
 
@@ -2662,14 +2716,19 @@ class FlowBrowserApp {
 
   async ensureCredAttempt() {
     await this.ensureCredChannel();
-    if (this._credAttemptId) return this._credAttemptId;
+    const curSrvId = (this.activeServer && this.activeServer.id) || '';
+    if (this._credAttemptId && this._googleCredServerId === curSrvId) return this._credAttemptId;
+    this._googleCredServerId = curSrvId;
     const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/extension-start`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.config.authToken}`
       },
-      body: JSON.stringify({ channelId: window.FlowCredChannel.channelId })
+      body: JSON.stringify({
+        channelId: window.FlowCredChannel.channelId,
+        serverId: curSrvId || null
+      })
     });
     const data = await res.json().catch(() => ({}));
     if (data && data.code === 'GOOGLE_SESSION_LOCKED') {
@@ -2742,6 +2801,14 @@ class FlowBrowserApp {
   }
 
   async resolveGoogleEmailForFill() {
+    const curSrvId = (this.activeServer && this.activeServer.id) || '';
+    if (this._googleCredServerId !== curSrvId) {
+      this._googleEmailMem = '';
+      this._googlePasswordMem = '';
+      this._credAttemptId = null;
+      this._credUsedStages = new Set();
+      this._googleCredServerId = curSrvId;
+    }
     if (this._googleEmailMem) return this._googleEmailMem;
     const email = await this.fetchGoogleCredential('email');
     if (email) this._googleEmailMem = email;
@@ -2750,6 +2817,14 @@ class FlowBrowserApp {
 
   /** Fetch Google password from API into memory only (never from activeServer JSON). */
   async resolveGooglePasswordForFill() {
+    const curSrvId = (this.activeServer && this.activeServer.id) || '';
+    if (this._googleCredServerId !== curSrvId) {
+      this._googleEmailMem = '';
+      this._googlePasswordMem = '';
+      this._credAttemptId = null;
+      this._credUsedStages = new Set();
+      this._googleCredServerId = curSrvId;
+    }
     const fromApi = await this.fetchGoogleCredential('password');
     if (fromApi) return fromApi;
     return '';
