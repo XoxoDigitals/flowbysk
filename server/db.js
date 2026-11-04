@@ -1946,6 +1946,8 @@ class Database {
       }
 
       if (row.action === 'extension_step') {
+        if (details.serverId && !session.serverId) session.serverId = details.serverId;
+        if (details.serverName && !session.serverName) session.serverName = details.serverName;
         const stage = String(details.stage || 'other').toLowerCase();
         session.steps.push({
           at: row.createdAt || row.timestamp,
@@ -1964,6 +1966,8 @@ class Database {
           stage,
         });
       } else if (row.action === 'extension_login_finish') {
+        if (details.serverId && !session.serverId) session.serverId = details.serverId;
+        if (details.serverName && !session.serverName) session.serverName = details.serverName;
         session.finishedAt = row.createdAt || row.timestamp;
         session.outcome = String(details.outcome || 'unknown').toLowerCase();
         session.lockedUntil = details.lockedUntil || null;
@@ -2048,7 +2052,22 @@ class Database {
       merged.push(s);
     }
 
+    const allServers = await this.getServers().catch(() => []);
+    const serversById = new Map((allServers || []).map((srv) => [String(srv.id), srv]));
+    const serversByName = new Map(
+      (allServers || [])
+        .filter((srv) => srv && srv.name)
+        .map((srv) => [String(srv.name).toLowerCase(), srv])
+    );
+
     sessions = merged.map((s) => {
+      let srv = s.serverId ? serversById.get(String(s.serverId)) : null;
+      if (!srv && s.serverName) {
+        srv = serversByName.get(String(s.serverName).toLowerCase()) || null;
+      }
+      const serverId = s.serverId || (srv ? srv.id : null);
+      const serverName = s.serverName || (srv ? srv.name : null);
+      const serverEmail = srv ? srv.email || null : null;
       const startMs = s.startedAt ? new Date(s.startedAt).getTime() : NaN;
       const endMs = s.finishedAt ? new Date(s.finishedAt).getTime() : NaN;
       const durationMs =
@@ -2073,7 +2092,16 @@ class Database {
           cancelledReason = 'abandoned';
         }
       }
-      return { ...s, outcome, cancelledReason, durationMs, totalSteps };
+      return {
+        ...s,
+        serverId,
+        serverName,
+        serverEmail,
+        outcome,
+        cancelledReason,
+        durationMs,
+        totalSteps,
+      };
     });
 
     sessions.sort(

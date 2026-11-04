@@ -722,6 +722,7 @@ router.post('/extension-step', requireUserAuth, async (req, res) => {
     attemptId,
     stage: stageKey,
     serverId: activeServer.id,
+    serverName: activeServer.name,
     channelId,
     sealed: true,
     ip: req.ip || null,
@@ -741,10 +742,12 @@ router.post('/extension-finish', requireUserAuth, async (req, res) => {
   const { attemptId, outcome, serverId } = req.body || {};
   const normalizedOutcome = String(outcome || 'unknown').toLowerCase();
   const targetSrvId = String(serverId || req.user.activeServerId || '').trim();
+  const targetServer = targetSrvId ? await db.getServerById(targetSrvId).catch(() => null) : null;
   const details = {
     attemptId: attemptId || 'unknown',
     outcome: normalizedOutcome,
     serverId: targetSrvId || null,
+    serverName: targetServer ? targetServer.name : null,
   };
 
   if (normalizedOutcome === 'success' && targetSrvId) {

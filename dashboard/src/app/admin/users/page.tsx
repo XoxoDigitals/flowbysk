@@ -7,6 +7,15 @@ import { Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { flowFetch } from '@/lib/flowApi';
 import { HARDCODED_STD_CREDITS } from '@/lib/plans';
 
+type GoogleAccountLockRow = {
+  serverId: string;
+  serverName: string;
+  serverEmail?: string;
+  locked: boolean;
+  lockedUntil?: string | null;
+  retryAfterSeconds: number;
+};
+
 type FlowUser = {
   id: string;
   username: string;
@@ -27,6 +36,7 @@ type FlowUser = {
   country?: string | null;
   lastIp?: string | null;
   googleSessionLockUntil?: string | null;
+  googleAccountLocks?: GoogleAccountLockRow[];
 };
 
 type PlanRow = {
@@ -235,8 +245,11 @@ export default function AdminUsersPage() {
     await load();
   };
 
-  const resetGoogleLock = async (u: FlowUser) => {
-    const res = await flowFetch(`/api/admin/users/${u.id}/reset-google-lock`, { method: 'POST', body: '{}' });
+  const resetGoogleLock = async (u: FlowUser, serverId?: string) => {
+    const res = await flowFetch(`/api/admin/users/${u.id}/reset-google-lock`, {
+      method: 'POST',
+      body: JSON.stringify(serverId ? { serverId } : {}),
+    });
     const data = await res.json();
     if (!res.ok || !data.success) {
       setError(data.error || 'Reset lock failed');
@@ -609,11 +622,37 @@ export default function AdminUsersPage() {
                     </td>
                     <td className="px-4 py-3 text-[13px] text-[var(--ink2)]">
                       <div>{u.activeServerName || '—'}</div>
-                      {isLocked && (
+                      {Array.isArray(u.googleAccountLocks) &&
+                      u.googleAccountLocks.some((a) => a.locked) ? (
+                        <div className="mt-1 space-y-0.5">
+                          {u.googleAccountLocks
+                            .filter((a) => a.locked)
+                            .map((a) => {
+                              const mins = Math.max(1, Math.ceil((a.retryAfterSeconds || 60) / 60));
+                              return (
+                                <div
+                                  key={a.serverId}
+                                  className="flex items-center gap-1.5 text-[11px] font-medium text-amber-400"
+                                >
+                                  <span>
+                                    🔒 {a.serverName} ({mins}m)
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => resetGoogleLock(u, a.serverId)}
+                                    className="text-[10px] text-emerald-400 hover:underline"
+                                  >
+                                    [Reset]
+                                  </button>
+                                </div>
+                              );
+                            })}
+                        </div>
+                      ) : isLocked ? (
                         <div className="mt-0.5 text-[11px] font-medium text-amber-400">
                           🔒 Locked ({lockMins}m left)
                         </div>
-                      )}
+                      ) : null}
                     </td>
                     <td className="px-4 py-3">
                       {u.banned ? (

@@ -58,14 +58,10 @@ function sanitizeServerForAdmin(server, assignedUserCount = 0) {
   };
 }
 
-/** Server-clock view of the 60 min Google lock (admin never trusts the browser clock). */
-function googleLockForAdmin(user) {
+/** Server-clock view of the 60 min Google lock (per-account + aggregate, admin never trusts browser clock). */
+function googleLockForAdmin(user, allServers = [], loginSessions = []) {
   const now = Date.now();
   let maxUntilMs = 0;
-  if (user?.googleSessionLockUntil) {
-    const t = new Date(user.googleSessionLockUntil).getTime();
-    if (Number.isFinite(t) && t > now && t > maxUntilMs) maxUntilMs = t;
-  }
   const serverLocks = {};
   if (user?.googleServerLocks && typeof user.googleServerLocks === 'object') {
     for (const [srvId, iso] of Object.entries(user.googleServerLocks)) {
@@ -76,23 +72,145 @@ function googleLockForAdmin(user) {
       }
     }
   }
+  if (user?.googleSessionLockUntil) {
+    const t = new Date(user.googleSessionLockUntil).getTime();
+    if (Number.isFinite(t) && t > now) {
+      if (t > maxUntilMs) maxUntilMs = t;
+      if (Object.keys(serverLocks).length === 0) {
+        const latestSrvSession = Array.isArray(loginSessions)
+          ? loginSessions.find((s) => s && (s.serverId || s.serverName))
+          : null;
+        const legacySrvId =
+          (latestSrvSession && (latestSrvSession.serverId || latestSrvSession.serverName)) ||
+          user.activeServerId ||
+          'legacy';
+        serverLocks[String(legacySrvId)] = new Date(t).toISOString();
+      }
+    }
+  }
+
+  const byId = new Map((allServers || []).map((s) => [String(s.id), s]));
+  const byName = new Map(
+    (allServers || [])
+      .filter((s) => s && s.name)
+      .map((s) => [String(s.name).toLowerCase(), s])
+  );
+  const accountMap = new Map();
+
+  const ensureAccount = (rawId, fallbackName = '', fallbackEmail = '') => {
+    const keyStr = String(rawId || '').trim();
+    if (!keyStr) return null;
+    const srv =
+      byId.get(keyStr) ||
+      byName.get(keyStr.toLowerCase()) ||
+      (fallbackName ? byName.get(String(fallbackName).toLowerCase()) : null) ||
+      null;
+    const id = srv ? String(srv.id) : keyStr;
+    if (!accountMap.has(id)) {
+      accountMap.set(id, {
+        serverId: id,
+        serverName: (srv && srv.name) || fallbackName || (id === 'legacy' ? 'Google Account' : id),
+        serverEmail: (srv && srv.email) || fallbackEmail || '',
+        imageOnly: !!(srv && srv.imageOnly),
+        isCurrent: String(user?.activeServerId || '') === id,
+        locked: false,
+        lockedUntil: null,
+        retryAfterSeconds: 0,
+        lastLoginAt: null,
+        lastOutcome: null,
+        loginCount: 0,
+        successfulLogins: 0,
+      });
+    } else {
+      const existing = accountMap.get(id);
+      if (!existing.serverName && fallbackName) existing.serverName = fallbackName;
+      if (!existing.serverEmail && fallbackEmail) existing.serverEmail = fallbackEmail;
+    }
+    return accountMap.get(id);
+  };
+
+  for (const [sid, iso] of Object.entries(serverLocks)) {
+    const entry = ensureAccount(sid);
+    if (!entry) continue;
+    const lockMs = new Date(iso).getTime();
+    if (Number.isFinite(lockMs) && lockMs > now) {
+      entry.locked = true;
+      entry.lockedUntil = new Date(lockMs).toISOString();
+      entry.retryAfterSeconds = Math.max(1, Math.ceil((lockMs - now) / 1000));
+    }
+  }
+
+  if (user?.lastGoogleAttemptsByServer && typeof user.lastGoogleAttemptsByServer === 'object') {
+    for (const [sid, info] of Object.entries(user.lastGoogleAttemptsByServer)) {
+      const entry = ensureAccount(sid);
+      if (!entry) continue;
+      if (info && info.at) {
+        entry.lastLoginAt = info.at;
+        entry.lastOutcome = 'success';
+      }
+    }
+  }
+
+  if (Array.isArray(loginSessions)) {
+    for (const s of loginSessions) {
+      if (!s || (!s.serverId && !s.serverName)) continue;
+      const entry = ensureAccount(
+        s.serverId || s.serverName,
+        s.serverName || '',
+        s.serverEmail || ''
+      );
+      if (!entry) continue;
+      entry.loginCount += 1;
+      if (String(s.outcome || '').toLowerCase() === 'success') {
+        entry.successfulLogins += 1;
+      }
+      const ts = s.finishedAt || s.startedAt || null;
+      if (ts && (!entry.lastLoginAt || new Date(ts).getTime() > new Date(entry.lastLoginAt).getTime())) {
+        entry.lastLoginAt = ts;
+        entry.lastOutcome = s.outcome || null;
+      } else if (!entry.lastOutcome && s.outcome) {
+        entry.lastOutcome = s.outcome;
+      }
+    }
+  }
+
+  if (user?.activeServerId) {
+    const entry = ensureAccount(user.activeServerId);
+    if (entry) entry.isCurrent = true;
+  }
+
+  const googleAccountLocks = [...accountMap.values()].sort((a, b) => {
+    if (a.locked !== b.locked) return a.locked ? -1 : 1;
+    if (a.locked && b.locked && b.retryAfterSeconds !== a.retryAfterSeconds) {
+      return b.retryAfterSeconds - a.retryAfterSeconds;
+    }
+    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+    return new Date(b.lastLoginAt || 0).getTime() - new Date(a.lastLoginAt || 0).getTime();
+  });
+
   const ms = maxUntilMs > now ? maxUntilMs - now : 0;
   return {
     googleSessionLocked: ms > 0,
     googleSessionLockUntil: ms > 0 ? new Date(maxUntilMs).toISOString() : null,
     googleSessionRetryAfterSeconds: ms > 0 ? Math.ceil(ms / 1000) : 0,
     googleServerLocks: serverLocks,
+    googleAccountLocks,
     serverTime: new Date().toISOString(),
   };
 }
 
-async function publicEndUser(user) {
+async function publicEndUser(user, opts = {}) {
+  const allServers = opts.allServers || (await db.getServers().catch(() => []));
+  const loginSessions = opts.loginSessions || [];
   const reseller = user.resellerId ? await db.getResellerById(user.resellerId) : null;
-  const server = user.activeServerId ? await db.getServerById(user.activeServerId) : null;
+  const server = user.activeServerId
+    ? allServers.find((s) => String(s.id) === String(user.activeServerId)) ||
+      (await db.getServerById(user.activeServerId))
+    : null;
   const { passwordHash, ...safe } = user;
   return {
     ...safe,
-    ...googleLockForAdmin(user),
+    ...googleLockForAdmin(user, allServers, loginSessions),
     displayName: safe.displayName || '',
     maxParallel: safe.maxParallel || 1,
     plan: safe.planName || 'Standard',
@@ -541,10 +659,13 @@ async function buildFilterOptions(actor) {
 
 router.get('/users', requireAdminAuth, async (req, res) => {
   const actor = await actingStaff(req);
-  const users = await usersVisibleTo(actor);
+  const [users, allServers] = await Promise.all([
+    usersVisibleTo(actor),
+    db.getServers().catch(() => []),
+  ]);
   const filtered = applyUserFilters(users, req.query || {});
   const mapped = [];
-  for (const u of filtered) mapped.push(await publicEndUser(u));
+  for (const u of filtered) mapped.push(await publicEndUser(u, { allServers }));
   res.json({
     success: true,
     users: mapped,
@@ -556,12 +677,13 @@ router.get('/users', requireAdminAuth, async (req, res) => {
 router.get('/users/:id', requireAdminAuth, async (req, res) => {
   const owned = await ownedUserOr404(req, res);
   if (!owned) return;
-  const user = await publicEndUser(owned.user);
-  const [creditHistory, activity, loginSessions] = await Promise.all([
+  const [creditHistory, activity, loginSessions, allServers] = await Promise.all([
     db.getUserCreditHistory(owned.user.id, 100),
     db.getUserActivity(owned.user.id, owned.user.username, 100),
     db.buildLoginSessions({ userId: owned.user.id, limit: 50 }),
+    db.getServers().catch(() => []),
   ]);
+  const user = await publicEndUser(owned.user, { allServers, loginSessions });
   // Newest real app login wins: IP / country / device / client cards are always
   // the values of the latest login in the activity log (sessions are newest first).
   const latest = loginSessions.find((s) => s.deviceId || s.client);
@@ -674,22 +796,65 @@ router.put('/users/:id', requireAdminAuth, async (req, res) => {
   }
 });
 
-/** Clear the 60 min Google login lock so the user can sign in to Google right away. */
+/** Clear the 60 min Google login lock (for a single serverId or all servers) so the user can sign in right away. */
 router.post('/users/:id/reset-google-lock', requireAdminAuth, async (req, res) => {
   const owned = await ownedUserOr404(req, res);
   if (!owned) return;
-  await db.updateUser(owned.user.id, {
-    googleSessionLockUntil: null,
-    googleServerLocks: {},
-    lastGoogleAttemptsByServer: {},
+  const targetServerId = String(req.body?.serverId || '').trim();
+  const user = owned.user;
+  if (targetServerId && targetServerId !== 'all') {
+    const nextServerLocks = {
+      ...(user.googleServerLocks && typeof user.googleServerLocks === 'object'
+        ? user.googleServerLocks
+        : {}),
+    };
+    delete nextServerLocks[targetServerId];
+    const nextAttempts = {
+      ...(user.lastGoogleAttemptsByServer && typeof user.lastGoogleAttemptsByServer === 'object'
+        ? user.lastGoogleAttemptsByServer
+        : {}),
+    };
+    delete nextAttempts[targetServerId];
+    const now = Date.now();
+    let maxUntilMs = 0;
+    for (const iso of Object.values(nextServerLocks)) {
+      const t = iso ? new Date(iso).getTime() : 0;
+      if (Number.isFinite(t) && t > now && t > maxUntilMs) maxUntilMs = t;
+    }
+    await db.updateUser(user.id, {
+      googleSessionLockUntil: maxUntilMs > now ? new Date(maxUntilMs).toISOString() : null,
+      googleServerLocks: nextServerLocks,
+      lastGoogleAttemptsByServer: nextAttempts,
+    });
+    const srv = await db.getServerById(targetServerId).catch(() => null);
+    await db.addLog('admin', 'admin', 'admin_reset_google_lock', {
+      targetUserId: user.id,
+      targetUsername: user.username,
+      serverId: targetServerId,
+      serverName: srv ? srv.name : targetServerId,
+      by: owned.actor.username,
+    });
+  } else {
+    await db.updateUser(user.id, {
+      googleSessionLockUntil: null,
+      googleServerLocks: {},
+      lastGoogleAttemptsByServer: {},
+    });
+    await db.addLog('admin', 'admin', 'admin_reset_google_lock', {
+      targetUserId: user.id,
+      targetUsername: user.username,
+      by: owned.actor.username,
+    });
+  }
+  const [fresh, allServers, loginSessions] = await Promise.all([
+    db.getUserById(user.id),
+    db.getServers().catch(() => []),
+    db.buildLoginSessions({ userId: user.id, limit: 50 }),
+  ]);
+  res.json({
+    success: true,
+    user: await publicEndUser(fresh || user, { allServers, loginSessions }),
   });
-  await db.addLog('admin', 'admin', 'admin_reset_google_lock', {
-    targetUserId: owned.user.id,
-    targetUsername: owned.user.username,
-    by: owned.actor.username,
-  });
-  const fresh = await db.getUserById(owned.user.id);
-  res.json({ success: true, user: await publicEndUser(fresh || owned.user) });
 });
 
 /** Reset login statistics: login timeline for this user restarts from now (logs are kept). */

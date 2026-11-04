@@ -17,6 +17,21 @@ const LOGIN_NOISE = new Set([
   'extension_login_finish',
 ]);
 
+type GoogleAccountLockRow = {
+  serverId: string;
+  serverName: string;
+  serverEmail?: string;
+  imageOnly?: boolean;
+  isCurrent?: boolean;
+  locked: boolean;
+  lockedUntil?: string | null;
+  retryAfterSeconds: number;
+  lastLoginAt?: string | null;
+  lastOutcome?: string | null;
+  loginCount?: number;
+  successfulLogins?: number;
+};
+
 type FlowUser = {
   id: string;
   username: string;
@@ -37,9 +52,14 @@ type FlowUser = {
   lastDeviceId?: string | null;
   lastClient?: string | null;
   deviceIds?: string[];
+  activeServerId?: string | null;
+  activeServerName?: string | null;
+  activeServerEmail?: string | null;
   googleSessionLocked?: boolean;
   googleSessionLockUntil?: string | null;
   googleSessionRetryAfterSeconds?: number;
+  googleServerLocks?: Record<string, string>;
+  googleAccountLocks?: GoogleAccountLockRow[];
   serverTime?: string;
 };
 
@@ -77,7 +97,9 @@ type LoginSession = {
   outcome?: string;
   ip?: string | null;
   country?: string | null;
+  serverId?: string | null;
   serverName?: string | null;
+  serverEmail?: string | null;
   deviceId?: string | null;
   client?: string | null;
   lockedUntil?: string | null;
@@ -161,6 +183,7 @@ export default function AdminUserDetailPage() {
   const [saving, setSaving] = useState(false);
   // Google lock: server gives seconds left; we count down locally on a monotonic clock.
   const [lockEndsAt, setLockEndsAt] = useState(0);
+  const [serverLockEndsAt, setServerLockEndsAt] = useState<Record<string, number>>({});
   const [, setTick] = useState(0);
   const [busy, setBusy] = useState('');
   const [lastSync, setLastSync] = useState<Date | null>(null);
@@ -175,6 +198,20 @@ export default function AdminUserDetailPage() {
     isActive: true,
   });
 
+  const syncLockMonotonic = (u: FlowUser) => {
+    const nowMono = performance.now();
+    const secs = Number(u.googleSessionRetryAfterSeconds) || 0;
+    setLockEndsAt(secs > 0 ? nowMono + secs * 1000 : 0);
+    const nextMap: Record<string, number> = {};
+    for (const row of u.googleAccountLocks || []) {
+      const s = Number(row.retryAfterSeconds) || 0;
+      if (row.serverId && s > 0) {
+        nextMap[row.serverId] = nowMono + s * 1000;
+      }
+    }
+    setServerLockEndsAt(nextMap);
+  };
+
   const load = async () => {
     setError('');
     const [userRes, plansRes] = await Promise.all([
@@ -185,6 +222,7 @@ export default function AdminUserDetailPage() {
     if (!userRes.ok || !data.success) throw new Error(data.error || 'Failed to load user');
     const u = data.user as FlowUser;
     setUser(u);
+    syncLockMonotonic(u);
     setCreditHistory(data.creditHistory || []);
     setActivity(data.activity || []);
     setLoginSessions(data.loginSessions || []);
@@ -222,8 +260,7 @@ export default function AdminUserDetailPage() {
       setCreditHistory(data.creditHistory || []);
       setActivity(data.activity || []);
       setLoginSessions(data.loginSessions || []);
-      const secs = Number(u.googleSessionRetryAfterSeconds) || 0;
-      setLockEndsAt(secs > 0 ? performance.now() + secs * 1000 : 0);
+      syncLockMonotonic(u);
       setLastSync(new Date());
     } catch {
       /* keep last good data */
@@ -257,27 +294,34 @@ export default function AdminUserDetailPage() {
 
   // 1s ticker only while a lock is running; refresh once when it ends.
   useEffect(() => {
-    if (lockEndsAt <= 0) return;
+    const hasAnyMono =
+      lockEndsAt > 0 || Object.values(serverLockEndsAt).some((end) => end > 0);
+    if (!hasAnyMono) return;
     const timer = setInterval(() => {
       setTick((n) => n + 1);
-      if (performance.now() >= lockEndsAt) {
+      if (lockEndsAt > 0 && performance.now() >= lockEndsAt) {
         setLockEndsAt(0);
         void refresh();
       }
     }, 1000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lockEndsAt]);
+  }, [lockEndsAt, serverLockEndsAt]);
 
-  const resetGoogleLock = async () => {
+  const resetGoogleLock = async (serverId?: string, serverName?: string) => {
     if (!user) return;
-    if (!confirm(`Reset the Google login lock for ${user.username}? They can sign in to Google immediately.`)) return;
-    setBusy('lock');
+    const label = serverName || serverId;
+    const msg = serverId
+      ? `Reset the 1-hour Google login lock on "${label}" for ${user.username}?`
+      : `Reset ALL Google login locks for ${user.username}?`;
+    if (!confirm(msg)) return;
+    const busyKey = serverId ? `lock:${serverId}` : 'lock';
+    setBusy(busyKey);
     setError('');
     try {
       const res = await flowFetch(`/api/admin/users/${user.id}/reset-google-lock`, {
         method: 'POST',
-        body: JSON.stringify({}),
+        body: JSON.stringify(serverId ? { serverId } : {}),
       });
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Reset failed');
@@ -394,8 +438,20 @@ export default function AdminUserDetailPage() {
     return <p className="text-sm text-[var(--ink3)]">Loading…</p>;
   }
 
+  const nowMono = typeof performance !== 'undefined' ? performance.now() : 0;
+  const accountLocks = user?.googleAccountLocks || [];
+  const serverRemainingSec = (serverId: string, fallbackSec = 0) => {
+    const endMono = serverLockEndsAt[serverId];
+    if (endMono && endMono > 0) {
+      return Math.max(0, Math.ceil((endMono - nowMono) / 1000));
+    }
+    return Math.max(0, Math.floor(fallbackSec));
+  };
+  const lockedAccounts = accountLocks.filter(
+    (a) => serverRemainingSec(a.serverId, a.retryAfterSeconds) > 0
+  );
   const lockRemaining =
-    lockEndsAt > 0 ? Math.max(0, Math.ceil((lockEndsAt - performance.now()) / 1000)) : 0;
+    lockEndsAt > 0 ? Math.max(0, Math.ceil((lockEndsAt - nowMono) / 1000)) : 0;
   const expired = user?.planExpiry && new Date(user.planExpiry) <= new Date();
   const statusLabel = user?.banned
     ? 'Banned'
@@ -464,7 +520,11 @@ export default function AdminUserDetailPage() {
                   : undefined
               }
             />
-            <Card label="CLIENT" value={user.lastClient || '—'} />
+            <Card
+              label="CLIENT"
+              value={user.lastClient || '—'}
+              hint={user.activeServerName ? `Active: ${user.activeServerName}` : undefined}
+            />
             <div
               className={`flex flex-col gap-1 rounded-2xl border p-4 ${
                 lockRemaining > 0
@@ -480,23 +540,154 @@ export default function AdminUserDetailPage() {
                   lockRemaining > 0 ? 'text-amber-400' : 'text-emerald-400'
                 }`}
               >
-                {lockRemaining > 0 ? formatCountdown(lockRemaining) : 'Unlocked'}
+                {lockRemaining > 0
+                  ? `${formatCountdown(lockRemaining)}${
+                      lockedAccounts.length > 1 ? ` (${lockedAccounts.length} locked)` : ''
+                    }`
+                  : 'Unlocked'}
               </span>
               <span className="text-xs text-[var(--ink3)]">
-                {lockRemaining > 0
-                  ? `Ends ${formatWhen(user.googleSessionLockUntil)}`
-                  : 'No login lock active'}
+                {lockedAccounts.length > 0
+                  ? `${lockedAccounts.map((a) => a.serverName).join(', ')} · Ends ${formatWhen(
+                      user.googleSessionLockUntil
+                    )}`
+                  : lockRemaining > 0
+                    ? `Ends ${formatWhen(user.googleSessionLockUntil)}`
+                    : 'No login lock active'}
               </span>
               <button
                 type="button"
                 disabled={busy === 'lock' || lockRemaining <= 0}
-                onClick={resetGoogleLock}
+                onClick={() => resetGoogleLock()}
                 className="btn-secondary mt-2 !px-3 !py-1.5 !text-xs disabled:opacity-40"
               >
-                {busy === 'lock' ? 'Resetting…' : 'Reset lock'}
+                {busy === 'lock' ? 'Resetting…' : 'Reset all locks'}
               </button>
             </div>
           </div>
+
+          <section className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-5">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold">
+                  Logged-in Google Accounts &amp; Per-Account Locks
+                </h3>
+                <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
+                  Each server account has its own independent 1-hour lock after Google login. You can reset any single account or all accounts.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono text-[11px] text-[var(--ink3)]">
+                  {accountLocks.length} account{accountLocks.length === 1 ? '' : 's'} used ·{' '}
+                  {lockedAccounts.length} locked
+                </span>
+                {lockRemaining > 0 && (
+                  <button
+                    type="button"
+                    disabled={busy === 'lock'}
+                    onClick={() => resetGoogleLock()}
+                    className="btn-secondary !px-3 !py-1.5 !text-xs"
+                  >
+                    {busy === 'lock' ? 'Resetting…' : 'Reset all locks'}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {accountLocks.length === 0 ? (
+              <p className="rounded-xl border border-[var(--line)] px-4 py-5 text-center text-sm text-[var(--ink3)]">
+                User has not logged into any Google server account yet.
+              </p>
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {accountLocks.map((acc) => {
+                  const remSec = serverRemainingSec(acc.serverId, acc.retryAfterSeconds);
+                  const isLocked = remSec > 0;
+                  const rowBusy = busy === `lock:${acc.serverId}` || busy === 'lock';
+                  return (
+                    <div
+                      key={acc.serverId}
+                      className={`flex flex-col justify-between gap-3 rounded-xl border p-4 ${
+                        isLocked
+                          ? 'border-amber-500/40 bg-amber-500/10'
+                          : 'border-[var(--line)] bg-[var(--bg2)]'
+                      }`}
+                    >
+                      <div className="flex flex-col gap-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-sm font-semibold text-[var(--ink)]">
+                            {acc.serverName}
+                          </span>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {acc.isCurrent && (
+                              <span className="rounded-full bg-sky-500/15 px-2 py-0.5 font-mono text-[10px] font-medium uppercase text-sky-400">
+                                Current
+                              </span>
+                            )}
+                            {acc.imageOnly && (
+                              <span className="rounded-full bg-purple-500/15 px-2 py-0.5 font-mono text-[10px] font-medium uppercase text-purple-300">
+                                Image Only
+                              </span>
+                            )}
+                            <span
+                              className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tabular-nums ${
+                                isLocked
+                                  ? 'bg-amber-500/20 text-amber-300'
+                                  : 'bg-emerald-500/15 text-emerald-400'
+                              }`}
+                            >
+                              {isLocked ? `LOCKED · ${formatCountdown(remSec)}` : 'Unlocked'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {acc.serverEmail ? (
+                          <div className="font-mono text-xs text-sky-400">{acc.serverEmail}</div>
+                        ) : null}
+
+                        <div className="mt-1 space-y-0.5 text-[11px] text-[var(--ink3)]">
+                          <div>
+                            Last login: <span className="text-[var(--ink2)]">{formatWhen(acc.lastLoginAt)}</span>
+                          </div>
+                          <div>
+                            Sessions: <span className="text-[var(--ink2)]">{acc.loginCount || 0}</span>
+                            {acc.lastOutcome ? (
+                              <>
+                                {' · '}Last status:{' '}
+                                <span className="text-[var(--ink2)]">
+                                  {String(acc.lastOutcome).replace(/_/g, ' ')}
+                                </span>
+                              </>
+                            ) : null}
+                          </div>
+                          {isLocked && acc.lockedUntil ? (
+                            <div className="text-amber-300/90">
+                              Lock ends: {formatWhen(acc.lockedUntil)}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-end border-t border-[var(--line)] pt-2.5">
+                        <button
+                          type="button"
+                          disabled={rowBusy || !isLocked}
+                          onClick={() => resetGoogleLock(acc.serverId, acc.serverName)}
+                          className="btn-secondary !px-3 !py-1.5 !text-xs disabled:opacity-40"
+                        >
+                          {busy === `lock:${acc.serverId}`
+                            ? 'Resetting…'
+                            : isLocked
+                              ? `Reset ${acc.serverName} lock`
+                              : 'Unlocked'}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
 
           <div className="grid gap-5 lg:grid-cols-2">
             <section className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-5">
@@ -672,6 +863,8 @@ export default function AdminUserDetailPage() {
                   const meta = [s.ip, s.country, s.serverName, s.client, s.deviceId ? `device ${s.deviceId}` : null]
                     .filter(Boolean)
                     .join(' · ');
+                  const sessionSrvLocked =
+                    s.serverId && serverRemainingSec(s.serverId, 0) > 0;
                   return (
                     <div
                       key={s.attemptId}
@@ -694,10 +887,15 @@ export default function AdminUserDetailPage() {
                               ? ` · ${s.startRetries} start retries collapsed`
                               : ''}
                           </div>
-                          <div className="mt-1 text-sm text-[var(--ink)]">
-                            Google login
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-[var(--ink)]">
+                            <span>Google login</span>
+                            {s.serverName ? (
+                              <span className="rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-xs font-medium text-sky-300">
+                                {s.serverName}
+                                {s.serverEmail ? ` (${s.serverEmail})` : ''}
+                              </span>
+                            ) : null}
                             <span className="text-[var(--ink3)]">
-                              {' '}
                               · email {s.stepCounts?.email || 0} · password{' '}
                               {s.stepCounts?.password || 0} · otp {s.stepCounts?.otp || 0}
                             </span>
@@ -706,15 +904,36 @@ export default function AdminUserDetailPage() {
                             {meta || '—'}
                           </div>
                         </div>
-                        <span
-                          className={`rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide ${outcomeBadge(
-                            s.outcome
-                          )}`}
-                        >
-                          {String(s.outcome || 'unknown').toLowerCase() === 'success'
-                            ? 'session complete'
-                            : String(s.outcome || 'unknown').replace(/_/g, ' ')}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          {sessionSrvLocked && s.serverId ? (
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void resetGoogleLock(s.serverId || undefined, s.serverName || undefined);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.stopPropagation();
+                                  void resetGoogleLock(s.serverId || undefined, s.serverName || undefined);
+                                }
+                              }}
+                              className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-[11px] font-medium text-amber-300 hover:bg-amber-500/25"
+                            >
+                              Reset lock
+                            </span>
+                          ) : null}
+                          <span
+                            className={`rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide ${outcomeBadge(
+                              s.outcome
+                            )}`}
+                          >
+                            {String(s.outcome || 'unknown').toLowerCase() === 'success'
+                              ? 'session complete'
+                              : String(s.outcome || 'unknown').replace(/_/g, ' ')}
+                          </span>
+                        </div>
                       </button>
                       {open ? (
                         <ol className="space-y-2 border-t border-[var(--line)] px-4 py-3 pl-8">
