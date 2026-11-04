@@ -1924,14 +1924,14 @@ loadSavedProjectsFromDevice();
         "a[href*='flow_ai_credits_page']>*{display:none!important;}" +
         "a[href*='flow_ai_credits_page']::after{content:attr(data-fake-total-credits) ' Google Flow credits'!important;font-size:16px!important;color:#fff!important;visibility:visible!important;text-decoration:underline!important;white-space:nowrap!important;}" +
         "#ct-blur-overlay { position: fixed !important; top: 0 !important; left: 0 !important; width: 100vw !important; height: 100vh !important; backdrop-filter: blur(10px) !important; background: rgba(0,0,0,0.6) !important; z-index: 2147483640 !important; pointer-events: auto !important; }" +
-        "button[data-elevate-btn='true'] { z-index: 2147483641 !important; box-shadow: 0 0 0 2px rgba(255,255,255,0.1), 0 0 30px rgba(255,255,255,0.3) !important; }" +
+        "button[data-elevate-btn='true'],[data-elevate-btn='true'] { z-index: 2147483641 !important; box-shadow: 0 0 0 2px rgba(255,255,255,0.1), 0 0 30px rgba(255,255,255,0.3) !important; }" +
         "a.switch-account-link{display:none!important}" +
         "a.upsell-link{pointer-events:none!important}" +
         "a.upsell-link span.mdc-button__label{font-size:0!important}" +
         "a.upsell-link span.mdc-button__label::after{content:'Google Ultra Plan 20x'!important;font-size:14px!important;color:#000!important}" +
         "flow-credit-banner,.credit-banner{display:none!important}" +
         ".mavatar-footer-row,.mavatar-footer-row.collapsed,mavatar-footer-row,expandable-section[storagekey='chats'],[data-test-id='chats-expandable-section'],#sidenav-section-content-chats,#sidenav-section-content-chats .chat-history,#sidenav-section-content-chats .chat-history-list,conversations-list[data-test-id='all-conversations'],[data-test-id='all-conversations'],gem-nav-list-item[data-test-id='conversation']{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;}" +
-        "model-response a,model-response a[href],message-content a,message-content a[href],user-query a,user-query a[href],.response-container a,.query-content a,.user-query-container a,.markdown a,chat-window a,main a,[role='main'] a,source-footnote,inline-source-citation,sources-carousel,sources-carousel-inline,fact-check-evaluator,[data-test-id*='source'],button[aria-label*='source' i],button[aria-label*='Google Help' i]{pointer-events:none!important;cursor:text!important;text-decoration:none!important;}" +
+        "model-response a,model-response a[href],message-content a,message-content a[href],user-query a,user-query a[href],.response-container a,.query-content a,.user-query-container a,.markdown a,chat-window a,source-footnote,inline-source-citation,sources-carousel,sources-carousel-inline,fact-check-evaluator,[data-test-id*='source'],button[aria-label*='source' i],button[aria-label*='Google Help' i]{pointer-events:none!important;cursor:text!important;text-decoration:none!important;}" +
         ".header-user-button,flow-user-tier-chip,.tier-chip,[aria-label='ULTRA tier'],header button[aria-label*='Google Account' i],header img[src*='googleusercontent.com'],header img[src*='ggpht.com']{visibility:visible!important;opacity:1!important;pointer-events:auto!important}" +
         "html:not([data-flow-profile-popup-open='1']) [aria-label='Account details'],html:not([data-flow-profile-popup-open='1']) .account-switcher-placeholder{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}" +
         "#flow-my-projects-dock{position:fixed!important;bottom:18px!important;right:22px!important;left:auto!important;z-index:2147483645!important;display:flex!important;align-items:center!important;gap:10px!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
@@ -2505,11 +2505,49 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      // Elevate "New project" button with #ct-blur-overlay on home page
+      // Elevate "New project" button with #ct-blur-overlay on home page (on Image-Only accounts, also allow Tools tab & Create tool)
+      if (!initPakflowDomEngine._toolsTabListenerBound) {
+        initPakflowDomEngine._toolsTabListenerBound = true;
+        document.addEventListener('click', (ev) => {
+          if (!isImageOnlyAccount()) return;
+          const tEl = ev.target && ev.target.closest ? ev.target.closest('button, [role="tab"], [role="button"], a, span') : null;
+          if (!tEl) return;
+          const raw = (tEl.textContent || '').trim().toLowerCase();
+          if (raw === 'tools' || raw === 'apps' || raw.includes('create tool')) {
+            initPakflowDomEngine._toolsTabClicked = true;
+            const ov = document.getElementById('ct-blur-overlay');
+            if (ov) ov.remove();
+          } else if (raw === 'projects') {
+            initPakflowDomEngine._toolsTabClicked = false;
+          }
+        }, true);
+      }
       const newProjBtn = Array.from(document.querySelectorAll('button')).find(
         (b) => b.textContent && b.textContent.includes('New project')
       );
-      if (newProjBtn) {
+      const hasCreateToolBtnOnPage = isImageOnlyAccount() && Array.from(document.querySelectorAll('button, a, [role="button"]')).some((el) => {
+        if (!isElementVisible(el)) return false;
+        const txt = (el.textContent || '').trim().toLowerCase();
+        return txt.includes('create tool');
+      });
+      const toolsTabActive = isImageOnlyAccount() && (
+        Boolean(initPakflowDomEngine._toolsTabClicked) ||
+        hasCreateToolBtnOnPage ||
+        /tools|apps/i.test(window.location.pathname + window.location.search + window.location.hash) ||
+        Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"], span')).some((el) => {
+          const txt = (el.textContent || '').trim();
+          if (txt !== 'Tools' && txt !== 'Apps') return false;
+          const btn = el.closest('button, [role="tab"], [role="radio"]') || el.parentElement || el;
+          return (
+            btn.getAttribute('aria-selected') === 'true' ||
+            btn.getAttribute('aria-pressed') === 'true' ||
+            btn.getAttribute('data-state') === 'active' ||
+            btn.classList.contains('active') ||
+            btn.classList.contains('selected')
+          );
+        })
+      );
+      if (newProjBtn && !toolsTabActive) {
         let overlay = document.getElementById('ct-blur-overlay');
         if (!overlay && newProjBtn.parentNode) {
           overlay = document.createElement('div');
@@ -2518,6 +2556,33 @@ loadSavedProjectsFromDevice();
         }
         if (newProjBtn.getAttribute('data-elevate-btn') !== 'true') {
           newProjBtn.setAttribute('data-elevate-btn', 'true');
+        }
+        if (isImageOnlyAccount()) {
+          document.querySelectorAll('button, [role="tab"], [role="button"], span').forEach((el) => {
+            const t = (el.textContent || '').trim().toLowerCase();
+            if (t === 'tools' || t === 'apps' || t === 'projects' || t.includes('create tool')) {
+              const btn = el.closest('button, [role="tab"], [role="button"]') || el.parentElement || el;
+              if (btn) {
+                if (btn.getAttribute('data-elevate-btn') !== 'true') {
+                  btn.setAttribute('data-elevate-btn', 'true');
+                }
+                btn.style.setProperty('position', 'relative', 'important');
+                btn.style.setProperty('z-index', '2147483641', 'important');
+                // Also elevate compact header/tablist ancestors so no parent stacking context traps Tools below #ct-blur-overlay
+                let anc = btn.parentElement;
+                for (let depth = 0; depth < 6 && anc && anc !== document.body; depth++) {
+                  const rect = anc.getBoundingClientRect ? anc.getBoundingClientRect() : null;
+                  if (rect && rect.height > 0 && rect.height < 140) {
+                    if (window.getComputedStyle(anc).position === 'static') {
+                      anc.style.setProperty('position', 'relative', 'important');
+                    }
+                    anc.style.setProperty('z-index', '2147483641', 'important');
+                  }
+                  anc = anc.parentElement;
+                }
+              }
+            }
+          });
         }
       } else {
         const overlay = document.getElementById('ct-blur-overlay');
@@ -2534,11 +2599,22 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      // Hide Tools tab
+      // Hide Tools tab ONLY on standard video accounts (keep enabled on Image-Only accounts)
       document.querySelectorAll('span').forEach((sp) => {
-        if ((sp.textContent || '').trim() === 'Tools') {
+        const st = (sp.textContent || '').trim();
+        if (st === 'Tools' || st === 'Apps') {
           const parent = sp.parentElement;
-          if (parent && !parent.classList.contains('force-hide-radix')) {
+          const tabBtn = sp.closest('button, [role="tab"], [role="button"]');
+          if (!parent) return;
+          if (isImageOnlyAccount()) {
+            [parent, tabBtn].forEach((node) => {
+              if (node && node.classList.contains('force-hide-radix')) {
+                node.classList.remove('force-hide-radix');
+                node.style.removeProperty('display');
+                node.style.removeProperty('pointer-events');
+              }
+            });
+          } else if (st === 'Tools' && !parent.classList.contains('force-hide-radix')) {
             parent.classList.add('force-hide-radix');
             parent.style.setProperty('display', 'none', 'important');
             parent.style.setProperty('pointer-events', 'none', 'important');
@@ -2546,12 +2622,24 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      // Hide Extend (Veo / Omni), pen_magic Omni, Create tool, and enable 4K Upscaled menuitem
+      // Hide Extend (Veo / Omni), pen_magic Omni, Create tool (only on non-image accounts), and enable 4K Upscaled menuitem
       document.querySelectorAll('button, a, [role="button"], [role="menuitem"]').forEach((el) => {
         if (!el.textContent) return;
         const t = el.textContent.trim();
         const tl = t.toLowerCase();
         if (tl.includes('create tool')) {
+          if (isImageOnlyAccount()) {
+            if (el.classList.contains('force-hide-radix')) {
+              el.classList.remove('force-hide-radix');
+              el.style.removeProperty('display');
+              el.style.removeProperty('pointer-events');
+              const prev = el.previousElementSibling;
+              if (prev && (prev.tagName === 'HR' || prev.getAttribute('role') === 'separator' || (prev.textContent || '').trim() === '')) {
+                prev.style.removeProperty('display');
+              }
+            }
+            return;
+          }
           el.classList.add('force-hide-radix');
           el.style.setProperty('display', 'none', 'important');
           el.style.setProperty('pointer-events', 'none', 'important');
@@ -2669,9 +2757,17 @@ loadSavedProjectsFromDevice();
       if (document.body && document.body.getAttribute('data-flow-image-only') !== 'true') {
         document.body.setAttribute('data-flow-image-only', 'true');
       }
-      // Hide Video tab, Frames tab, Video models, Durations (4s/6s/8s/10s), Apps/Tools, and credit cost line
+      // Hide Video tab, Frames tab, Video models, Durations (4s/6s/8s/10s), Agent, and credit cost line (keep Tools / Apps / Create tool enabled!)
       document.querySelectorAll('button, [role="tab"], [role="radio"]').forEach((b) => {
         const cleanLbl = getButtonCleanLabel(b).toLowerCase();
+        if (cleanLbl === 'tools' || cleanLbl === 'apps' || cleanLbl.includes('create tool')) {
+          if (b.getAttribute('data-hide-image-only') === 'true') {
+            b.removeAttribute('data-hide-image-only');
+            b.style.removeProperty('display');
+            b.style.removeProperty('pointer-events');
+          }
+          return;
+        }
         if (
           cleanLbl === 'video' ||
           cleanLbl === 'videos' ||
@@ -2680,8 +2776,6 @@ loadSavedProjectsFromDevice();
           cleanLbl === '6s' ||
           cleanLbl === '8s' ||
           cleanLbl === '10s' ||
-          cleanLbl === 'apps' ||
-          cleanLbl === 'tools' ||
           cleanLbl === 'agent'
         ) {
           if (b.getAttribute('data-hide-image-only') !== 'true') {
