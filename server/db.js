@@ -238,6 +238,8 @@ async function mapCustomer(user, metaMap, ownerLookup) {
     deviceIds: Array.isArray(meta.deviceIds) ? meta.deviceIds : [],
     lastClient: meta.lastClient || null,
     googleSessionLockUntil: meta.googleSessionLockUntil || null,
+    googleServerLocks: meta.googleServerLocks && typeof meta.googleServerLocks === 'object' ? meta.googleServerLocks : {},
+    lastGoogleAttemptsByServer: meta.lastGoogleAttemptsByServer && typeof meta.lastGoogleAttemptsByServer === 'object' ? meta.lastGoogleAttemptsByServer : {},
     loginStatsResetAt: meta.loginStatsResetAt || null,
     lastGoogleLoginAt: meta.lastGoogleLoginAt || null,
     lastGoogleAttemptId: meta.lastGoogleAttemptId || null,
@@ -784,6 +786,12 @@ class Database {
     if (updates.deviceIds !== undefined) metaPatch.deviceIds = Array.isArray(updates.deviceIds) ? updates.deviceIds : [];
     if (updates.googleSessionLockUntil !== undefined) {
       metaPatch.googleSessionLockUntil = updates.googleSessionLockUntil || null;
+    }
+    if (updates.googleServerLocks !== undefined) {
+      metaPatch.googleServerLocks = updates.googleServerLocks && typeof updates.googleServerLocks === 'object' ? updates.googleServerLocks : {};
+    }
+    if (updates.lastGoogleAttemptsByServer !== undefined) {
+      metaPatch.lastGoogleAttemptsByServer = updates.lastGoogleAttemptsByServer && typeof updates.lastGoogleAttemptsByServer === 'object' ? updates.lastGoogleAttemptsByServer : {};
     }
     if (updates.loginStatsResetAt !== undefined) {
       metaPatch.loginStatsResetAt = updates.loginStatsResetAt || null;

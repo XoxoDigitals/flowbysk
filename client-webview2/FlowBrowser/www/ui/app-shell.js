@@ -1638,7 +1638,17 @@ class FlowBrowserApp {
         if (fromButton && this.activeServer && data.server.id === this.activeServer.id) {
           if (Array.isArray(this.currentServers) && this.currentServers.length > 1) {
             const idx = this.currentServers.findIndex((s) => s.id === this.activeServer.id);
-            const nextSrv = this.currentServers[(idx + 1) % this.currentServers.length];
+            let nextSrv = null;
+            for (let offset = 1; offset < this.currentServers.length; offset++) {
+              const cand = this.currentServers[(idx + offset) % this.currentServers.length];
+              if (cand && cand.id && this.googleLockRemainingMs(cand.id) <= 0) {
+                nextSrv = cand;
+                break;
+              }
+            }
+            if (!nextSrv) {
+              nextSrv = this.currentServers[(idx + 1) % this.currentServers.length];
+            }
             if (nextSrv && nextSrv.id) {
               await this.launchServerWorkspace(nextSrv.id, true);
               return;
@@ -1649,6 +1659,7 @@ class FlowBrowserApp {
           this.setAccountName(data.server.name);
           return;
         }
+        if (data.user) this.applyLockFromUser(data.user);
         await this.launchServerWorkspace(data.server.id, fromButton);
         return;
       }
@@ -1699,6 +1710,10 @@ class FlowBrowserApp {
         this.activeServer = sanitizeServerForStorage(data.server);
         if (this.serverSelect) this.serverSelect.value = data.server.id;
         this.setAccountName(this.formatServerDisplayName(data.server, this.currentServers));
+        if (serverChanged) {
+          this._credFailUntil = 0;
+        }
+        this.renderLockPill();
         const desiredUrl = targetOverrideUrl || this._activeToolTargetUrl || data.server.targetUrl || 'https://flow.google.com/';
         const isGeminiTarget = desiredUrl.includes('gemini.google.com');
         if (isGeminiTarget) {
@@ -2495,29 +2510,59 @@ class FlowBrowserApp {
   }
 
   /**
-   * 60 min Google session lock. The SERVER owns the clock: we only keep the
-   * seconds it reported and count down on a monotonic timer, so changing the
-   * Windows clock or logging into another account can never fake/extend it.
+   * 60 min Google session lock (PER SERVER ACCOUNT). The SERVER owns the clock:
+   * we keep monotonic countdowns keyed by serverId so logging into Server 1
+   * locks only Server 1 while allowing Server 2 / Image Server 1 to log in.
    */
-  noteGoogleLock(data) {
-    let secs = Number(data && (data.retryAfterSeconds ?? data.googleSessionRetryAfterSeconds));
-    if (!Number.isFinite(secs) && data && data.lockedUntil && data.serverTime) {
-      secs = (Date.parse(data.lockedUntil) - Date.parse(data.serverTime)) / 1000;
+  noteGoogleLock(data, explicitServerId = '') {
+    if (!this._googleServerLocksMono) this._googleServerLocksMono = {};
+    const nowMono = performance.now();
+    if (data && data.googleServerLocks && typeof data.googleServerLocks === 'object') {
+      const serverTimeMs = data.serverTime ? Date.parse(data.serverTime) : Date.now();
+      const nextMap = {};
+      for (const [sid, info] of Object.entries(data.googleServerLocks)) {
+        let s = Number(info && info.retryAfterSeconds);
+        if (!Number.isFinite(s) && info && info.lockedUntil) {
+          s = (Date.parse(info.lockedUntil) - serverTimeMs) / 1000;
+        } else if (!Number.isFinite(s) && typeof info === 'string') {
+          s = (Date.parse(info) - serverTimeMs) / 1000;
+        }
+        if (Number.isFinite(s) && s > 0) {
+          nextMap[sid] = nowMono + s * 1000;
+        }
+      }
+      this._googleServerLocksMono = nextMap;
     }
-    if (!Number.isFinite(secs) || secs <= 0) {
-      this._googleLockEndMono = 0;
-    } else {
-      this._googleLockEndMono = performance.now() + secs * 1000;
+    const targetSrvId = String(
+      explicitServerId || (data && data.serverId) || (data && data.activeServerId) || (this.activeServer && this.activeServer.id) || ''
+    ).trim();
+    if (targetSrvId) {
+      let secs = Number(data && (data.retryAfterSeconds ?? data.googleSessionRetryAfterSeconds));
+      if (!Number.isFinite(secs) && data && data.lockedUntil && data.serverTime) {
+        secs = (Date.parse(data.lockedUntil) - Date.parse(data.serverTime)) / 1000;
+      }
+      if (Number.isFinite(secs)) {
+        if (secs <= 0) {
+          delete this._googleServerLocksMono[targetSrvId];
+        } else {
+          this._googleServerLocksMono[targetSrvId] = nowMono + secs * 1000;
+        }
+      }
     }
     this.renderLockPill();
   }
 
-  googleLockRemainingMs() {
-    if (!this._googleLockEndMono) return 0;
-    return Math.max(0, this._googleLockEndMono - performance.now());
+  googleLockRemainingMs(serverId = '') {
+    if (!this._googleServerLocksMono) return 0;
+    const sid = String(serverId || (this.activeServer && this.activeServer.id) || '').trim();
+    if (!sid) return 0;
+    const endMono = this._googleServerLocksMono[sid];
+    if (!endMono) return 0;
+    return Math.max(0, endMono - performance.now());
   }
 
   resetGoogleLockState() {
+    this._googleServerLocksMono = {};
     this._googleLockEndMono = 0;
     this._lockNotifyAt = 0;
     this._credFailUntil = 0;
@@ -2526,17 +2571,25 @@ class FlowBrowserApp {
 
   /** Apply lock fields from any server user payload (login, verify-session, /me). */
   applyLockFromUser(user) {
-    if (!user || user.googleSessionRetryAfterSeconds === undefined) return;
-    this.noteGoogleLock({ retryAfterSeconds: user.googleSessionRetryAfterSeconds });
+    if (!user) return;
+    if (user.googleServerLocks && typeof user.googleServerLocks === 'object') {
+      this.noteGoogleLock(user, user.activeServerId || (this.activeServer && this.activeServer.id) || '');
+      return;
+    }
+    if (user.googleSessionRetryAfterSeconds === undefined) return;
+    this.noteGoogleLock(
+      { retryAfterSeconds: user.googleSessionRetryAfterSeconds },
+      user.activeServerId || (this.activeServer && this.activeServer.id) || ''
+    );
   }
 
   googleLockMessage(data) {
     const secs = Math.max(
       0,
-      Number(data && data.retryAfterSeconds) || Math.ceil(this.googleLockRemainingMs() / 1000)
+      Number(data && data.retryAfterSeconds) || Math.ceil(this.googleLockRemainingMs(data && data.serverId) / 1000)
     );
     const mins = Math.max(1, Math.ceil(secs / 60));
-    return `Google login is locked for about ${mins} more minute${mins === 1 ? '' : 's'}. You can still clear cookies; sign in again when the timer ends.`;
+    return `This account is locked for about ${mins} more minute${mins === 1 ? '' : 's'}. You can switch to another server or wait for the timer.`;
   }
 
   renderLockPill() {

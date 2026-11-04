@@ -14,21 +14,42 @@ const { allowExtensionStep } = credChannel;
 const { requireAppDeviceAttestation } = require('../deviceSecurity');
 const { lookupCountry, clientIpFromReq } = require('../geoIp');
 
-const GOOGLE_SESSION_LOCK_MS = 60 * 60 * 1000; // 60 minutes after successful Google login
+const GOOGLE_SESSION_LOCK_MS = 60 * 60 * 1000; // 60 minutes per server account after successful Google login
 
-function googleLockState(user) {
-  if (!user || !user.googleSessionLockUntil) {
-    return { locked: false, lockedUntil: null, retryAfterSeconds: 0 };
+function googleLockState(user, serverId) {
+  const now = Date.now();
+  const rawMap =
+    user && user.googleServerLocks && typeof user.googleServerLocks === 'object'
+      ? user.googleServerLocks
+      : {};
+  const serverLocks = {};
+  for (const [sid, iso] of Object.entries(rawMap)) {
+    const ms = iso ? new Date(iso).getTime() : 0;
+    if (Number.isFinite(ms) && ms > now) {
+      serverLocks[sid] = {
+        locked: true,
+        lockedUntil: new Date(ms).toISOString(),
+        retryAfterSeconds: Math.max(1, Math.ceil((ms - now) / 1000)),
+      };
+    }
   }
-  const untilMs = new Date(user.googleSessionLockUntil).getTime();
-  if (!Number.isFinite(untilMs) || untilMs <= Date.now()) {
-    return { locked: false, lockedUntil: null, retryAfterSeconds: 0 };
+  const targetSrvId = String(serverId || user?.activeServerId || '').trim();
+  const entry = targetSrvId ? serverLocks[targetSrvId] : null;
+  if (!entry) {
+    return {
+      locked: false,
+      lockedUntil: null,
+      retryAfterSeconds: 0,
+      serverId: targetSrvId || null,
+      serverLocks,
+    };
   }
-  const retryAfterSeconds = Math.max(1, Math.ceil((untilMs - Date.now()) / 1000));
   return {
     locked: true,
-    lockedUntil: new Date(untilMs).toISOString(),
-    retryAfterSeconds,
+    lockedUntil: entry.lockedUntil,
+    retryAfterSeconds: entry.retryAfterSeconds,
+    serverId: targetSrvId,
+    serverLocks,
   };
 }
 
@@ -36,9 +57,11 @@ function googleLockResponse(state) {
   return {
     success: false,
     code: 'GOOGLE_SESSION_LOCKED',
-    error: 'Wait before changing server or starting a new Google login.',
+    error: 'This account is locked for 1 hour after login. Switch to another server or wait for the timer.',
+    serverId: state.serverId || null,
     lockedUntil: state.lockedUntil,
     retryAfterSeconds: state.retryAfterSeconds,
+    googleServerLocks: state.serverLocks || {},
     serverTime: new Date().toISOString(),
   };
 }
@@ -73,8 +96,8 @@ function parseFlowClientHeader(req) {
   return /^(windows-exe|android)\//i.test(h) ? h : '';
 }
 
-async function assertNotGoogleSessionLocked(user, res) {
-  const state = googleLockState(user);
+async function assertNotGoogleSessionLocked(user, res, serverId) {
+  const state = googleLockState(user, serverId);
   if (!state.locked) return true;
   res.status(429).json(googleLockResponse(state));
   return false;
@@ -136,8 +159,8 @@ function effectiveCredits(user) {
   return Math.max(0, Number(user?.credits) || 0);
 }
 
-function publicUser(user) {
-  const lock = googleLockState(user);
+function publicUser(user, serverId) {
+  const lock = googleLockState(user, serverId);
   return {
     id: user.id,
     username: user.username,
@@ -154,6 +177,7 @@ function publicUser(user) {
     googleSessionLockUntil: lock.locked ? lock.lockedUntil : null,
     googleSessionLocked: !!lock.locked,
     googleSessionRetryAfterSeconds: lock.retryAfterSeconds || 0,
+    googleServerLocks: lock.serverLocks || {},
     serverTime: new Date().toISOString(),
   };
 }
@@ -419,6 +443,7 @@ router.post('/verify-session', requireUserAuth, async (req, res) => {
   const availableServers = await getUserServers(user);
   const activeServer = await resolveActiveServer(user);
   const forceClearGoogle = !!user.pendingGoogleWipe;
+  const lock = googleLockState(user, activeServer?.id);
 
   res.json({
     success: true,
@@ -428,8 +453,9 @@ router.post('/verify-session', requireUserAuth, async (req, res) => {
       username: user.username,
       credits: effectiveCredits(user),
       planExpiry: user.planExpiry,
-      googleSessionLocked: googleLockState(user).locked,
-      googleSessionRetryAfterSeconds: googleLockState(user).retryAfterSeconds || 0,
+      googleSessionLocked: lock.locked,
+      googleSessionRetryAfterSeconds: lock.retryAfterSeconds || 0,
+      googleServerLocks: lock.serverLocks || {},
       serverTime: new Date().toISOString(),
     },
     servers: availableServers.map((s) => ({
@@ -454,8 +480,6 @@ router.post('/ack-google-wipe', requireUserAuth, async (req, res) => {
 router.post('/switch-server', requireUserAuth, async (req, res) => {
   const { serverId } = req.body;
   const user = req.user;
-  const isSameServer = !!(serverId && user.activeServerId && String(serverId) === String(user.activeServerId));
-  if (!isSameServer && !(await assertNotGoogleSessionLocked(user, res))) return;
   const availableServers = await getUserServers(user);
   let targetServer = availableServers.find((s) => s.id === serverId);
   if (!targetServer && availableServers.length > 0) targetServer = availableServers[0];
@@ -468,21 +492,33 @@ router.post('/switch-server', requireUserAuth, async (req, res) => {
     serverName: targetServer.name,
   });
   const freshUser = await db.getUserById(user.id);
-  res.json({ success: true, server: publicServerPayload(targetServer), user: publicUser(freshUser || user) });
+  res.json({
+    success: true,
+    server: publicServerPayload(targetServer),
+    user: publicUser(freshUser || user, targetServer.id),
+  });
 });
 
 router.post('/request-server-change', requireUserAuth, async (req, res) => {
   const user = req.user;
-  if (!(await assertNotGoogleSessionLocked(user, res))) return;
   const availableServers = await getUserServers(user);
   if (!availableServers.length) {
     return res.status(404).json({ success: false, error: 'No active server nodes available.' });
   }
-  const targetServer = await db.pickLeastLoadedServer(availableServers, user.id);
+  const current = await resolveActiveServer(user);
+  const unlockedOtherServers = availableServers.filter(
+    (s) => (!current || s.id !== current.id) && !googleLockState(user, s.id).locked
+  );
+  const unlockedAnyServers = availableServers.filter((s) => !googleLockState(user, s.id).locked);
+  const candidatePool = unlockedOtherServers.length
+    ? unlockedOtherServers
+    : unlockedAnyServers.length
+      ? unlockedAnyServers
+      : availableServers;
+  const targetServer = await db.pickLeastLoadedServer(candidatePool, user.id);
   if (!targetServer) {
     return res.status(404).json({ success: false, error: 'No active server nodes available.' });
   }
-  const current = await resolveActiveServer(user);
   if (!current || current.id !== targetServer.id) {
     await db.updateUser(user.id, { activeServerId: targetServer.id });
     await db.addLog(user.id, user.username, 'request_server_change', {
@@ -498,7 +534,13 @@ router.post('/request-server-change', requireUserAuth, async (req, res) => {
     users: users.filter((u) => u.activeServerId === s.id).length,
     hasTotp: !!(s.totpSecret && String(s.totpSecret).trim()),
   }));
-  res.json({ success: true, server: publicServerPayload(targetServer), load });
+  const freshUser = await db.getUserById(user.id);
+  res.json({
+    success: true,
+    server: publicServerPayload(targetServer),
+    user: publicUser(freshUser || user, targetServer.id),
+    load,
+  });
 });
 
 router.post('/refund-credit', requireUserAuth, async (req, res) => {
@@ -561,7 +603,15 @@ router.get('/extension-status', requireUserAuth, async (req, res) => {
 
 router.post('/extension-start', requireUserAuth, async (req, res) => {
   const user = req.user;
-  if (!(await assertNotGoogleSessionLocked(user, res))) return;
+  const activeServer = await resolveActiveServer(user);
+  if (!activeServer || !activeServer.email) {
+    return res.status(400).json({
+      success: false,
+      error:
+        'No Google account is assigned. Ask the administrator to configure a server with Google credentials.',
+    });
+  }
+  if (!(await assertNotGoogleSessionLocked(user, res, activeServer.id))) return;
   const channelId = String(req.body?.channelId || '').trim();
   const channel = credChannel.getChannel(channelId, user.id, req);
   if (!channel) {
@@ -569,14 +619,6 @@ router.post('/extension-start', requireUserAuth, async (req, res) => {
       success: false,
       code: 'CHANNEL_REQUIRED',
       error: 'Open a secure channel first (login or /channel-open).',
-    });
-  }
-  const activeServer = await resolveActiveServer(user);
-  if (!activeServer || !activeServer.email) {
-    return res.status(400).json({
-      success: false,
-      error:
-        'No Google account is assigned. Ask the administrator to configure a server with Google credentials.',
     });
   }
   const attempt = credChannel.createAttempt(user.id, activeServer.id, channelId, req);
@@ -599,13 +641,20 @@ router.post('/extension-start', requireUserAuth, async (req, res) => {
 router.post('/extension-step', requireUserAuth, async (req, res) => {
   const { attemptId, stage, channelId, ts, mac } = req.body || {};
   const user = req.user;
-  const lockState = googleLockState(user);
+  const activeServer = await resolveActiveServer(user);
+  const targetSrvId = activeServer ? activeServer.id : user.activeServerId;
+  const lockState = googleLockState(user, targetSrvId);
   if (lockState.locked) {
-    // Lock starts at login success; the SAME attempt may still finish its remaining
-    // stages (e.g. OTP) for a short grace window. Any other attempt is refused.
-    const sameAttempt =
-      !!attemptId && String(attemptId) === String(user.lastGoogleAttemptId || '');
-    const lastMs = user.lastGoogleLoginAt ? new Date(user.lastGoogleLoginAt).getTime() : 0;
+    // Lock starts at login success; the SAME attempt on this server may still finish its remaining
+    // stages (e.g. OTP) for a short grace window. Any other attempt on this locked server is refused.
+    const srvAttemptInfo =
+      targetSrvId && user.lastGoogleAttemptsByServer && user.lastGoogleAttemptsByServer[targetSrvId]
+        ? user.lastGoogleAttemptsByServer[targetSrvId]
+        : null;
+    const expectedAttemptId = (srvAttemptInfo && srvAttemptInfo.attemptId) || user.lastGoogleAttemptId || '';
+    const lastAtIso = (srvAttemptInfo && srvAttemptInfo.at) || user.lastGoogleLoginAt || '';
+    const sameAttempt = !!attemptId && String(attemptId) === String(expectedAttemptId);
+    const lastMs = lastAtIso ? new Date(lastAtIso).getTime() : 0;
     const withinGrace = lastMs > 0 && Date.now() - lastMs < 10 * 60 * 1000;
     if (!(sameAttempt && withinGrace)) {
       return res.status(429).json(googleLockResponse(lockState));
@@ -643,7 +692,6 @@ router.post('/extension-step', requireUserAuth, async (req, res) => {
   if (!taken.ok) {
     return res.status(400).json({ success: false, error: taken.error });
   }
-  const activeServer = await resolveActiveServer(user);
   if (!activeServer || activeServer.id !== taken.attempt.serverId) {
     return res.status(400).json({ success: false, error: 'No server account assigned.' });
   }
@@ -690,18 +738,35 @@ router.post('/extension-step', requireUserAuth, async (req, res) => {
 });
 
 router.post('/extension-finish', requireUserAuth, async (req, res) => {
-  const { attemptId, outcome } = req.body;
+  const { attemptId, outcome, serverId } = req.body || {};
   const normalizedOutcome = String(outcome || 'unknown').toLowerCase();
+  const targetSrvId = String(serverId || req.user.activeServerId || '').trim();
   const details = {
     attemptId: attemptId || 'unknown',
     outcome: normalizedOutcome,
+    serverId: targetSrvId || null,
   };
 
-  if (normalizedOutcome === 'success') {
+  if (normalizedOutcome === 'success' && targetSrvId) {
+    const nowIso = new Date().toISOString();
     const lockedUntil = new Date(Date.now() + GOOGLE_SESSION_LOCK_MS).toISOString();
+    const nextServerLocks = {
+      ...(req.user.googleServerLocks && typeof req.user.googleServerLocks === 'object'
+        ? req.user.googleServerLocks
+        : {}),
+      [targetSrvId]: lockedUntil,
+    };
+    const nextAttemptsByServer = {
+      ...(req.user.lastGoogleAttemptsByServer && typeof req.user.lastGoogleAttemptsByServer === 'object'
+        ? req.user.lastGoogleAttemptsByServer
+        : {}),
+      [targetSrvId]: { attemptId: attemptId || null, at: nowIso },
+    };
     await db.updateUser(req.user.id, {
       googleSessionLockUntil: lockedUntil,
-      lastGoogleLoginAt: new Date().toISOString(),
+      googleServerLocks: nextServerLocks,
+      lastGoogleAttemptsByServer: nextAttemptsByServer,
+      lastGoogleLoginAt: nowIso,
       lastGoogleAttemptId: attemptId || null,
     });
     details.lockedUntil = lockedUntil;
@@ -712,7 +777,7 @@ router.post('/extension-finish', requireUserAuth, async (req, res) => {
   const fresh = await db.getUserById(req.user.id);
   res.json({
     success: true,
-    user: publicUser(fresh || req.user),
+    user: publicUser(fresh || req.user, targetSrvId),
   });
 });
 

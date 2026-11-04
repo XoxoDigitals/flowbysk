@@ -60,12 +60,28 @@ function sanitizeServerForAdmin(server, assignedUserCount = 0) {
 
 /** Server-clock view of the 60 min Google lock (admin never trusts the browser clock). */
 function googleLockForAdmin(user) {
-  const until = user?.googleSessionLockUntil ? new Date(user.googleSessionLockUntil) : null;
-  const ms = until && !Number.isNaN(until.getTime()) ? until.getTime() - Date.now() : 0;
+  const now = Date.now();
+  let maxUntilMs = 0;
+  if (user?.googleSessionLockUntil) {
+    const t = new Date(user.googleSessionLockUntil).getTime();
+    if (Number.isFinite(t) && t > now && t > maxUntilMs) maxUntilMs = t;
+  }
+  const serverLocks = {};
+  if (user?.googleServerLocks && typeof user.googleServerLocks === 'object') {
+    for (const [srvId, iso] of Object.entries(user.googleServerLocks)) {
+      const t = iso ? new Date(iso).getTime() : 0;
+      if (Number.isFinite(t) && t > now) {
+        serverLocks[srvId] = new Date(t).toISOString();
+        if (t > maxUntilMs) maxUntilMs = t;
+      }
+    }
+  }
+  const ms = maxUntilMs > now ? maxUntilMs - now : 0;
   return {
     googleSessionLocked: ms > 0,
-    googleSessionLockUntil: ms > 0 ? until.toISOString() : null,
+    googleSessionLockUntil: ms > 0 ? new Date(maxUntilMs).toISOString() : null,
     googleSessionRetryAfterSeconds: ms > 0 ? Math.ceil(ms / 1000) : 0,
+    googleServerLocks: serverLocks,
     serverTime: new Date().toISOString(),
   };
 }
@@ -662,7 +678,11 @@ router.put('/users/:id', requireAdminAuth, async (req, res) => {
 router.post('/users/:id/reset-google-lock', requireAdminAuth, async (req, res) => {
   const owned = await ownedUserOr404(req, res);
   if (!owned) return;
-  await db.updateUser(owned.user.id, { googleSessionLockUntil: null });
+  await db.updateUser(owned.user.id, {
+    googleSessionLockUntil: null,
+    googleServerLocks: {},
+    lastGoogleAttemptsByServer: {},
+  });
   await db.addLog('admin', 'admin', 'admin_reset_google_lock', {
     targetUserId: owned.user.id,
     targetUsername: owned.user.username,
