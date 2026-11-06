@@ -351,13 +351,19 @@ class FlowBrowserApp {
         if (arg && arg.forceRefresh) {
           this._credUsedStages?.delete('otp');
           this._otpPushAt = 0;
+          this._lastOtpCode = '';
+          this._lastOtpFetchedAt = 0;
+          this.pushTotpFromBackend(true);
+          return;
         }
         this.fetchAndSendOtp();
       } else if (event.channel === 'flow:totp-retry-needed') {
         console.warn('[AppShell] TOTP retry requested by inject — fetching fresh code');
         this._credUsedStages?.delete('otp');
         this._otpPushAt = 0;
-        setTimeout(() => this.pushTotpFromBackend(), 1200);
+        this._lastOtpCode = '';
+        this._lastOtpFetchedAt = 0;
+        setTimeout(() => this.pushTotpFromBackend(true), 800);
       } else if (event.channel === 'auth:need-otp') {
         this.pushTotpFromBackend();
       } else if (event.channel === 'auth:stuck-pwd') {
@@ -1816,6 +1822,10 @@ class FlowBrowserApp {
         this.syncToolbarBadgesForMode();
         this._lastAutoFillKey = null;
         this._lastAutoFillAt = 0;
+        this._totpFilling = false;
+        this._otpPushAt = 0;
+        this._lastOtpCode = '';
+        this._lastOtpFetchedAt = 0;
         this._credAttemptId = null;
         this._googleEmailMem = '';
         this._googlePasswordMem = '';
@@ -2206,24 +2216,22 @@ class FlowBrowserApp {
       const serverId = String(this.activeServer.id || '');
       const targetUrl = this._activeToolTargetUrl || this.activeServer.targetUrl || 'https://flow.google.com';
 
-      // 1. Immediately push imageOnly & serverId to C# host and FlowView BEFORE any network await!
+      // 1. Immediately push imageOnly & serverId to C# host and FlowView BEFORE any network await.
+      // Omit email in Step 1 apply-credentials so flow-inject never sees a mismatched email or wipes _otp.
       try {
         window.chrome?.webview?.postMessage(JSON.stringify({
           type: 'cmd',
           cmd: 'setFlowCreds',
-          email: this._googleEmailMem || this.activeServer.email || '',
+          email: this._googleEmailMem || '',
           password: this._googlePasswordMem || '',
           targetUrl: targetUrl,
           imageOnly: imageOnly,
           serverId: serverId
         }));
         this.webview.send('apply-credentials', {
-          email: this._googleEmailMem || this.activeServer.email || '',
-          password: this._googlePasswordMem || '',
           targetUrl: targetUrl,
           imageOnly: imageOnly,
-          serverId: serverId,
-          forceReset: !!forceReset
+          serverId: serverId
         });
         if (this.webview && typeof this.webview.executeJavaScript === 'function') {
           this.webview.executeJavaScript(
@@ -2233,13 +2241,20 @@ class FlowBrowserApp {
         this.syncSavedProjectsToWebview();
       } catch (e) {}
 
-      // 2. Only fetch encrypted Google login credentials from backend when starting a fresh login
-      // or when the WebView is actually on a Google sign-in page.
+      // 2. Check current WebView URL before fetching or pushing login credentials.
+      let liveStr = '';
       let onGoogleAuthPage = false;
       try {
         const live = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || '');
-        onGoogleAuthPage = /accounts\.google\.com|accounts\.youtube\.com/i.test(String(live || ''));
+        liveStr = String(live || '');
+        onGoogleAuthPage = /accounts\.google\.com|accounts\.youtube\.com/i.test(liveStr);
       } catch (e) {}
+
+      // If currently on the TOTP / SetSID step, push OTP immediately and never re-run email/password fill!
+      if (!forceReset && (/challenge\/totp|accounts\.youtube\.com\/accounts\/SetSID/i.test(liveStr) || this._totpFilling)) {
+        this.pushTotpFromBackend();
+        return;
+      }
 
       if (!forceReset && !onGoogleAuthPage) {
         return;
@@ -2271,7 +2286,7 @@ class FlowBrowserApp {
       } catch (err) {
         console.warn('[AppShell] Could not send credentials to webview:', err.message);
       }
-      if (onGoogleAuthPage) {
+      if (onGoogleAuthPage && !/challenge\/totp|accounts\.youtube\.com\/accounts\/SetSID/i.test(liveStr)) {
         this.fillGoogleLoginFields(payload).catch((e) => console.warn('[AppShell] fillGoogle:', e.message));
       }
     } else {
@@ -2830,7 +2845,7 @@ class FlowBrowserApp {
     return this._credAttemptId;
   }
 
-  async fetchGoogleCredential(stage, _retriedClock = false) {
+  async fetchGoogleCredential(stage, _retriedClock = false, _retriedAttempt = false) {
     if (!this.config?.authToken || !this.config?.serverUrl) return '';
     // 60 min Google lock: do not hit extension-start/step until it ends (no retry spam).
     if (this.googleLockRemainingMs() > 0 && !this._credAttemptId) return '';
@@ -2862,7 +2877,7 @@ class FlowBrowserApp {
         const stMs = typeof data.serverTime === 'number' ? data.serverTime : Date.parse(data.serverTime);
         if (Number.isFinite(stMs)) {
           await window.FlowCredChannel.setServerTime?.(stMs);
-          return this.fetchGoogleCredential(stage, true);
+          return this.fetchGoogleCredential(stage, true, _retriedAttempt);
         }
       }
       if (data && data.sealed && data.ciphertext) {
@@ -2871,7 +2886,35 @@ class FlowBrowserApp {
         if (this._credUsedStages) this._credUsedStages.add(stage);
         if (stage === 'email' && value) this._googleEmailMem = value;
         if (stage === 'password' && value) this._googlePasswordMem = value;
+        if (stage === 'otp' && value) {
+          this._lastOtpCode = value;
+          this._lastOtpFetchedAt = Date.now();
+          this._lastOtpExpiresAt = Number(data.expiresAt) || (Date.now() + 18000);
+        }
         return value;
+      }
+      if (data && data.code === 'GOOGLE_SESSION_LOCKED') {
+        this.noteGoogleLock(data);
+        return '';
+      }
+      if ((res.status === 401 || (data && data.code === 'CHANNEL_REQUIRED')) && !_retriedAttempt) {
+        console.warn('[AppShell] Credential channel expired — reopening channel for stage:', stage);
+        if (window.FlowCredChannel) {
+          window.FlowCredChannel.channelId = null;
+          window.FlowCredChannel.aesCryptoKey = null;
+        }
+        this._credAttemptId = null;
+        this._credUsedStages = new Set();
+        return this.fetchGoogleCredential(stage, _retriedClock, true);
+      }
+      if ((res.status === 400 || res.status === 403 || res.status === 404) && !_retriedAttempt) {
+        const errMsg = String((data && data.error) || '');
+        if (!/not configured/i.test(errMsg)) {
+          console.warn('[AppShell] Credential attempt stale/exhausted — opening fresh attempt for stage:', stage, errMsg);
+          this._credAttemptId = null;
+          this._credUsedStages = new Set();
+          return this.fetchGoogleCredential(stage, _retriedClock, true);
+        }
       }
       // Legacy plaintext must never be accepted
       if (data && data.value) {
@@ -2883,7 +2926,7 @@ class FlowBrowserApp {
       // Back off before opening a new attempt (avoids 1/sec start spam in Activity).
       const now = Date.now();
       if (!this._credFailUntil || now > this._credFailUntil) {
-        this._credFailUntil = now + 8000;
+        this._credFailUntil = now + 4000;
         this._credAttemptId = null;
       }
     }
@@ -2915,21 +2958,32 @@ class FlowBrowserApp {
       this._credUsedStages = new Set();
       this._googleCredServerId = curSrvId;
     }
+    if (this._googlePasswordMem) return this._googlePasswordMem;
     const fromApi = await this.fetchGoogleCredential('password');
     if (fromApi) return fromApi;
     return '';
   }
 
-  async pushTotpFromBackend() {
+  async pushTotpFromBackend(forceFresh = false) {
     const now = Date.now();
-    if (this._otpPushAt && now - this._otpPushAt < 2500) return;
+    if (!forceFresh && this._otpPushAt && now - this._otpPushAt < 1200) return;
     this._otpPushAt = now;
     this._totpFilling = true;
     this.postAuthOverlay({ show: true, captcha: false });
     if (!this.config?.authToken) return;
-    const otp = await this.fetchGoogleCredential('otp');
+    let otp = '';
+    const canReuseCached =
+      !forceFresh &&
+      this._lastOtpCode &&
+      (now - (this._lastOtpFetchedAt || 0) < 12000) &&
+      (!this._lastOtpExpiresAt || now < this._lastOtpExpiresAt - 4000);
+    if (canReuseCached) {
+      otp = this._lastOtpCode;
+    } else {
+      otp = await this.fetchGoogleCredential('otp');
+    }
     if (!otp) return;
-    console.log('[AppShell] Pushing backend TOTP, len', otp.length);
+    console.log('[AppShell] Pushing backend TOTP, len', otp.length, canReuseCached ? '(cached)' : '(fresh)');
     try { this.webview.send('apply-otp', { otp }); } catch (err) {}
     window.chrome?.webview?.postMessage(JSON.stringify({
       type: 'cmd',

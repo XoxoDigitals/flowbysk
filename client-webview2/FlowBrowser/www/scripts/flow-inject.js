@@ -3430,10 +3430,11 @@ function submitGoogleNext(kind, input) {
     return false;
   }
 
-  const rootSel = kind === 'password' ? '#passwordNext' : '#identifierNext';
+  const rootSel = kind === 'password' ? '#passwordNext' : (kind === 'totp' ? '#totpNext' : '#identifierNext');
   // Prefer real Next button — never form.submit()
   let next =
     document.querySelector(rootSel + ' button') ||
+    document.querySelector(rootSel + ' [role="button"]') ||
     document.querySelector(rootSel);
 
   // Fallback: visible button whose label is exactly Next (ignore "Forgot email?")
@@ -3955,12 +3956,14 @@ function runGoogleAutoLogin() {
       /\/challenge\/sk(?:otp)?(?:\/|$)/i.test(pathname)
     );
 
-  const totpInput = document.querySelector(
+  const totpSelector =
     'input[name="totpPin"], input#totpPin, input[id*="totp" i], ' +
     'input[type="tel"][autocomplete="one-time-code"], ' +
     'input[aria-label*="Enter code" i], input[aria-label*="Enter the code" i], ' +
-    'input[aria-label*="verification code" i]'
-  );
+    'input[aria-label*="verification code" i]';
+  const totpInput =
+    Array.from(document.querySelectorAll(totpSelector)).find(isElementVisible) ||
+    document.querySelector(totpSelector);
   // Do NOT treat the g.co/sc "Enter security code" box as TOTP
   const totpReady =
     totpInput &&
@@ -4068,35 +4071,68 @@ function runGoogleAutoLogin() {
       return;
     }
     const fillKey = `otp:${pathname}:fill`;
-    const nextKey = `otp:${pathname}:next`;
     const alreadyFilled =
       (totpInput.value || '').replace(/\s+/g, '') === String(credentials._otp).replace(/\s+/g, '');
     if (!autoLoginState.submittedKeys.has(fillKey) || !alreadyFilled) {
       fillInputValue(totpInput, String(credentials._otp));
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.otpFilled = true;
+      autoLoginState._otpFilledAt = now;
       autoLoginState.lastActionTime = now;
-      console.log('[Flow Preload] TOTP filled — waiting for Google to complete session (no Next yet)');
+      console.log('[Flow Preload] TOTP filled — scheduling Next submit');
     }
-    // Do not click Next immediately — Google finishes the session after the code settles.
-    // Soft fallback only if still on TOTP after a long wait.
-    if (!DEBUG_FILL_ONLY && !autoLoginState.submittedKeys.has(nextKey)) {
-      autoLoginState.submittedKeys.add(nextKey);
-      setTimeout(() => {
-        if (!totpInput.isConnected) return;
-        const val = (totpInput.value || '').replace(/\s+/g, '');
-        if (!val) return;
-        const stillTotp =
-          /\/challenge\/totp/i.test(location.pathname || '') ||
-          !!(document.querySelector('input[name="totpPin"], input#totpPin'));
-        if (!stillTotp) return;
-        console.log('[Flow Preload] TOTP still showing after wait — soft Next fallback');
-        submitGoogleNext('totp', totpInput);
-        const next =
-          document.querySelector('#totpNext button, #totpNext, #idvPreregisteredPhoneNext button') ||
-          buttonByLabel(/^next$/i);
-        if (next && isElementVisible(next)) hardClick(next);
-      }, 8000);
+
+    const triggerTotpNext = () => {
+      if (DEBUG_FILL_ONLY) return;
+      if (!totpInput.isConnected) return;
+      const val = (totpInput.value || '').replace(/\s+/g, '');
+      if (val.length < 6) return;
+      const stillTotp =
+        /\/challenge\/totp/i.test(location.pathname || '') ||
+        /\/SetSID/i.test(location.pathname || '') ||
+        !!(document.querySelector('input[name="totpPin"], input#totpPin'));
+      if (!stillTotp || isGoogleProcessing()) return;
+      const tNow = Date.now();
+      if (tNow - (window.__flowLastTotpSubmitAt || 0) < 2400) return;
+      window.__flowLastTotpSubmitAt = tNow;
+      autoLoginState.lastActionTime = tNow;
+      const next =
+        document.querySelector('#totpNext button') ||
+        document.querySelector('#totpNext [role="button"]') ||
+        document.querySelector('#idvPreregisteredPhoneNext button') ||
+        buttonByLabel(/^next$/i) ||
+        document.querySelector('#totpNext');
+      console.log('[Flow Preload] Submitting TOTP Next');
+      if (next && isElementVisible(next)) {
+        try {
+          next.removeAttribute('disabled');
+          next.setAttribute('aria-disabled', 'false');
+        } catch (e) {}
+        hardClick(next);
+        try {
+          const r = next.getBoundingClientRect();
+          const x = r.left + r.width / 2;
+          const y = r.top + r.height / 2;
+          if (x > 2 && y > 2) {
+            ipcRenderer.sendToHost('cdp-click', { x, y, kind: 'totp-next' });
+          }
+        } catch (e) {}
+      } else {
+        try {
+          totpInput.focus();
+          const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+          totpInput.dispatchEvent(new KeyboardEvent('keydown', opts));
+          totpInput.dispatchEvent(new KeyboardEvent('keypress', opts));
+          totpInput.dispatchEvent(new KeyboardEvent('keyup', opts));
+          if (totpInput.form) totpInput.form.requestSubmit();
+        } catch (e) {}
+      }
+    };
+
+    if (now - (autoLoginState._otpFilledAt || now) >= 550) {
+      triggerTotpNext();
+    } else {
+      setTimeout(triggerTotpNext, 600);
     }
     return;
   }
@@ -5021,8 +5057,15 @@ function applyCredentialsFromHost(creds) {
   if (!creds.email) return;
   const prevEmail = (credentials.email || '').toLowerCase();
   const nextEmail = String(creds.email || '').toLowerCase();
-  const forceReset = !!creds.forceReset || (prevEmail && nextEmail && prevEmail !== nextEmail);
-  credentials = { ...credentials, ...creds, imageOnly: creds.imageOnly !== undefined ? !!creds.imageOnly : !!credentials.imageOnly };
+  const savedOtp = credentials._otp || '';
+  const onMidChallenge = /\/challenge\/(totp|selection|pwd|sk|iap|dp|ootp)|\/SetSID/i.test(location.pathname || '');
+  const forceReset = !!creds.forceReset || (!onMidChallenge && prevEmail && nextEmail && prevEmail !== nextEmail);
+  credentials = {
+    ...credentials,
+    ...creds,
+    _otp: creds.forceReset ? '' : savedOtp,
+    imageOnly: creds.imageOnly !== undefined ? !!creds.imageOnly : !!credentials.imageOnly
+  };
   console.log('[Flow Preload] Credentials applied for:', credentials.email, forceReset ? '(reset)' : '');
   const onFlow =
     (location.hostname || '').includes('flow.google.com') ||
@@ -5034,7 +5077,7 @@ function applyCredentialsFromHost(creds) {
     setTimeout(() => runGoogleAutoLogin(), 200);
     return;
   }
-  if (forceReset || !prevEmail) {
+  if ((forceReset || !prevEmail) && (!onMidChallenge || creds.forceReset)) {
     resetAutoLoginState();
     credentials._otp = '';
   }
@@ -5051,11 +5094,15 @@ try {
 ipcRenderer.on('apply-otp', (event, data) => {
   const otp = data && (data.otp || data.value || data.code);
   if (!otp) return;
-  credentials._otp = String(otp);
+  const nextOtp = String(otp);
+  const changed = credentials._otp !== nextOtp;
+  credentials._otp = nextOtp;
   autoLoginState.otpRequested = true;
-  autoLoginState.submittedKeys.delete(`otp:${location.pathname}:fill`);
+  if (changed) {
+    autoLoginState.submittedKeys.delete(`otp:${location.pathname}:fill`);
+  }
   console.log('[Flow Preload] TOTP received from host');
-  setTimeout(() => runGoogleAutoLogin(), 250);
+  setTimeout(() => runGoogleAutoLogin(), 150);
 });
 
 // Request credentials from host immediately
@@ -5068,10 +5115,10 @@ function driveGoogle2faClicks() {
   if (!host.includes('accounts.google.com') && !host.includes('accounts.youtube.com')) return;
   const path = location.pathname || '';
   const now = Date.now();
-  // SetSID / totp UI — request OTP; Next click is owned by runGoogleAutoLogin
+  // SetSID / totp UI — request OTP if not yet received; Next click is owned by runGoogleAutoLogin
   const totpEl = document.querySelector('input[name="totpPin"], input#totpPin, input[autocomplete="one-time-code"]');
   if (/\/challenge\/totp/i.test(path) || /\/SetSID/i.test(path) || totpEl) {
-    if (now - (driveGoogle2faClicks._otpAt || 0) > 2000) {
+    if (!credentials._otp && now - (driveGoogle2faClicks._otpAt || 0) > 2500) {
       driveGoogle2faClicks._otpAt = now;
       try { ipcRenderer.sendToHost('request-otp'); } catch (e) {}
     }

@@ -1993,48 +1993,89 @@ public partial class MainWindow : Window
         {
             if (FlowView.CoreWebView2 == null) return;
             if (string.IsNullOrWhiteSpace(otp)) return;
-            var src = FlowView.CoreWebView2.Source ?? "";
-            // TOTP UI also appears on accounts.youtube.com/SetSID (no /challenge/totp in URL)
-            var looksAuthHost =
-                src.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase) ||
-                src.Contains("accounts.youtube.com", StringComparison.OrdinalIgnoreCase);
-            if (!looksAuthHost) return;
             var code = JsString(otp);
-            var script = $@"(() => {{
+            for (var attempt = 0; attempt < 4; attempt++)
+            {
+                if (FlowView.CoreWebView2 == null) return;
+                var src = FlowView.CoreWebView2.Source ?? "";
+                // TOTP UI also appears on accounts.youtube.com/SetSID (no /challenge/totp in URL)
+                var looksAuthHost =
+                    src.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase) ||
+                    src.Contains("accounts.youtube.com", StringComparison.OrdinalIgnoreCase);
+                if (!looksAuthHost) return;
+
+                var script = $@"(() => {{
   const otp = {code};
   const visible = (el) => {{
     if (!el) return false;
     const r = el.getBoundingClientRect();
-    return r.width > 2 && r.height > 2;
+    if (r.width <= 2 || r.height <= 2) return false;
+    const s = getComputedStyle(el);
+    return s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) !== 0;
   }};
-  const el = document.querySelector('input[name=""totpPin""], input#totpPin') ||
+  const el =
+    Array.from(document.querySelectorAll('input[name=""totpPin""], input#totpPin, input[autocomplete=""one-time-code""]')).find(visible) ||
     Array.from(document.querySelectorAll('input')).find(i => {{
       if (!visible(i) || i.type === 'hidden' || i.type === 'checkbox' || i.type === 'password') return false;
-      const b = ((i.getAttribute('aria-label')||'') + ' ' + (i.placeholder||'') + ' ' + (i.name||'')).toLowerCase();
+      const b = ((i.getAttribute('aria-label')||'') + ' ' + (i.placeholder||'') + ' ' + (i.name||'') + ' ' + (i.id||'')).toLowerCase();
       return /code|totp|otp/.test(b) || i.autocomplete === 'one-time-code';
-    }});
-  if (!el) return 'no-input';
+    }}) ||
+    document.querySelector('input[name=""totpPin""], input#totpPin');
+  if (!el || !visible(el)) return 'no-input';
   const already = (el.value || '').replace(/\s+/g,'') === String(otp).replace(/\s+/g,'');
   if (!already) {{
     const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
     const setter = desc && desc.set;
-    try {{ el.focus(); }} catch (e) {{}}
+    try {{ el.focus(); el.click(); }} catch (e) {{}}
     if (setter) setter.call(el, otp); else el.value = otp;
-    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    try {{ el.dispatchEvent(new InputEvent('input', {{ bubbles: true, cancelable: true, data: String(otp), inputType: 'insertText' }})); }}
+    catch (e) {{ el.dispatchEvent(new Event('input', {{ bubbles: true }})); }}
     el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    try {{ el.dispatchEvent(new KeyboardEvent('keyup', {{ bubbles: true, key: '6' }})); }} catch (e) {{}}
   }}
   setTimeout(() => {{
-    const btn = document.querySelector('#totpNext button, #totpNext') ||
-      Array.from(document.querySelectorAll('button')).find(b => /^\\s*next\\s*$/i.test((b.innerText || '').trim()));
+    if (!el.isConnected) return;
+    const val = (el.value || '').replace(/\s+/g, '');
+    if (val.length < 6) return;
+    const now = Date.now();
+    if (now - (window.__flowLastTotpSubmitAt || 0) < 2400) return;
+    window.__flowLastTotpSubmitAt = now;
+    const btn =
+      document.querySelector('#totpNext button') ||
+      document.querySelector('#totpNext [role=""button""]') ||
+      Array.from(document.querySelectorAll('button, div[role=""button""]')).find(b => visible(b) && /^\\s*next\\s*$/i.test((b.innerText || b.textContent || '').trim())) ||
+      document.querySelector('#totpNext');
     if (btn) {{
       try {{ btn.removeAttribute('disabled'); btn.setAttribute('aria-disabled','false'); }} catch (e) {{}}
+      try {{ btn.focus(); }} catch (e) {{}}
+      try {{
+        const r = btn.getBoundingClientRect();
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        for (const evType of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {{
+          btn.dispatchEvent(new MouseEvent(evType, {{ bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1 }}));
+        }}
+      }} catch (e) {{}}
       try {{ btn.click(); }} catch (e) {{}}
+    }} else {{
+      try {{
+        el.focus();
+        const opts = {{ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }};
+        el.dispatchEvent(new KeyboardEvent('keydown', opts));
+        el.dispatchEvent(new KeyboardEvent('keypress', opts));
+        el.dispatchEvent(new KeyboardEvent('keyup', opts));
+        if (el.form) el.form.requestSubmit();
+      }} catch (e) {{}}
     }}
-  }}, 1500);
+  }}, 650);
   return (already ? 'already-click:' : 'filled:') + (el.value || '').length;
 }})()";
-            var result = await FlowView.CoreWebView2.ExecuteScriptAsync(script);
-            Debug.WriteLine("[FillTotp] " + result);
+                var result = await FlowView.CoreWebView2.ExecuteScriptAsync(script);
+                Debug.WriteLine($"[FillTotp#{attempt}] {result}");
+                if (result == null || !result.Contains("no-input", StringComparison.OrdinalIgnoreCase))
+                    break;
+                await Task.Delay(550);
+            }
         }
         catch (Exception ex)
         {
