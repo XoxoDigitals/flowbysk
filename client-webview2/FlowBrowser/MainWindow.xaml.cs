@@ -18,7 +18,7 @@ public partial class MainWindow : Window
 {
     const double ChromeHeight = 88;
     double _chromeHeight = 88;
-    AppConfig _config = AppConfig.Load();
+    AppConfig _config = new();
     string _flowUserData = "";
     string _shellUserData = "";
     string _wwwRoot = "";
@@ -142,10 +142,20 @@ public partial class MainWindow : Window
                 // v6.1+: durable LocalAppData profiles + session.bin (cookies survive close)
                 DataPaths.EnsureDurableProfiles();
                 DataPaths.MigrateFromLegacy();
+                _config = AppConfig.Load();
+                if (_config.ActiveServer.HasValue && _config.ActiveServer.Value.ValueKind == JsonValueKind.Object)
+                {
+                    if (_config.ActiveServer.Value.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String)
+                        _activeFlowServerId = idEl.GetString() ?? "";
+                    if (_config.ActiveServer.Value.TryGetProperty("imageOnly", out var ioEl) &&
+                        (ioEl.ValueKind == JsonValueKind.True || ioEl.ValueKind == JsonValueKind.False))
+                        _flowCredImageOnly = ioEl.GetBoolean();
+                }
                 _shellUserData = RuntimeProfiles.CreateShell();
                 _flowUserData = RuntimeProfiles.CreateFlow();
                 Directory.CreateDirectory(_shellUserData);
                 Directory.CreateDirectory(_flowUserData);
+                LoadSavedFlowServerCookiesFromDisk();
             });
 
             const string bgFlags = "--disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding";
@@ -169,20 +179,22 @@ public partial class MainWindow : Window
                 options: flowOpts);
 
             var shellEnv = await shellEnvTask;
-            await ShellView.EnsureCoreWebView2Async(shellEnv);
+            var flowEnv = await flowEnvTask;
+            _shellEnv = shellEnv;
+
+            await Task.WhenAll(
+                ShellView.EnsureCoreWebView2Async(shellEnv),
+                FlowView.EnsureCoreWebView2Async(flowEnv));
+
             ConfigureShell();
             _shellReady = true;
             SetShellMode("full");
-            // Navigate ShellView first so login / workspace UI paints immediately while FlowView warms up
-            ShellView.CoreWebView2.Navigate("https://app.flowbrowser.localhost/ui/app-shell.html");
 
-            var flowEnv = await flowEnvTask;
-            await FlowView.EnsureCoreWebView2Async(flowEnv);
-            ConfigureFlow();
+            await ConfigureFlowAsync();
             _flowReady = true;
-            LoadSavedFlowServerCookiesFromDisk();
 
-            _ = InitBulkViewAsync(shellEnv);
+            // Navigate ShellView once FlowView and its injection scripts are 100% ready
+            ShellView.CoreWebView2.Navigate("https://app.flowbrowser.localhost/ui/app-shell.html");
         }
         catch (Exception ex)
         {
@@ -235,7 +247,7 @@ public partial class MainWindow : Window
             CoreWebView2HostResourceAccessKind.Allow);
     }
 
-    void ConfigureFlow()
+    async Task ConfigureFlowAsync()
     {
         var core = FlowView.CoreWebView2;
         core.Settings.AreDefaultContextMenusEnabled = false;
@@ -302,7 +314,6 @@ public partial class MainWindow : Window
 
         core.NavigationStarting += (_, e) =>
         {
-            ApplyWhaleUserAgent(core);
             var uri = e.Uri ?? "";
             var cur = FlowView.CoreWebView2?.Source ?? "";
 
@@ -399,6 +410,13 @@ public partial class MainWindow : Window
             NotifyBulkFlowUrl(url);
             PostToShell(new { type = "flow-event", @event = "did-navigate-in-page", url });
             PostToShell(new { type = "flow-event", @event = "page-title-updated", url });
+            if (_flowReady && FlowView.CoreWebView2 != null)
+            {
+                var imgFlag = _flowCredImageOnly ? "true" : "false";
+                var srvStr = JsString(_activeFlowServerId);
+                _ = FlowView.CoreWebView2.ExecuteScriptAsync(
+                    $"try {{ if (window.__flowSetImageOnlyMode) window.__flowSetImageOnlyMode({imgFlag}, {srvStr}); }} catch(e) {{}}");
+            }
             if (!string.IsNullOrWhiteSpace(_activeFlowServerId))
             {
                 _ = SaveCurrentFlowCookiesForServerAsync(_activeFlowServerId);
@@ -492,8 +510,8 @@ public partial class MainWindow : Window
             };
         };
 
-        _ = core.AddScriptToExecuteOnDocumentCreatedAsync(_flowInject);
-        InjectVeoContentBundle(core);
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(_flowInject);
+        await InjectVeoContentBundleAsync(core);
     }
 
     void ApplyWhaleUserAgent(CoreWebView2 core)
@@ -2563,47 +2581,56 @@ public partial class MainWindow : Window
         }
     }
 
-    async Task SaveCurrentFlowCookiesForServerAsync(string? serverId)
+    async Task<List<SavedCookieDto>> ReadCurrentCookieSnapshotAsync()
+    {
+        var list = new List<SavedCookieDto>();
+        if (FlowView.CoreWebView2 == null) return list;
+        var allCookies = await FlowView.CoreWebView2.CookieManager.GetCookiesAsync("");
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var c in allCookies)
+        {
+            if (string.IsNullOrEmpty(c.Name) || string.IsNullOrEmpty(c.Value)) continue;
+            var key = $"{c.Name}|{c.Domain}|{c.Path}";
+            if (!seen.Add(key)) continue;
+            list.Add(new SavedCookieDto
+            {
+                Name = c.Name,
+                Value = c.Value,
+                Domain = c.Domain,
+                Path = string.IsNullOrWhiteSpace(c.Path) ? "/" : c.Path,
+                Expires = c.Expires,
+                IsSession = c.IsSession,
+                IsHttpOnly = c.IsHttpOnly,
+                IsSecure = c.IsSecure,
+                SameSite = c.SameSite.ToString()
+            });
+        }
+        return list;
+    }
+
+    async Task SaveCurrentFlowCookiesForServerAsync(string? serverId, bool allowBlankSource = false)
     {
         if (FlowView.CoreWebView2 == null || string.IsNullOrWhiteSpace(serverId)) return;
         try
         {
             var curUrl = (FlowView.CoreWebView2.Source ?? "").ToLowerInvariant();
-            if (string.IsNullOrWhiteSpace(curUrl) || curUrl == "about:blank") return;
             if (_onGoogleAuth || _authLoginActive || IsGoogleAuthRelatedUrl(curUrl)) return;
             if (curUrl.Contains("/about") || curUrl.Contains("/landing")) return;
 
-            var isOnAuthenticatedWorkspace =
-                curUrl.Contains("labs.google/fx") ||
-                curUrl.Contains("flow.google.com") ||
-                curUrl.Contains("gemini.google.com");
-            if (!isOnAuthenticatedWorkspace) return;
+            if (!allowBlankSource)
+            {
+                if (string.IsNullOrWhiteSpace(curUrl) || curUrl == "about:blank") return;
+                var isOnAuthenticatedWorkspace =
+                    curUrl.Contains("labs.google/fx") ||
+                    curUrl.Contains("flow.google.com") ||
+                    curUrl.Contains("gemini.google.com");
+                if (!isOnAuthenticatedWorkspace) return;
+            }
 
             // Snapshot the ENTIRE cookie jar (.google.com, accounts.google.com, labs.google, flow.google.com, gemini.google.com)
             // so this server account is 100% isolated with its own Google + Flow cookies!
-            var allCookies = await FlowView.CoreWebView2.CookieManager.GetCookiesAsync("");
-            var list = new List<SavedCookieDto>();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var c in allCookies)
-            {
-                if (string.IsNullOrEmpty(c.Name) || string.IsNullOrEmpty(c.Value)) continue;
-                var key = $"{c.Name}|{c.Domain}|{c.Path}";
-                if (!seen.Add(key)) continue;
-                list.Add(new SavedCookieDto
-                {
-                    Name = c.Name,
-                    Value = c.Value,
-                    Domain = c.Domain,
-                    Path = string.IsNullOrWhiteSpace(c.Path) ? "/" : c.Path,
-                    Expires = c.Expires,
-                    IsSession = c.IsSession,
-                    IsHttpOnly = c.IsHttpOnly,
-                    IsSecure = c.IsSecure,
-                    SameSite = c.SameSite.ToString()
-                });
-            }
-
+            var list = await ReadCurrentCookieSnapshotAsync();
             if (!IsValidIsolatedCookieSnapshot(list))
             {
                 return;
@@ -2623,20 +2650,36 @@ public partial class MainWindow : Window
         if (FlowView.CoreWebView2 == null) return false;
         try
         {
-            // 1. If we were actively running on a server in this session, snapshot its cookies if authenticated
             var prevId = !string.IsNullOrWhiteSpace(_activeFlowServerId) ? _activeFlowServerId : (fromServerId ?? "");
-            if (!string.IsNullOrWhiteSpace(prevId) && !string.IsNullOrWhiteSpace(_activeFlowServerId))
+            var nextId = toServerId ?? "";
+
+            // 1. Snapshot current cookies for prevId if valid (even if FlowView is still on about:blank at startup)
+            if (!string.IsNullOrWhiteSpace(prevId))
             {
-                await SaveCurrentFlowCookiesForServerAsync(prevId);
+                await SaveCurrentFlowCookiesForServerAsync(prevId, allowBlankSource: true);
             }
 
-            var nextId = toServerId ?? "";
+            // 2. If staying on the SAME server and the active CookieManager already holds valid Google auth cookies,
+            // keep them in place instead of wiping and re-creating cookies unnecessarily.
+            if (!string.IsNullOrWhiteSpace(nextId) &&
+                (string.IsNullOrWhiteSpace(prevId) || string.Equals(prevId, nextId, StringComparison.OrdinalIgnoreCase)))
+            {
+                var currentList = await ReadCurrentCookieSnapshotAsync();
+                if (IsValidIsolatedCookieSnapshot(currentList))
+                {
+                    _activeFlowServerId = nextId;
+                    _flowServerCookies[nextId] = currentList;
+                    SaveFlowServerCookiesToDisk();
+                    return true;
+                }
+            }
+
             _activeFlowServerId = nextId;
 
-            // 2. Always wipe ALL cookies in the active WebView2 cookie jar so accounts NEVER mix or leak sessions!
+            // 3. Switching servers (or current jar has no valid auth cookies): wipe ALL cookies so accounts never mix!
             FlowView.CoreWebView2.CookieManager.DeleteAllCookies();
 
-            // 3. If the target server has a valid isolated cookie jar saved, restore all of its cookies now
+            // 4. If the target server has a valid isolated cookie jar saved, restore all of its cookies now
             if (!string.IsNullOrWhiteSpace(nextId) &&
                 _flowServerCookies.TryGetValue(nextId, out var saved) &&
                 IsValidIsolatedCookieSnapshot(saved))

@@ -31,8 +31,18 @@
 })();
 const { ipcRenderer } = window;
 
-if (window.__flowInjectBootstrapped || location.hostname === 'app.flowbrowser.localhost' || location.hostname === 'flowbrowser.local') {
-  // Skip duplicate inject or built-in local studio pages (TTS STUDIO)
+const __flowIsSubFrame = (() => {
+  try { return window !== window.top; } catch (e) { return true; }
+})();
+const __flowIsRecaptchaFrame = /recaptcha|challenge/i.test(location.href || '');
+
+if (
+  window.__flowInjectBootstrapped ||
+  location.hostname === 'app.flowbrowser.localhost' ||
+  location.hostname === 'flowbrowser.local' ||
+  (__flowIsSubFrame && !__flowIsRecaptchaFrame)
+) {
+  // Skip duplicate inject, built-in local studio pages (TTS STUDIO), or non-captcha background iframes
 } else {
   window.__flowInjectBootstrapped = true;
 
@@ -458,26 +468,6 @@ function getActivePromptMode() {
 }
 
 function getActiveBatchMultiplier() {
-  try {
-    const multipliers = Array.from(document.querySelectorAll('button, [role="radio"], [role="tab"]')).filter(b => {
-      const t = (b.innerText || b.textContent || '').trim().toLowerCase();
-      return /^x[1-4]$/.test(t);
-    });
-
-    for (const b of multipliers) {
-      const t = (b.innerText || b.textContent || '').trim().toLowerCase();
-      const style = window.getComputedStyle(b);
-      const isSelected = b.getAttribute('aria-checked') === 'true' ||
-                         b.getAttribute('aria-selected') === 'true' ||
-                         b.classList.contains('active') ||
-                         b.classList.contains('selected') ||
-                         (style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)' && !style.backgroundColor.includes('transparent'));
-      if (isSelected) {
-        const num = parseInt(t.replace('x', ''), 10);
-        if (!isNaN(num) && num >= 1 && num <= 4) return num;
-      }
-    }
-  } catch (e) {}
   return 1;
 }
 
@@ -2037,8 +2027,12 @@ loadSavedProjectsFromDevice();
     const savedFakeModel = sessionStorage.getItem('__pakflow_fake_model');
     if (savedFakeModel && creditMap[savedFakeModel]) {
       fakeModelName = savedFakeModel;
+    } else {
+      fakeModelName = 'Veo 3.1 - Lite';
     }
-  } catch (e) {}
+  } catch (e) {
+    fakeModelName = 'Veo 3.1 - Lite';
+  }
 
   function injectPakflowStyles() {
     if (!isProtectedWorkspaceHost()) return;
@@ -2046,10 +2040,10 @@ loadSavedProjectsFromDevice();
       const style = document.createElement('style');
       style.id = 'pakflow-core-style';
       style.textContent =
-        "button[data-fake-model]{color:transparent!important;position:relative!important}" +
-        "button[data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path){color:transparent!important}" +
-        "button[data-fake-model]::after{content:attr(data-fake-model)!important;position:absolute!important;left:var(--fake-model-left,14px)!important;top:50%!important;transform:translateY(-50%)!important;color:#fff!important;font-family:'Google Sans Text','Google Sans',sans-serif!important;font-size:13px!important;font-weight:500!important;pointer-events:none!important;white-space:nowrap!important}" +
-        "button[data-fake-model] i,button[data-fake-model] .google-symbols,button[data-fake-model] mat-icon,button[data-fake-model] svg{color:#fff!important;visibility:visible!important}" +
+        "button[data-fake-model],[role='combobox'][data-fake-model]{color:transparent!important;position:relative!important}" +
+        "button[data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path),[role='combobox'][data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path){color:transparent!important}" +
+        "button[data-fake-model]::after,[role='combobox'][data-fake-model]::after{content:attr(data-fake-model)!important;position:absolute!important;left:var(--fake-model-left,14px)!important;top:50%!important;transform:translateY(-50%)!important;color:#fff!important;font-family:'Google Sans Text','Google Sans',sans-serif!important;font-size:13px!important;font-weight:500!important;pointer-events:none!important;white-space:nowrap!important}" +
+        "button[data-fake-model] i,button[data-fake-model] .google-symbols,button[data-fake-model] mat-icon,button[data-fake-model] svg,[role='combobox'][data-fake-model] i,[role='combobox'][data-fake-model] .google-symbols,[role='combobox'][data-fake-model] mat-icon,[role='combobox'][data-fake-model] svg{color:#fff!important;visibility:visible!important}" +
         "[role='menuitem'][data-hide-lp='true'],[role='option'][data-hide-lp='true']{height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
         "flow-menu-item:has([data-hide-lp='true']){height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
         "[role='menuitem'][data-fake-active='true'],[role='option'][data-fake-active='true']{background-color:rgba(255,255,255,.12)!important;border-radius:12px!important}" +
@@ -2059,8 +2053,7 @@ loadSavedProjectsFromDevice();
         "a[data-fake-credits]{color:transparent!important;position:relative!important}" +
         "a[data-fake-credits] *{color:transparent!important}" +
         "a[data-fake-credits]::after{content:attr(data-fake-credits) ' credits'!important;position:absolute!important;left:0.25rem!important;top:0!important;color:#DADCE0!important;text-decoration:underline!important;white-space:nowrap!important}" +
-        "button[data-hide-tab='true']{display:none!important}" +
-        "mat-button-toggle:has(button[data-hide-tab='true']){display:none!important}" +
+        "button[data-hide-tab='true'],[data-hide-tab='true'],mat-button-toggle:has(button[data-hide-tab='true']),mat-button-toggle:has([data-hide-tab='true']){display:none!important}" +
         "mat-button-toggle{flex:1!important;}" +
         "button[data-hide-submit='true']{display:none!important;pointer-events:none!important;opacity:0!important}" +
         "button[data-hide-signout='true'],[data-hide-signout='true']{display:none!important;visibility:hidden!important;pointer-events:none!important;opacity:0!important;height:0!important;min-height:0!important;padding:0!important;margin:0!important;}" +
@@ -2109,11 +2102,14 @@ loadSavedProjectsFromDevice();
   else document.addEventListener('DOMContentLoaded', injectPakflowStyles);
 
   try {
+    let lastSignoutObsAt = 0;
     const signoutObserver = new MutationObserver(() => {
-      if (isProtectedWorkspaceHost()) {
-        purgeSignoutElements();
-        spoofAccountIdentityInDom();
-      }
+      if (!isProtectedWorkspaceHost()) return;
+      const now = Date.now();
+      if (now - lastSignoutObsAt < 500) return;
+      lastSignoutObsAt = now;
+      purgeSignoutElements();
+      spoofAccountIdentityInDom();
     });
     if (document.documentElement) {
       signoutObserver.observe(document.documentElement, { childList: true, subtree: true });
@@ -2205,20 +2201,65 @@ loadSavedProjectsFromDevice();
     return { target: null, isLp: false };
   }
 
-  function applyFakeModelToDomNow() {
-    if (!fakeModelName) return;
-    const modelMenuBtn = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(
-      (b) =>
-        b.textContent &&
-        (b.textContent.includes('Veo') || b.textContent.includes('Omni') || b.textContent.includes('Lower Priority'))
+  function findModelDropdownButton() {
+    const allBtns = Array.from(document.querySelectorAll('button, [role="combobox"]'));
+    return (
+      allBtns.find((b) => {
+        if (b.closest('#flow-my-projects-dock, #flow-saved-projects-backdrop, header')) return false;
+        const txt = (b.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!txt || txt.length > 70) return false;
+        if (txt.includes('Extend (') || txt.includes('pen_magic')) return false;
+        return txt.includes('Veo') || txt.includes('Omni') || txt.includes('Lower Priority');
+      }) || null
     );
+  }
+
+  function syncCreditCostInDom(hideCompletely) {
+    const creditLink = document.querySelector('a[href*="g1_ai_credit_menu"], a[href*="credit_menu"], a[href*="ai_credit"]');
+    const containers = new Set();
+    if (creditLink) {
+      containers.add(creditLink.parentElement || creditLink);
+    }
+    document.querySelectorAll('div, p, span').forEach((el) => {
+      if (el.children.length <= 3) {
+        const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (txt.startsWith('Generating will use') && txt.length < 80) {
+          containers.add(el);
+        }
+      }
+    });
+    if (hideCompletely) {
+      containers.forEach((row) => {
+        row.style.setProperty('display', 'none', 'important');
+      });
+      if (creditLink) creditLink.removeAttribute('data-fake-credits');
+      return;
+    }
+    const targetCredits = creditMap[fakeModelName || 'Veo 3.1 - Lite'] || '5';
+    containers.forEach((row) => {
+      row.style.removeProperty('display');
+      const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+      let tn;
+      while ((tn = walker.nextNode())) {
+        const val = tn.nodeValue || '';
+        if (/\b\d+\s*credits\b/i.test(val)) {
+          const desired = val.replace(/\b\d+\s*credits\b/i, targetCredits + ' credits');
+          if (tn.nodeValue !== desired) tn.nodeValue = desired;
+        }
+      }
+    });
+    if (creditLink) {
+      creditLink.removeAttribute('data-fake-credits');
+    }
+  }
+
+  function applyFakeModelToDomNow() {
+    if (!fakeModelName) fakeModelName = 'Veo 3.1 - Lite';
+    const modelMenuBtn = findModelDropdownButton();
     if (modelMenuBtn) {
       modelMenuBtn.setAttribute('data-fake-model', fakeModelName);
     }
-    const creditMenuLink = document.querySelector('a[href*="g1_ai_credit_menu"]');
-    if (creditMenuLink && creditMap[fakeModelName]) {
-      creditMenuLink.setAttribute('data-fake-credits', creditMap[fakeModelName]);
-    }
+    syncCreditCostInDom(false);
   }
 
   function closeOpenModelDropdownMenu() {
@@ -2232,7 +2273,7 @@ loadSavedProjectsFromDevice();
       setTimeout(() => {
         const stillOpen = document.querySelector('[role="menu"], [role="listbox"]');
         if (stillOpen) {
-          const expandedTrigger = document.querySelector('button[aria-haspopup="menu"][aria-expanded="true"]');
+          const expandedTrigger = document.querySelector('button[aria-expanded="true"], [role="combobox"][aria-expanded="true"]');
           if (expandedTrigger) {
             try { expandedTrigger.click(); } catch (e) {}
           }
@@ -2302,6 +2343,7 @@ loadSavedProjectsFromDevice();
         const matched = matchKnownModelName(itemText);
         if (matched) {
           fakeModelName = matched;
+          initPakflowDomEngine._userExplicitlyPickedModel = true;
           try { sessionStorage.setItem('__pakflow_fake_model', fakeModelName); } catch (err) {}
           applyFakeModelToDomNow();
         }
@@ -2573,8 +2615,11 @@ loadSavedProjectsFromDevice();
 
     if (window.location.pathname !== lastPakflowPathname) {
       lastPakflowPathname = window.location.pathname;
-      setupState = 6;
-      setupStartTime = now;
+      setupState = 0;
+      setupStartTime = 0;
+      if (!initPakflowDomEngine._userExplicitlyPickedModel) {
+        fakeModelName = 'Veo 3.1 - Lite';
+      }
     }
 
     const runHeavyDomPass = now - (initPakflowDomEngine._lastHeavyDomPass || 0) >= 600;
@@ -2871,24 +2916,63 @@ loadSavedProjectsFromDevice();
 
     isLockedBySubmission = false;
 
-    // Hide sign-out buttons & x2/x3/x4 batch multiplier tabs
-    const allButtons = document.querySelectorAll('button');
+    // Hide sign-out buttons & x2/x3/x4 batch multiplier tabs, and auto-select x1 when popover is open
+    const allButtons = document.querySelectorAll('button, [role="tab"], [role="radio"]');
+    let x1Btn = null;
+    let nonX1Selected = false;
     allButtons.forEach((b) => {
-      if (runHeavyDomPass && (b.textContent || '').trim().includes('sign out')) {
+      if (runHeavyDomPass && (b.textContent || '').trim().toLowerCase().includes('sign out')) {
         if (b.getAttribute('data-hide-signout') !== 'true') {
           b.setAttribute('data-hide-signout', 'true');
         }
       }
-      const role = b.getAttribute('role');
-      if (role === 'tab' || role === 'radio') {
-        const t = (b.textContent || '').trim().toLowerCase();
-        if (['x2', 'x3', 'x4', '2x', '3x', '4x'].includes(t)) {
-          if (b.getAttribute('data-hide-tab') !== 'true') {
-            b.setAttribute('data-hide-tab', 'true');
-          }
+      const cleanLbl = getButtonCleanLabel(b).toLowerCase();
+      const rawLbl = (b.textContent || '').trim().toLowerCase();
+      const t = cleanLbl || rawLbl;
+      if (t === 'x1' || t === '1x') {
+        x1Btn = b;
+      } else if (['x2', 'x3', 'x4', '2x', '3x', '4x'].includes(t)) {
+        if (b.getAttribute('data-hide-tab') !== 'true') {
+          b.setAttribute('data-hide-tab', 'true');
+        }
+        if (
+          b.getAttribute('aria-selected') === 'true' ||
+          b.getAttribute('aria-pressed') === 'true' ||
+          b.getAttribute('aria-checked') === 'true' ||
+          b.getAttribute('data-state') === 'active' ||
+          b.getAttribute('data-state') === 'on' ||
+          b.classList.contains('active') ||
+          b.classList.contains('selected')
+        ) {
+          nonX1Selected = true;
         }
       }
     });
+
+    const promptPillBtn = Array.from(document.querySelectorAll('button')).find((b) => {
+      const txt = (b.textContent || '').trim();
+      return /\b(Video|Image)\b/i.test(txt) && (/(4s|6s|8s|10s|x[1-4]|16:9|9:16)/i.test(txt) || txt.includes('·'));
+    });
+    const pillShowsNonX1 = !!(promptPillBtn && /\bx[2-4]\b/i.test(promptPillBtn.textContent || ''));
+
+    // If x1 button is in the DOM (settings popover open) and x1 is not active (or pill shows x2/x3/x4), click x1 immediately!
+    if (x1Btn) {
+      const x1ExplicitlyActive =
+        !nonX1Selected &&
+        !pillShowsNonX1 &&
+        (x1Btn.getAttribute('aria-selected') === 'true' ||
+          x1Btn.getAttribute('aria-pressed') === 'true' ||
+          x1Btn.getAttribute('aria-checked') === 'true' ||
+          x1Btn.getAttribute('data-state') === 'active' ||
+          x1Btn.getAttribute('data-state') === 'on' ||
+          x1Btn.classList.contains('active') ||
+          x1Btn.classList.contains('selected'));
+      if (!x1ExplicitlyActive && now - (initPakflowDomEngine._lastX1ClickAt || 0) > 450) {
+        initPakflowDomEngine._lastX1ClickAt = now;
+        simulateClick(x1Btn);
+        try { x1Btn.click(); } catch (e) {}
+      }
+    }
 
     // Update total credits link (a[href*='flow_ai_credits_page']) with database credits
     const totalCreditsLink = document.querySelector("a[href*='flow_ai_credits_page']");
@@ -2905,7 +2989,7 @@ loadSavedProjectsFromDevice();
         document.body.setAttribute('data-flow-image-only', 'true');
       }
       // Hide Video tab, Frames tab, Video models, Durations (4s/6s/8s/10s), Agent, and credit cost line (keep Tools / Apps / Create tool enabled!)
-      document.querySelectorAll('button, [role="tab"], [role="radio"]').forEach((b) => {
+      document.querySelectorAll('button, [role="tab"], [role="radio"], [role="combobox"]').forEach((b) => {
         const cleanLbl = getButtonCleanLabel(b).toLowerCase();
         if (cleanLbl === 'tools' || cleanLbl === 'apps' || cleanLbl.includes('create tool')) {
           if (b.getAttribute('data-hide-image-only') === 'true') {
@@ -2929,62 +3013,57 @@ loadSavedProjectsFromDevice();
             b.setAttribute('data-hide-image-only', 'true');
           }
         }
-        if (b.getAttribute('aria-haspopup') === 'menu') {
-          const bt = (b.textContent || '');
-          if (bt.includes('Veo') || bt.includes('Omni') || bt.includes('Lower Priority')) {
-            if (b.getAttribute('data-hide-image-only') !== 'true') {
-              b.setAttribute('data-hide-image-only', 'true');
-            }
+        const bt = (b.textContent || '').trim();
+        if (bt.length < 70 && !bt.includes('Extend (') && (bt.includes('Veo') || bt.includes('Omni') || bt.includes('Lower Priority'))) {
+          if (b.getAttribute('data-hide-image-only') !== 'true') {
+            b.setAttribute('data-hide-image-only', 'true');
           }
         }
       });
 
       // Hide "Generating will use X credits" in Image-Only mode (0 cost)
-      const creditMenuLinkImg = document.querySelector('a[href*="g1_ai_credit_menu"]');
-      if (creditMenuLinkImg) {
-        const creditRow = creditMenuLinkImg.parentElement || creditMenuLinkImg;
-        creditRow.style.setProperty('display', 'none', 'important');
-      }
+      syncCreditCostInDom(true);
 
-      // Ensure Flow is switched to Image tab
+      // Ensure Flow is switched to Image tab and x1
       const allModeBtns = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]'));
       const imgTabBtn = allModeBtns.find((b) => getButtonCleanLabel(b).toLowerCase() === 'image');
       if (imgTabBtn) {
         const imgSelected =
           imgTabBtn.getAttribute('aria-selected') === 'true' ||
           imgTabBtn.getAttribute('aria-pressed') === 'true' ||
+          imgTabBtn.getAttribute('data-state') === 'active' ||
           imgTabBtn.classList.contains('active') ||
           imgTabBtn.classList.contains('selected');
-        if (!imgSelected && now - (initPakflowDomEngine._lastImgTabClick || 0) > 600) {
+        if (!imgSelected && now - (initPakflowDomEngine._lastImgTabClick || 0) > 500) {
           initPakflowDomEngine._lastImgTabClick = now;
           simulateClick(imgTabBtn);
           try { imgTabBtn.click(); } catch (e) {}
-          if (initPakflowDomEngine._autoOpenedForImageSwitch) {
-            initPakflowDomEngine._autoOpenedForImageSwitch = false;
-            setTimeout(() => {
-              try {
-                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
-              } catch (e) {}
-            }, 180);
-          }
+        }
+        if (initPakflowDomEngine._autoOpenedForImageSwitch && (imgSelected || now - (initPakflowDomEngine._lastImageSwitchAttempt || 0) > 250)) {
+          initPakflowDomEngine._autoOpenedForImageSwitch = false;
+          setTimeout(() => {
+            if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
+            try {
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+            } catch (e) {}
+          }, 120);
         }
       } else {
-        // Settings popover is closed; check if the bottom prompt pill button still says "Video"
-        const videoPillBtn = Array.from(document.querySelectorAll('button')).find((b) => {
-          const txt = (b.textContent || '').trim();
-          return /\bVideo\b/i.test(txt) && (/(4s|6s|8s|10s|x[1-4])/i.test(txt) || txt.includes('·'));
-        });
-        if (videoPillBtn && now - (initPakflowDomEngine._lastImageSwitchAttempt || 0) > 1500) {
+        // Settings popover is closed; check if the bottom prompt pill button still says "Video" or "x2/x3/x4"
+        const needPillFix =
+          promptPillBtn &&
+          (/\bVideo\b/i.test(promptPillBtn.textContent || '') || /\bx[2-4]\b/i.test(promptPillBtn.textContent || ''));
+        if (needPillFix && now - (initPakflowDomEngine._lastImageSwitchAttempt || 0) > 1500) {
           initPakflowDomEngine._lastImageSwitchAttempt = now;
           initPakflowDomEngine._autoOpenedForImageSwitch = true;
-          simulateClick(videoPillBtn);
-          try { videoPillBtn.click(); } catch (e) {}
+          if (document.body) document.body.setAttribute('data-pakflow-boot-hide', 'true');
+          simulateClick(promptPillBtn);
+          try { promptPillBtn.click(); } catch (e) {}
         }
       }
 
       isImageModeActive = true;
-      document.querySelectorAll('button[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
-      document.querySelectorAll('a[data-fake-credits]').forEach((a) => a.removeAttribute('data-fake-credits'));
+      document.querySelectorAll('[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
       return;
     }
 
@@ -2999,27 +3078,26 @@ loadSavedProjectsFromDevice();
     // Detect Image Mode vs Video Mode on normal (Video + Image) accounts
     const imgTabSelected = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]')).find(
       (b) =>
-        (b.getAttribute('aria-selected') === 'true' || b.getAttribute('aria-pressed') === 'true' || b.classList.contains('active')) &&
+        (b.getAttribute('aria-selected') === 'true' ||
+          b.getAttribute('aria-pressed') === 'true' ||
+          b.getAttribute('data-state') === 'active' ||
+          b.classList.contains('active')) &&
         getButtonCleanLabel(b).toLowerCase() === 'image'
     );
-    const nanoMenuTrigger = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(
-      (b) => b.textContent && b.textContent.includes('Nano')
+    const nanoMenuTrigger = Array.from(document.querySelectorAll('button, [role="combobox"]')).find(
+      (b) => b.textContent && b.textContent.length < 70 && b.textContent.includes('Nano')
     );
-    const imagePillActive = Array.from(document.querySelectorAll('button')).find((b) => {
-      const txt = (b.textContent || '').trim();
-      return /\bImage\b/i.test(txt) && txt.includes('·');
-    });
+    const imagePillActive = promptPillBtn && /\bImage\b/i.test(promptPillBtn.textContent || '');
     isImageModeActive = !!(imgTabSelected || nanoMenuTrigger || imagePillActive);
 
     if (isImageModeActive) {
       setupState = 6;
-      document.querySelectorAll('button[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
-      document.querySelectorAll('a[data-fake-credits]').forEach((a) => a.removeAttribute('data-fake-credits'));
-      // Hide credit cost line in Image mode since Image generation is 0 cost
-      const creditMenuLinkImg = document.querySelector('a[href*="g1_ai_credit_menu"]');
-      if (creditMenuLinkImg && creditMenuLinkImg.parentElement) {
-        creditMenuLinkImg.parentElement.style.setProperty('display', 'none', 'important');
+      if (document.body && document.body.getAttribute('data-pakflow-boot-hide') === 'true') {
+        document.body.removeAttribute('data-pakflow-boot-hide');
       }
+      document.querySelectorAll('[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
+      // Hide credit cost line in Image mode since Image generation is 0 cost
+      syncCreditCostInDom(true);
       const subBtn = Array.from(document.querySelectorAll('button')).find(
         (b) => b.textContent && b.textContent.includes('arrow_forward')
       );
@@ -3027,11 +3105,7 @@ loadSavedProjectsFromDevice();
       return;
     }
 
-    const modelMenuBtn = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(
-      (b) =>
-        b.textContent &&
-        (b.textContent.includes('Veo') || b.textContent.includes('Omni') || b.textContent.includes('Lower Priority'))
-    );
+    let modelMenuBtn = findModelDropdownButton();
     const submitBtn = Array.from(document.querySelectorAll('button')).find(
       (b) => b.textContent && b.textContent.includes('arrow_forward')
     );
@@ -3044,7 +3118,70 @@ loadSavedProjectsFromDevice();
       fakeModelName = 'Veo 3.1 - Lite';
     }
 
-    // Spoof modelMenuBtn with fakeModelName, hide [Lower Priority] menu items, and spoof credits link
+    // If the bottom pill shows x2/x3/x4 after setup finished, trigger a quick silent setup pass to switch to x1 + [Lower Priority]
+    if (pillShowsNonX1 && setupState >= 6 && now - (initPakflowDomEngine._lastSetupCompletedAt || 0) > 2500) {
+      setupState = 0;
+      setupStartTime = 0;
+    }
+
+    // Automatic silent project setup: open settings popover -> click x1 -> open model dropdown -> select [Lower Priority] -> close popover
+    if (setupState < 6 && promptPillBtn) {
+      if (!setupStartTime) setupStartTime = now;
+      if (now - setupStartTime > 1200) {
+        setupState = 6;
+        initPakflowDomEngine._lastSetupCompletedAt = now;
+        if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
+        closeOpenModelDropdownMenu();
+      } else if (setupState === 0) {
+        if (document.body) document.body.setAttribute('data-pakflow-boot-hide', 'true');
+        if (!modelMenuBtn) {
+          simulateClick(promptPillBtn);
+          try { promptPillBtn.click(); } catch (e) {}
+        }
+        setupState = 1;
+        lastActionTime = now;
+      } else if (setupState === 1 && now - lastActionTime >= 60) {
+        if (x1Btn) {
+          simulateClick(x1Btn);
+          try { x1Btn.click(); } catch (e) {}
+        }
+        modelMenuBtn = findModelDropdownButton();
+        if (modelMenuBtn) {
+          if ((modelMenuBtn.textContent || '').includes('Lower Priority')) {
+            setupState = 3;
+            lastActionTime = now;
+          } else {
+            simulateClick(modelMenuBtn);
+            try { modelMenuBtn.click(); } catch (e) {}
+            setupState = 2;
+            lastActionTime = now;
+          }
+        } else if (now - setupStartTime > 500) {
+          setupState = 3;
+          lastActionTime = now;
+        }
+      } else if (setupState === 2 && now - lastActionTime >= 60) {
+        const menuItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
+        if (menuItems.length > 0) {
+          triggerLowerPrioritySelection(menuItems);
+          setupState = 3;
+          lastActionTime = now;
+        } else if (now - lastActionTime > 350) {
+          setupState = 3;
+          lastActionTime = now;
+        }
+      } else if (setupState === 3 && now - lastActionTime >= 60) {
+        if (findModelDropdownButton() && promptPillBtn) {
+          simulateClick(promptPillBtn);
+          try { promptPillBtn.click(); } catch (e) {}
+        }
+        if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
+        setupState = 6;
+        initPakflowDomEngine._lastSetupCompletedAt = now;
+      }
+    }
+
+    // Spoof modelMenuBtn with fakeModelName, hide [Lower Priority] menu items, and spoof credits line
     if (modelMenuBtn) {
       try {
         const btnRect = modelMenuBtn.getBoundingClientRect();
@@ -3078,17 +3215,9 @@ loadSavedProjectsFromDevice();
       }
     });
 
-    const creditMenuLink = document.querySelector('a[href*="g1_ai_credit_menu"]');
-    if (creditMenuLink && creditMap[fakeModelName]) {
-      if (creditMenuLink.parentElement) {
-        creditMenuLink.parentElement.style.removeProperty('display');
-      }
-      if (creditMenuLink.getAttribute('data-fake-credits') !== creditMap[fakeModelName]) {
-        creditMenuLink.setAttribute('data-fake-credits', creditMap[fakeModelName]);
-      }
-    }
+    syncCreditCostInDom(false);
 
-    if (document.body && document.body.getAttribute('data-pakflow-boot-hide') === 'true') {
+    if (setupState >= 6 && document.body && document.body.getAttribute('data-pakflow-boot-hide') === 'true') {
       document.body.removeAttribute('data-pakflow-boot-hide');
     }
   }, 50);

@@ -198,8 +198,9 @@ static class WwwExtractor
     }
 
     /// <summary>
-    /// Wipe extracted UI on exit so unpacked www files never sit on disk when the app is closed.
-    /// Never touch WebView profiles (d\f / d\s) or session.bin.
+    /// Clean up stale UI folders on exit while keeping the current version's scrubbed UI cache
+    /// so subsequent launches start instantaneously. Sensitive scripts (flow-inject.js, veo-content-bundle.js)
+    /// are never stored on disk (scrubbed immediately on extraction).
     /// </summary>
     public static void WipeTempWww()
     {
@@ -212,11 +213,20 @@ static class WwwExtractor
         try
         {
             if (!string.IsNullOrWhiteSpace(activeRoot) && Directory.Exists(activeRoot))
-                CookieInjectHost.TryDeleteDirectory(activeRoot);
+                ScrubMemoryOnlyScriptsFromDisk(activeRoot);
             if (Directory.Exists(DataPaths.UiBase))
             {
+                var activeFull = !string.IsNullOrWhiteSpace(activeRoot)
+                    ? Path.GetFullPath(activeRoot).TrimEnd('\\')
+                    : "";
                 foreach (var dir in Directory.EnumerateDirectories(DataPaths.UiBase, "www-*"))
+                {
+                    var dirFull = Path.GetFullPath(dir).TrimEnd('\\');
+                    if (!string.IsNullOrEmpty(activeFull) &&
+                        dirFull.Equals(activeFull, StringComparison.OrdinalIgnoreCase))
+                        continue;
                     CookieInjectHost.TryDeleteDirectory(dir);
+                }
             }
         }
         catch { /* ignore */ }

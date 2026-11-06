@@ -17,6 +17,7 @@ public partial class MainWindow
 
     bool _bulkPanelOpen;
     bool _bulkReady;
+    bool _bulkInitializing;
     CoreWebView2Environment? _shellEnv;
     string _veoContentBundle = "";
     JsonElement? _veoFallbackConfig;
@@ -79,6 +80,8 @@ public partial class MainWindow
 
     async Task InitBulkViewAsync(CoreWebView2Environment shellEnv)
     {
+        if (_bulkReady || _bulkInitializing) return;
+        _bulkInitializing = true;
         try
         {
             _shellEnv = shellEnv;
@@ -90,6 +93,10 @@ public partial class MainWindow
         catch (Exception ex)
         {
             Debug.WriteLine("[BulkMode] InitBulkViewAsync error: " + ex.Message);
+        }
+        finally
+        {
+            _bulkInitializing = false;
         }
     }
 
@@ -126,12 +133,11 @@ public partial class MainWindow
         };
     }
 
-    void InjectVeoContentBundle(CoreWebView2 flowCore)
+    async Task InjectVeoContentBundleAsync(CoreWebView2 flowCore)
     {
         if (!string.IsNullOrWhiteSpace(_veoContentBundle))
         {
-            _ = flowCore.AddScriptToExecuteOnDocumentCreatedAsync(_veoContentBundle);
-            _ = flowCore.ExecuteScriptAsync(_veoContentBundle);
+            await flowCore.AddScriptToExecuteOnDocumentCreatedAsync(_veoContentBundle);
         }
     }
 
@@ -152,8 +158,12 @@ public partial class MainWindow
 
     void ToggleBulkPanel()
     {
-        Dispatcher.Invoke(() =>
+        Dispatcher.Invoke(async () =>
         {
+            if (!_bulkReady && _shellEnv != null)
+            {
+                await InitBulkViewAsync(_shellEnv);
+            }
             _bulkPanelOpen = !_bulkPanelOpen;
             if (_bulkPanelOpen && _shellMode == "full")
             {
@@ -282,9 +292,9 @@ public partial class MainWindow
 
     void NotifyBulkFlowUrl(string? url)
     {
-        if (!string.IsNullOrWhiteSpace(_veoContentBundle) && FlowView.CoreWebView2 != null)
+        if (FlowView.CoreWebView2 != null && !string.IsNullOrWhiteSpace(url) && IsFlowWorkspaceUrl(url))
         {
-            _ = FlowView.CoreWebView2.ExecuteScriptAsync(_veoContentBundle);
+            _ = FlowView.CoreWebView2.ExecuteScriptAsync("try { if (typeof window.__veoStartModules === 'function') window.__veoStartModules(); } catch(e) {}");
         }
         if (string.IsNullOrWhiteSpace(url)) return;
         PostToBulkAndWorkflow(new { type = "veo-flow-url", url });

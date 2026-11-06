@@ -1,20 +1,24 @@
 using System.IO;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 
 namespace FlowBrowser;
 
 /// <summary>
-/// Opaque per-user data root under Microsoft\Windows\Caches\{guid}
-/// instead of the brand-named FlowBrowser folder.
+/// Durable per-user vault under %LocalAppData%\FlowCreator\v\{guid}
+/// (not Windows\Caches — Disk Cleanup was purging sessions there).
 /// </summary>
 static class DataPaths
 {
     static string? _root;
+    static bool _profilesInitialized;
+    static readonly HashSet<string> HardenedDirs = new(StringComparer.OrdinalIgnoreCase);
     static readonly object Gate = new();
 
     /// <summary>
-    /// e.g. %LocalAppData%\Microsoft\Windows\Caches\{a1b2c3d4-...}
+    /// e.g. %LocalAppData%\FlowCreator\v\{a1b2c3d4-...}
     /// </summary>
     public static string Root
     {
@@ -23,12 +27,11 @@ static class DataPaths
             lock (Gate)
             {
                 if (_root != null) return _root;
-                var guid = StableCacheGuid();
+                var guid = StableVaultGuid();
                 _root = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "Microsoft",
-                    "Windows",
-                    "Caches",
+                    "FlowCreator",
+                    "v",
                     guid);
                 Directory.CreateDirectory(_root);
                 TryHide(_root);
@@ -37,12 +40,28 @@ static class DataPaths
         }
     }
 
+    /// <summary>Previous vault under Microsoft\Windows\Caches\{same-guid} — migrate once.</summary>
+    public static string LegacyCachesRoot
+    {
+        get
+        {
+            var guid = StableVaultGuid();
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Microsoft",
+                "Windows",
+                "Caches",
+                guid);
+        }
+    }
+
     public static string SecureDir => Path.Combine(Root, "k");
     public static string SecureSessionPath => Path.Combine(SecureDir, "session.bin");
     public static string DataRoot => Path.Combine(Root, "d");
     public static string ShellProfile => Path.Combine(DataRoot, "s");
     public static string FlowProfile => Path.Combine(DataRoot, "f");
-    public static string UiRoot(string version) => Path.Combine(Root, "u", version);
+    public static string UiBase => Path.Combine(Root, "u");
+    public static string UiRoot(string version) => Path.Combine(UiBase, version);
 
     public static string LegacyLocalFlowBrowser =>
         Path.Combine(
@@ -63,8 +82,8 @@ static class DataPaths
     public static string LegacyDataRoot =>
         Path.Combine(LegacyLocalFlowBrowser, ".data");
 
-    /// <summary>Stable GUID so path does not change between launches.</summary>
-    static string StableCacheGuid()
+    /// <summary>Stable GUID so path does not change between launches (same seed as former Caches vault).</summary>
+    static string StableVaultGuid()
     {
         var seed = string.Join("|",
             "fb.cache.v1",
@@ -80,38 +99,56 @@ static class DataPaths
         return new Guid(bytes).ToString("D");
     }
 
-    /// <summary>
-    /// Durable session vault + WebView profiles under LocalAppData (cookies survive EXE close).
-    /// Explicit wipe uses ClearFlowSessionAsync / Clear cookies button / admin revoke.
-    /// </summary>
+    /// <summary>Session vault + durable WebView profiles (cookies survive app close).</summary>
     public static void EnsureDurableProfiles()
     {
-        Directory.CreateDirectory(SecureDir);
-        Directory.CreateDirectory(ShellProfile);
-        Directory.CreateDirectory(FlowProfile);
-        TryHide(Root);
-        TryHide(SecureDir);
-        // Do not System/Hidden-mark WebView user-data folders — WebView2 can refuse to open them
-        TryDeleteTree(Path.Combine(Root, "u"));
+        lock (Gate)
+        {
+            if (_profilesInitialized &&
+                Directory.Exists(SecureDir) &&
+                Directory.Exists(ShellProfile) &&
+                Directory.Exists(FlowProfile) &&
+                Directory.Exists(UiBase))
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(SecureDir);
+            Directory.CreateDirectory(ShellProfile);
+            Directory.CreateDirectory(FlowProfile);
+            Directory.CreateDirectory(UiBase);
+            TryHide(Root);
+            TryHide(SecureDir);
+            TryHide(DataRoot);
+            TryHide(ShellProfile);
+            TryHide(FlowProfile);
+            TryHide(UiBase);
+            HardenVaultDirectory(SecureDir);
+            _profilesInitialized = true;
+        }
     }
 
-    /// <summary>Deprecated name — durable profiles (v6.1+).</summary>
+    /// <summary>Legacy name — now creates durable profiles (does not wipe DataRoot).</summary>
     public static void EnsureSessionOnly() => EnsureDurableProfiles();
 
     public static void EnsureTree() => EnsureDurableProfiles();
 
-    /// <summary>Move session + profiles from old FlowBrowser paths, then delete brand folder.</summary>
+    /// <summary>
+    /// Migrate from Windows\Caches vault and old FlowBrowser brand folders into FlowCreator\v.
+    /// </summary>
     public static void MigrateFromLegacy()
     {
         try
         {
             EnsureTree();
+            MigrateFromCachesVault();
 
-            // Session blob
+            // Session blob from brand folder
             if (!File.Exists(SecureSessionPath) && File.Exists(LegacySecureSession))
             {
                 Directory.CreateDirectory(SecureDir);
                 File.Copy(LegacySecureSession, SecureSessionPath, overwrite: false);
+                HardenVaultDirectory(SecureDir);
             }
 
             // WebView profiles (only if new empty)
@@ -122,7 +159,6 @@ static class DataPaths
                 Path.Combine(LegacyDataRoot, "s"),
                 ShellProfile);
 
-            // Old obvious flow-profile / shell-profile
             TryMoveDirIfEmpty(
                 Path.Combine(LegacyLocalFlowBrowser, "flow-profile"),
                 FlowProfile);
@@ -136,6 +172,100 @@ static class DataPaths
         TryDeleteTree(LegacyRoamingFlowBrowser);
     }
 
+    static void MigrateFromCachesVault()
+    {
+        try
+        {
+            var oldRoot = LegacyCachesRoot;
+            if (!Directory.Exists(oldRoot)) return;
+            if (string.Equals(
+                    Path.GetFullPath(oldRoot).TrimEnd('\\'),
+                    Path.GetFullPath(Root).TrimEnd('\\'),
+                    StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var oldSecure = Path.Combine(oldRoot, "k", "session.bin");
+            var oldFlow = Path.Combine(oldRoot, "d", "f");
+            var oldShell = Path.Combine(oldRoot, "d", "s");
+
+            if (!File.Exists(SecureSessionPath) && File.Exists(oldSecure))
+            {
+                Directory.CreateDirectory(SecureDir);
+                File.Copy(oldSecure, SecureSessionPath, overwrite: false);
+            }
+
+            TryMoveDirIfEmpty(oldFlow, FlowProfile);
+            TryMoveDirIfEmpty(oldShell, ShellProfile);
+
+            // Only delete old Caches vault after we have session or profiles in the new place
+            var migrated =
+                File.Exists(SecureSessionPath) ||
+                Directory.GetFileSystemEntries(FlowProfile).Length > 0 ||
+                Directory.GetFileSystemEntries(ShellProfile).Length > 0;
+            if (migrated)
+                TryDeleteTree(oldRoot);
+        }
+        catch { /* best-effort */ }
+    }
+
+    /// <summary>Hidden + System + ACL: current user + SYSTEM only (no inherited Everyone).</summary>
+    public static void HardenVaultDirectory(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            Directory.CreateDirectory(path);
+            TryHide(path);
+
+            var full = Path.GetFullPath(path).TrimEnd('\\');
+            lock (Gate)
+            {
+                if (!HardenedDirs.Add(full))
+                    return;
+            }
+
+            // Never run recursive NTFS SetAccessControl on WebView2 profile or UI trees (thousands of files).
+            // Only harden SecureDir (contains only session.bin and flow_cookies.bin) once.
+            var secureFull = Path.GetFullPath(SecureDir).TrimEnd('\\');
+            if (!full.Equals(secureFull, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var aclMarker = Path.Combine(full, ".acl_ok");
+            if (File.Exists(aclMarker))
+                return;
+
+            var di = new DirectoryInfo(full);
+            var sec = di.GetAccessControl();
+            sec.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+            var user = WindowsIdentity.GetCurrent().User;
+            if (user != null)
+            {
+                sec.PurgeAccessRules(user);
+                sec.AddAccessRule(new FileSystemAccessRule(
+                    user,
+                    FileSystemRights.FullControl,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+            }
+
+            var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+            sec.PurgeAccessRules(system);
+            sec.AddAccessRule(new FileSystemAccessRule(
+                system,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+
+            di.SetAccessControl(sec);
+            File.WriteAllText(aclMarker, "1");
+            TryHide(aclMarker);
+        }
+        catch { /* ACL may fail on some locked-down machines — hide still applied */ }
+    }
+
     static void TryMoveDirIfEmpty(string from, string to)
     {
         try
@@ -145,7 +275,6 @@ static class DataPaths
             var toEmpty = Directory.GetFileSystemEntries(to).Length == 0;
             if (!toEmpty) return;
 
-            // Move contents
             foreach (var entry in Directory.GetFileSystemEntries(from))
             {
                 var name = Path.GetFileName(entry);
@@ -173,14 +302,15 @@ static class DataPaths
     {
         try
         {
-            if (!Directory.Exists(path) && !File.Exists(path)) return;
+            if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path) && !File.Exists(path)) return;
+            // Directories: Hidden+System. Files: Hidden only — System files block overwrite (session.bin).
             var di = new DirectoryInfo(path);
             if (di.Exists)
                 di.Attributes |= FileAttributes.Hidden | FileAttributes.System;
             else
             {
                 var fi = new FileInfo(path);
-                fi.Attributes |= FileAttributes.Hidden | FileAttributes.System;
+                fi.Attributes = (fi.Attributes | FileAttributes.Hidden) & ~FileAttributes.System;
             }
         }
         catch { /* ignore */ }

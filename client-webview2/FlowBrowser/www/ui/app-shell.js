@@ -551,10 +551,14 @@ class FlowBrowserApp {
         }
 
         if (activeSrv) {
-          this.activeServer = sanitizeServerForStorage(activeSrv);
-          if (this.serverSelect) this.serverSelect.value = activeSrv.id;
+          this.activeServer = sanitizeServerForStorage({
+            ...activeSrv,
+            imageOnly: this.isImageOnlyServer(activeSrv)
+          });
+          if (this.serverSelect && !this.isImageOnlyServer(activeSrv)) {
+            this.serverSelect.value = activeSrv.id;
+          }
           this.setAccountName(this.formatServerDisplayName(activeSrv, data.servers));
-          window.electronAPI.switchFlowCookieProfile?.({ fromServerId: activeSrv.id, toServerId: activeSrv.id }).catch(() => {});
         }
         this._pendingFreshLogin = !!wiped;
         this.showWorkspaceHub();
@@ -678,12 +682,14 @@ class FlowBrowserApp {
         );
         this._pendingFreshLogin = !!mustWipe;
         if (!this.activeServer?.id && Array.isArray(data.servers) && data.servers.length > 0) {
-          this.activeServer = sanitizeServerForStorage(data.servers[0]);
-          if (this.serverSelect) this.serverSelect.value = this.activeServer.id;
+          this.activeServer = sanitizeServerForStorage({
+            ...data.servers[0],
+            imageOnly: this.isImageOnlyServer(data.servers[0])
+          });
+          if (this.serverSelect && !this.isImageOnlyServer(this.activeServer)) {
+            this.serverSelect.value = this.activeServer.id;
+          }
           this.setAccountName(this.formatServerDisplayName(this.activeServer, data.servers));
-        }
-        if (this.activeServer?.id) {
-          window.electronAPI.switchFlowCookieProfile?.({ fromServerId: this.activeServer.id, toServerId: this.activeServer.id }).catch(() => {});
         }
         this.showWorkspaceHub();
       } else {
@@ -1041,8 +1047,13 @@ class FlowBrowserApp {
         if (data.activeServer && !this._switchingServerInFlight) {
           const isStandardToolRunning =
             this.runningToolId === 'google-gemini' || this.runningToolId === 'google-flow';
-          if (!(isStandardToolRunning && this.isImageOnlyServer(data.activeServer))) {
-            this.activeServer = sanitizeServerForStorage(data.activeServer);
+          const isImageToolRunning = String(this.runningToolId || '').startsWith('flow-image-srv-');
+          if (!(isStandardToolRunning && this.isImageOnlyServer(data.activeServer)) &&
+              !(isImageToolRunning && !this.isImageOnlyServer(data.activeServer))) {
+            this.activeServer = sanitizeServerForStorage({
+              ...data.activeServer,
+              imageOnly: this.isImageOnlyServer(data.activeServer)
+            });
           }
         }
         this.populateServerSelect(data.servers || []);
@@ -1302,8 +1313,7 @@ class FlowBrowserApp {
     this.hideWorkspaceHub();
 
     if (tool.imageOnlyServer && tool.serverId) {
-      const needSwitch = this.activeServer?.id !== tool.serverId || !!this._pendingFreshLogin;
-      await this.launchServerWorkspace(tool.serverId, needSwitch, tool.url);
+      await this.launchServerWorkspace(tool.serverId, !!this._pendingFreshLogin, tool.url);
       return;
     }
 
@@ -1399,6 +1409,14 @@ class FlowBrowserApp {
     if (this.hubSuiteCountLabel) {
       this.hubSuiteCountLabel.textContent = readyCount + ' Ready / ' + allTools.length + ' Tools Configured';
     }
+
+    const gridSig =
+      allTools.map((t) => `${t.id}:${t.ready ? 1 : 0}:${t.name}`).join('|') +
+      `||sel=${selectedTool.id}||run=${this.runningToolId || ''}`;
+    if (this._lastHubGridSig === gridSig && this.hubToolsGrid.children.length === allTools.length) {
+      return;
+    }
+    this._lastHubGridSig = gridSig;
 
     this.hubToolsGrid.innerHTML = '';
     allTools.forEach((tool) => {
@@ -1767,11 +1785,18 @@ class FlowBrowserApp {
       if (data && data.success) {
         const previousServerId = this.activeServer?.id || '';
         const serverChanged = !!(previousServerId && previousServerId !== data.server.id);
-        this.activeServer = sanitizeServerForStorage(data.server);
-        if (this.serverSelect && !this.isImageOnlyServer(data.server)) {
+        const isImgServer = !!(
+          this.isImageOnlyServer(data.server) ||
+          String(this.runningToolId || '').startsWith('flow-image-srv-')
+        );
+        this.activeServer = sanitizeServerForStorage({
+          ...data.server,
+          imageOnly: isImgServer
+        });
+        if (this.serverSelect && !isImgServer) {
           this.serverSelect.value = data.server.id;
         }
-        this.setAccountName(this.formatServerDisplayName(data.server, this.currentServers));
+        this.setAccountName(this.formatServerDisplayName(this.activeServer, this.currentServers));
         if (serverChanged) {
           this._credFailUntil = 0;
         }
@@ -1781,7 +1806,7 @@ class FlowBrowserApp {
         if (isGeminiTarget) {
           this.runningToolId = 'google-gemini';
           this.selectedToolId = 'google-gemini';
-        } else if (this.isImageOnlyServer(data.server)) {
+        } else if (isImgServer) {
           this.runningToolId = 'flow-image-srv-' + data.server.id;
           this.selectedToolId = this.runningToolId;
         } else if (String(this.runningToolId || '').startsWith('flow-image-srv-')) {
@@ -1801,7 +1826,7 @@ class FlowBrowserApp {
           await window.electronAPI.saveSession({
             token: this.config.authToken,
             user: this.config.user,
-            activeServer: sanitizeServerForStorage(data.server)
+            activeServer: sanitizeServerForStorage(this.activeServer)
           });
         }
 
@@ -2174,14 +2199,58 @@ class FlowBrowserApp {
 
   async sendCredentialsToWebview(forceReset = false) {
     if (this.activeServer && this.activeServer.id) {
+      const imageOnly = !!(
+        this.isImageOnlyServer(this.activeServer) ||
+        String(this.runningToolId || '').startsWith('flow-image-srv-')
+      );
+      const serverId = String(this.activeServer.id || '');
+      const targetUrl = this._activeToolTargetUrl || this.activeServer.targetUrl || 'https://flow.google.com';
+
+      // 1. Immediately push imageOnly & serverId to C# host and FlowView BEFORE any network await!
+      try {
+        window.chrome?.webview?.postMessage(JSON.stringify({
+          type: 'cmd',
+          cmd: 'setFlowCreds',
+          email: this._googleEmailMem || this.activeServer.email || '',
+          password: this._googlePasswordMem || '',
+          targetUrl: targetUrl,
+          imageOnly: imageOnly,
+          serverId: serverId
+        }));
+        this.webview.send('apply-credentials', {
+          email: this._googleEmailMem || this.activeServer.email || '',
+          password: this._googlePasswordMem || '',
+          targetUrl: targetUrl,
+          imageOnly: imageOnly,
+          serverId: serverId,
+          forceReset: !!forceReset
+        });
+        if (this.webview && typeof this.webview.executeJavaScript === 'function') {
+          this.webview.executeJavaScript(
+            `try { if (window.__flowSetImageOnlyMode) window.__flowSetImageOnlyMode(${imageOnly ? 'true' : 'false'}, ${JSON.stringify(serverId)}); } catch(e){}`
+          ).catch(() => {});
+        }
+        this.syncSavedProjectsToWebview();
+      } catch (e) {}
+
+      // 2. Only fetch encrypted Google login credentials from backend when starting a fresh login
+      // or when the WebView is actually on a Google sign-in page.
+      let onGoogleAuthPage = false;
+      try {
+        const live = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || '');
+        onGoogleAuthPage = /accounts\.google\.com|accounts\.youtube\.com/i.test(String(live || ''));
+      } catch (e) {}
+
+      if (!forceReset && !onGoogleAuthPage) {
+        return;
+      }
+
       const email = await this.resolveGoogleEmailForFill();
       const password = await this.resolveGooglePasswordForFill();
-      const imageOnly = !!this.activeServer.imageOnly;
-      const serverId = String(this.activeServer.id || '');
       const payload = {
         email: email || '',
         password: password || '',
-        targetUrl: this._activeToolTargetUrl || this.activeServer.targetUrl || 'https://flow.google.com',
+        targetUrl: targetUrl,
         imageOnly: imageOnly,
         serverId: serverId,
         forceReset: !!forceReset
@@ -2199,12 +2268,12 @@ class FlowBrowserApp {
           serverId: serverId
         }));
         this.webview.send('apply-credentials', payload);
-        this.syncSavedProjectsToWebview();
       } catch (err) {
         console.warn('[AppShell] Could not send credentials to webview:', err.message);
       }
-      // Proven path: fill Google fields directly (host/inject postMessage was not sticking)
-      this.fillGoogleLoginFields(payload).catch((e) => console.warn('[AppShell] fillGoogle:', e.message));
+      if (onGoogleAuthPage) {
+        this.fillGoogleLoginFields(payload).catch((e) => console.warn('[AppShell] fillGoogle:', e.message));
+      }
     } else {
       console.warn('[AppShell] No activeServer email to send for auto-login');
     }
