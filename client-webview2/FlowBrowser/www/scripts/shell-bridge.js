@@ -121,6 +121,8 @@
     maximizeWindow: () => invoke('maximize'),
     closeWindow: () => invoke('close'),
     showInFolder: (filePath) => invoke('showInFolder', { filePath }),
+    openDownloadedFile: (filePath) => invoke('openDownloadedFile', { filePath }),
+    startFileDrag: (filePath) => invoke('startFileDrag', { filePath }),
     setShellMode: (mode) => {
       post({ type: 'cmd', cmd: 'shellMode', mode: mode === 'full' ? 'full' : 'chrome' });
     },
@@ -136,8 +138,9 @@
     onDownloadFailed: (cb) => { window.__downloadHandlers['download:failed'] = cb; },
     // Host-side ECDH (avoids WebView2 crypto.subtle gaps)
     credGenerateKey: () => invoke('credGenerateKey'),
-    credEstablish: (channelId, serverPublicKey) =>
-      invoke('credEstablish', { channelId, serverPublicKey }),
+    credEstablish: (channelId, serverPublicKey, serverTime) =>
+      invoke('credEstablish', { channelId, serverPublicKey, serverTime }),
+    credSetServerTime: (serverTime) => invoke('credSetServerTime', { serverTime }),
     credMac: (attemptId, stage) => invoke('credMac', { attemptId, stage }),
     credDecrypt: (ciphertext, nonce) => invoke('credDecrypt', { ciphertext, nonce }),
     credClear: () => invoke('credClear'),

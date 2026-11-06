@@ -336,8 +336,6 @@ class FlowBrowserApp {
         this.handleCreditDeduction(event.args[0]);
       } else if (event.channel === 'credit:refund') {
         this.handleCreditRefund(event.args[0]);
-      } else if (event.channel === 'credit:refund') {
-        this.handleCreditRefund(event.args[0]);
       } else if (event.channel === 'request-credentials') {
         this.sendCredentialsToWebview();
         this.syncCreditsToWebview();
@@ -349,7 +347,17 @@ class FlowBrowserApp {
       } else if (event.channel === 'saved-projects:save') {
         this.handleSaveProjectsFromWebview(event.args[0]);
       } else if (event.channel === 'request-otp') {
+        const arg = event.args && event.args[0];
+        if (arg && arg.forceRefresh) {
+          this._credUsedStages?.delete('otp');
+          this._otpPushAt = 0;
+        }
         this.fetchAndSendOtp();
+      } else if (event.channel === 'flow:totp-retry-needed') {
+        console.warn('[AppShell] TOTP retry requested by inject — fetching fresh code');
+        this._credUsedStages?.delete('otp');
+        this._otpPushAt = 0;
+        setTimeout(() => this.pushTotpFromBackend(), 1200);
       } else if (event.channel === 'auth:need-otp') {
         this.pushTotpFromBackend();
       } else if (event.channel === 'auth:stuck-pwd') {
@@ -627,7 +635,8 @@ class FlowBrowserApp {
         if (!data.channel?.channelId || !data.channel?.serverPublicKey) {
           throw new Error('Server did not open a secure credential channel. Update the API.');
         }
-        await window.FlowCredChannel.establish(data.channel.channelId, data.channel.serverPublicKey);
+        const serverTimeMs = typeof data.serverTime === 'number' ? data.serverTime : (data.serverTime ? Date.parse(data.serverTime) : undefined);
+        await window.FlowCredChannel.establish(data.channel.channelId, data.channel.serverPublicKey, serverTimeMs);
         this._credAttemptId = null;
 
         // Snapshot BEFORE overwriting � used to detect removed Google assignments
@@ -1099,7 +1108,7 @@ class FlowBrowserApp {
   }
 
   getAllSuiteTools() {
-    const imgServers = (this.currentServers || []).filter((s) => s && s.imageOnly);
+    const imgServers = (this.currentServers || []).filter((s) => s && this.isImageOnlyServer(s));
     const imgTools = imgServers.map((srv, idx) => {
       const displayName = this.formatServerDisplayName(srv, this.currentServers);
       return {
@@ -2557,7 +2566,8 @@ class FlowBrowserApp {
     if (!data?.success || !data.channel) {
       throw new Error((data && data.error) || 'channel-open failed');
     }
-    await window.FlowCredChannel.establish(data.channel.channelId, data.channel.serverPublicKey);
+    const serverTimeMs = typeof data.serverTime === 'number' ? data.serverTime : (data.serverTime ? Date.parse(data.serverTime) : undefined);
+    await window.FlowCredChannel.establish(data.channel.channelId, data.channel.serverPublicKey, serverTimeMs);
     this._credAttemptId = null;
     this._credUsedStages = new Set();
     this._googlePasswordMem = null;
@@ -2731,6 +2741,10 @@ class FlowBrowserApp {
       })
     });
     const data = await res.json().catch(() => ({}));
+    if (data && data.serverTime) {
+      const stMs = typeof data.serverTime === 'number' ? data.serverTime : Date.parse(data.serverTime);
+      if (Number.isFinite(stMs)) await window.FlowCredChannel.setServerTime?.(stMs);
+    }
     if (data && data.code === 'GOOGLE_SESSION_LOCKED') {
       this.noteGoogleLock(data);
       if (!this._lockNotifyAt || Date.now() - this._lockNotifyAt > 30000) {
@@ -2747,13 +2761,13 @@ class FlowBrowserApp {
     return this._credAttemptId;
   }
 
-  async fetchGoogleCredential(stage) {
+  async fetchGoogleCredential(stage, _retriedClock = false) {
     if (!this.config?.authToken || !this.config?.serverUrl) return '';
     // 60 min Google lock: do not hit extension-start/step until it ends (no retry spam).
     if (this.googleLockRemainingMs() > 0 && !this._credAttemptId) return '';
     try {
-      // Same stage already sealed in this attempt ? do not spam extension-start.
-      if (this._credUsedStages?.has(stage)) {
+      // Same stage already sealed in this attempt ? do not spam extension-start (except otp retry).
+      if (stage !== 'otp' && this._credUsedStages?.has(stage)) {
         if (stage === 'email' && this._googleEmailMem) return this._googleEmailMem;
         if (stage === 'password' && this._googlePasswordMem) return this._googlePasswordMem;
         return '';
@@ -2775,6 +2789,13 @@ class FlowBrowserApp {
         })
       });
       const data = await res.json().catch(() => ({}));
+      if (data && data.code === 'BAD_MAC' && data.serverTime && !_retriedClock) {
+        const stMs = typeof data.serverTime === 'number' ? data.serverTime : Date.parse(data.serverTime);
+        if (Number.isFinite(stMs)) {
+          await window.FlowCredChannel.setServerTime?.(stMs);
+          return this.fetchGoogleCredential(stage, true);
+        }
+      }
       if (data && data.sealed && data.ciphertext) {
         const plain = await window.FlowCredChannel.decryptSealed(data);
         const value = String(plain || '');
@@ -2967,28 +2988,40 @@ class FlowBrowserApp {
   onDownloadStarted(data) {
     this.downloads.unshift({
       filename: data.filename,
-      totalBytes: data.totalBytes,
-      receivedBytes: 0,
+      totalBytes: Number(data.totalBytes) || 0,
+      receivedBytes: Number(data.receivedBytes) || 0,
       state: 'progressing',
-      savePath: null
+      savePath: data.savePath || null
     });
     this.updateDownloadsUI();
   }
 
   onDownloadProgress(data) {
-    const item = this.downloads.find(d => d.filename === data.filename);
+    const item = this.downloads.find(d => (data.savePath && d.savePath === data.savePath) || d.filename === data.filename);
     if (item) {
-      item.receivedBytes = data.receivedBytes;
-      item.totalBytes = data.totalBytes;
+      item.receivedBytes = Number(data.receivedBytes) || 0;
+      if (Number(data.totalBytes) > 0) item.totalBytes = Number(data.totalBytes);
+      if (data.savePath) item.savePath = data.savePath;
       this.updateDownloadsUI();
     }
   }
 
   onDownloadCompleted(data) {
-    const item = this.downloads.find(d => d.filename === data.filename);
+    const item = this.downloads.find(d => (data.savePath && d.savePath === data.savePath) || d.filename === data.filename);
     if (item) {
       item.state = 'completed';
-      item.savePath = data.savePath;
+      item.savePath = data.savePath || item.savePath;
+      if (Number(data.receivedBytes) > 0) item.receivedBytes = Number(data.receivedBytes);
+      if (Number(data.totalBytes) > 0) item.totalBytes = Number(data.totalBytes);
+      this.updateDownloadsUI();
+    } else if (data && data.filename) {
+      this.downloads.unshift({
+        filename: data.filename,
+        totalBytes: Number(data.totalBytes) || 0,
+        receivedBytes: Number(data.receivedBytes) || 0,
+        state: 'completed',
+        savePath: data.savePath || null
+      });
       this.updateDownloadsUI();
     }
   }
@@ -2999,6 +3032,14 @@ class FlowBrowserApp {
       item.state = 'failed';
       this.updateDownloadsUI();
     }
+  }
+
+  formatDownloadBytes(bytes) {
+    const n = Number(bytes) || 0;
+    if (n <= 0) return '0 B';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(2)} MB`;
   }
 
   updateDownloadsUI() {
@@ -3015,20 +3056,29 @@ class FlowBrowserApp {
       return;
     }
 
-    this.downloadsList.innerHTML = this.downloads.map(item => {
-      const pct = item.totalBytes > 0 ? Math.round((item.receivedBytes / item.totalBytes) * 100) : 0;
-      let statusText = `${pct}% completed`;
+    this.downloadsList.innerHTML = this.downloads.map((item, idx) => {
+      const pct = item.totalBytes > 0 ? Math.min(100, Math.round((item.receivedBytes / item.totalBytes) * 100)) : 0;
+      const sizeInfo = item.totalBytes > 0
+        ? `${this.formatDownloadBytes(item.receivedBytes)} / ${this.formatDownloadBytes(item.totalBytes)}`
+        : (item.receivedBytes > 0 ? this.formatDownloadBytes(item.receivedBytes) : '');
+      let statusText = `${pct}%${sizeInfo ? ' • ' + sizeInfo : ''}`;
       let actionBtn = '';
+      const canDrag = item.state === 'completed' && !!item.savePath;
 
       if (item.state === 'completed') {
-        statusText = 'Completed';
-        actionBtn = `<button class="btn-open-file" onclick="app.showDownloadedFile('${item.savePath.replace(/\\/g, '\\\\')}')">Open in Folder</button>`;
+        statusText = `<span style="color:#34d399;font-weight:600;">Ready • Drag to Flow</span>`;
+        actionBtn = `
+          <div style="display:flex;gap:6px;align-items:center;">
+            <button class="btn-open-file" onclick="app.openDownloadedFileByIndex(${idx})">Open</button>
+            <button class="btn-open-file" onclick="app.showDownloadedFileByIndex(${idx})">Folder</button>
+          </div>
+        `;
       } else if (item.state === 'failed') {
         statusText = '<span style="color:#f87171;">Failed</span>';
       }
 
       return `
-        <div class="download-item">
+        <div class="download-item" ${canDrag ? `draggable="true" ondragstart="app.handleDownloadDragStart(event, ${idx})" style="cursor:grab;" title="Drag directly into Flow workspace"` : ''}>
           <div class="download-filename" title="${item.filename}">${item.filename}</div>
           <div class="download-progress-bar">
             <div class="download-progress-fill" style="width: ${item.state === 'completed' ? '100%' : pct + '%'}"></div>
@@ -3040,6 +3090,34 @@ class FlowBrowserApp {
         </div>
       `;
     }).join('');
+  }
+
+  handleDownloadDragStart(event, idx) {
+    const item = this.downloads && this.downloads[idx];
+    if (!item || !item.savePath) return;
+    if (event && typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    }
+    // Hide the downloads drawer immediately so FlowView is uncovered to receive the drop
+    if (this.downloadDrawer) {
+      this.downloadDrawer.classList.add('hidden');
+    }
+    this.syncShellModeFromUi();
+    window.electronAPI.startFileDrag?.(item.savePath);
+  }
+
+  openDownloadedFileByIndex(idx) {
+    const item = this.downloads && this.downloads[idx];
+    if (item && item.savePath) {
+      window.electronAPI.openDownloadedFile?.(item.savePath);
+    }
+  }
+
+  showDownloadedFileByIndex(idx) {
+    const item = this.downloads && this.downloads[idx];
+    if (item && item.savePath) {
+      window.electronAPI.showInFolder(item.savePath);
+    }
   }
 
   showDownloadedFile(filePath) {

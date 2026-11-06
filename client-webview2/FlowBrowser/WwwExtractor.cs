@@ -6,7 +6,7 @@ using System.Security.Cryptography;
 namespace FlowBrowser;
 
 /// <summary>
-/// Release: decrypt embedded AES-GCM www.vault into a hidden temp folder (wiped on exit).
+/// Release: decrypt embedded AES-GCM www.vault into the durable vault UI folder.
 /// Debug / folder-portable: prefer a www folder next to the binary.
 /// </summary>
 static class WwwExtractor
@@ -14,12 +14,94 @@ static class WwwExtractor
     const string EmbeddedVaultName = "FlowBrowser.www.vault";
     const string LegacyEmbeddedZipName = "FlowBrowser.www.zip";
 
-    static string? _tempWwwRoot;
+    static string? _wwwExtractRoot;
+    static byte[]? _cachedZipBytes;
     static readonly object Gate = new();
 
     public static string? TempWwwRoot
     {
-        get { lock (Gate) return _tempWwwRoot; }
+        get { lock (Gate) return _wwwExtractRoot; }
+    }
+
+    static byte[] GetVaultZipBytes()
+    {
+        lock (Gate)
+        {
+            if (_cachedZipBytes != null)
+                return _cachedZipBytes;
+
+            var asm = Assembly.GetExecutingAssembly();
+            using var stream = asm.GetManifestResourceStream(EmbeddedVaultName);
+            if (stream != null)
+            {
+                using var ms = new MemoryStream();
+                stream.CopyTo(ms);
+                _cachedZipBytes = VaultCrypto.OpenWwwVault(ms.ToArray());
+                return _cachedZipBytes;
+            }
+
+            using var legacy = asm.GetManifestResourceStream(LegacyEmbeddedZipName)
+                ?? throw new FileNotFoundException(
+                    "Embedded www.vault not found. Rebuild Release with pack-www + encrypt-www.");
+            using var lms = new MemoryStream();
+            legacy.CopyTo(lms);
+            _cachedZipBytes = lms.ToArray();
+            return _cachedZipBytes;
+        }
+    }
+
+    /// <summary>
+    /// Reads a file directly from the encrypted in-memory www.vault ZIP without touching disk.
+    /// Falls back to disk candidates only in Debug mode.
+    /// </summary>
+    public static string? ReadEmbeddedText(string relativePath)
+    {
+        var norm = relativePath.Replace('\\', '/').TrimStart('/');
+        try
+        {
+            var zipBytes = GetVaultZipBytes();
+            using var zipMs = new MemoryStream(zipBytes, writable: false);
+            using var archive = new ZipArchive(zipMs, ZipArchiveMode.Read);
+            foreach (var entry in archive.Entries)
+            {
+                var entryPath = entry.FullName.Replace('\\', '/').TrimStart('/');
+                if (entryPath.Equals(norm, StringComparison.OrdinalIgnoreCase) ||
+                    entryPath.Equals("www/" + norm, StringComparison.OrdinalIgnoreCase))
+                {
+                    using var sr = new StreamReader(entry.Open(), System.Text.Encoding.UTF8);
+                    return sr.ReadToEnd().TrimStart('\uFEFF');
+                }
+            }
+        }
+        catch { /* fall back to disk if needed */ }
+
+        foreach (var c in DiskCandidates())
+        {
+            var p = Path.Combine(c, relativePath.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(p))
+                return File.ReadAllText(p).TrimStart('\uFEFF');
+        }
+        return null;
+    }
+
+    static void ScrubMemoryOnlyScriptsFromDisk(string root)
+    {
+        string[] memoryOnlyRelPaths =
+        {
+            Path.Combine("scripts", "flow-inject.js"),
+            Path.Combine("scripts", "veo-content-bundle.js"),
+            Path.Combine("extensions", "veo-auto", "veo-content-bundle.js")
+        };
+        foreach (var rel in memoryOnlyRelPaths)
+        {
+            try
+            {
+                var full = Path.Combine(root, rel);
+                if (File.Exists(full))
+                    File.Delete(full);
+            }
+            catch { /* ignore */ }
+        }
     }
 
     public static string ResolveWwwRoot()
@@ -49,33 +131,12 @@ static class WwwExtractor
 
     static string ExtractEmbeddedWww()
     {
-        var asm = Assembly.GetExecutingAssembly();
-        byte[] zipBytes;
-
-        using (var stream = asm.GetManifestResourceStream(EmbeddedVaultName))
-        {
-            if (stream != null)
-            {
-                using var ms = new MemoryStream();
-                stream.CopyTo(ms);
-                zipBytes = VaultCrypto.OpenWwwVault(ms.ToArray());
-            }
-            else
-            {
-                using var legacy = asm.GetManifestResourceStream(LegacyEmbeddedZipName)
-                    ?? throw new FileNotFoundException(
-                        "Embedded www.vault not found. Rebuild Release with pack-www + encrypt-www.");
-                using var ms = new MemoryStream();
-                legacy.CopyTo(ms);
-                zipBytes = ms.ToArray();
-            }
-        }
+        var zipBytes = GetVaultZipBytes();
 
         var hash = Convert.ToHexString(SHA256.HashData(zipBytes));
-        var root = Path.Combine(
-            Path.GetTempPath(),
-            "FlowBrowserV6",
-            "ui-" + hash[..16].ToLowerInvariant());
+        // Durable vault UI path — not %TEMP% (survives Disk Cleanup of temp files)
+        DataPaths.EnsureDurableProfiles();
+        var root = DataPaths.UiRoot("www-" + hash[..16].ToLowerInvariant());
 
         var marker = Path.Combine(root, ".extracted");
         var shell = Path.Combine(root, "ui", "app-shell.html");
@@ -85,9 +146,9 @@ static class WwwExtractor
             var prev = File.ReadAllText(marker).Trim();
             if (prev.Equals(hash, StringComparison.OrdinalIgnoreCase))
             {
-                lock (Gate) _tempWwwRoot = root;
-                DataPaths.TryHide(root);
-                DataPaths.TryHide(Path.GetDirectoryName(root)!);
+                ScrubMemoryOnlyScriptsFromDisk(root);
+                lock (Gate) _wwwExtractRoot = root;
+                DataPaths.HardenVaultDirectory(root);
                 return root;
             }
         }
@@ -122,11 +183,11 @@ static class WwwExtractor
                     Directory.Delete(tmp, true);
             }
 
+            ScrubMemoryOnlyScriptsFromDisk(root);
             File.WriteAllText(marker, hash);
-            HardenTree(root);
-            DataPaths.TryHide(root);
-            DataPaths.TryHide(Path.GetDirectoryName(root)!);
-            lock (Gate) _tempWwwRoot = root;
+            DataPaths.HardenVaultDirectory(root);
+            DataPaths.HardenVaultDirectory(DataPaths.UiBase);
+            lock (Gate) _wwwExtractRoot = root;
             return root;
         }
         catch
@@ -136,42 +197,41 @@ static class WwwExtractor
         }
     }
 
-    static void HardenTree(string root)
+    /// <summary>
+    /// Wipe extracted UI on exit so unpacked www files never sit on disk when the app is closed.
+    /// Never touch WebView profiles (d\f / d\s) or session.bin.
+    /// </summary>
+    public static void WipeTempWww()
     {
+        string? activeRoot;
+        lock (Gate)
+        {
+            activeRoot = _wwwExtractRoot;
+            _wwwExtractRoot = null;
+        }
         try
         {
-            foreach (var path in Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories))
+            if (!string.IsNullOrWhiteSpace(activeRoot) && Directory.Exists(activeRoot))
+                CookieInjectHost.TryDeleteDirectory(activeRoot);
+            if (Directory.Exists(DataPaths.UiBase))
             {
-                try
-                {
-                    var attrs = File.GetAttributes(path);
-                    attrs |= FileAttributes.Hidden | FileAttributes.System | FileAttributes.NotContentIndexed;
-                    if ((attrs & FileAttributes.Directory) == 0)
-                        attrs |= FileAttributes.Temporary;
-                    File.SetAttributes(path, attrs);
-                }
-                catch { /* ignore */ }
+                foreach (var dir in Directory.EnumerateDirectories(DataPaths.UiBase, "www-*"))
+                    CookieInjectHost.TryDeleteDirectory(dir);
             }
         }
         catch { /* ignore */ }
-    }
-
-    public static void WipeTempWww()
-    {
-        string? root;
-        lock (Gate)
-        {
-            root = _tempWwwRoot;
-            _tempWwwRoot = null;
-        }
-        RuntimeProfiles.TryDeleteDirectory(root);
-        // Best-effort: clear sibling ui-* leftovers under FlowBrowserV6
         try
         {
             var baseDir = Path.Combine(Path.GetTempPath(), "FlowBrowserV6");
             if (!Directory.Exists(baseDir)) return;
             foreach (var dir in Directory.EnumerateDirectories(baseDir, "ui-*"))
-                RuntimeProfiles.TryDeleteDirectory(dir);
+                CookieInjectHost.TryDeleteDirectory(dir);
+            try
+            {
+                if (Directory.GetFileSystemEntries(baseDir).Length == 0)
+                    Directory.Delete(baseDir, false);
+            }
+            catch { /* ignore */ }
         }
         catch { /* ignore */ }
     }

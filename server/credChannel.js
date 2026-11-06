@@ -159,7 +159,12 @@ function takeAttemptStage(attemptId, userId, stage, channelId) {
   if (a.channelId && channelId && a.channelId !== channelId) {
     return { ok: false, error: 'Attempt/channel mismatch.' };
   }
-  if (a.usedStages.has(stage)) {
+  if (stage === 'otp') {
+    a.otpCount = (a.otpCount || 0) + 1;
+    if (a.otpCount > 4) {
+      return { ok: false, error: 'Too many OTP retries for this attempt. Call extension-start again.' };
+    }
+  } else if (a.usedStages.has(stage)) {
     return { ok: false, error: `Stage "${stage}" already consumed for this attempt.` };
   }
   a.usedStages.add(stage);

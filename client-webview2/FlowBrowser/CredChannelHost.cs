@@ -16,9 +16,18 @@ sealed class CredChannelHost : IDisposable
     Key? _clientKey;
     byte[]? _aesKey;
     string? _channelId;
+    long _clockOffsetMs;
 
     public string? ChannelId => _channelId;
     public bool IsReady => _aesKey != null && !string.IsNullOrEmpty(_channelId);
+
+    public void SetServerTime(long serverTimeMs)
+    {
+        if (serverTimeMs > 0)
+        {
+            _clockOffsetMs = serverTimeMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+    }
 
     public string GenerateClientPublicKey()
     {
@@ -58,7 +67,7 @@ sealed class CredChannelHost : IDisposable
     public object Mac(string attemptId, string stage)
     {
         if (_aesKey == null || _channelId == null) throw new InvalidOperationException("Channel not established");
-        var ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + _clockOffsetMs;
         var msg = Encoding.UTF8.GetBytes($"{_channelId}|{attemptId}|{stage}|{ts}");
         var sig = HMACSHA256.HashData(_aesKey, msg);
         return new { ts, mac = ToB64Url(sig) };

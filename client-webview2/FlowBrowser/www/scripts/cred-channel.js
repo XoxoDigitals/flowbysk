@@ -41,6 +41,18 @@
     aesCryptoKey: null,
     hmacKey: null,
     channelId: null,
+    clockOffsetMs: 0,
+
+    async setServerTime(serverTimeMs) {
+      var st = Number(serverTimeMs);
+      if (Number.isFinite(st) && st > 0) {
+        this.clockOffsetMs = st - Date.now();
+        var host = hostApi();
+        if (host && typeof host.credSetServerTime === 'function') {
+          try { await host.credSetServerTime(Math.round(st)); } catch (e) {}
+        }
+      }
+    },
 
     async generateClientPublicKey() {
       var subtle = subtleApi();
@@ -67,11 +79,14 @@
       throw new Error('Secure crypto unavailable (no WebCrypto X25519 and no host bridge)');
     },
 
-    async establish(channelId, serverPublicKeySpkiB64) {
+    async establish(channelId, serverPublicKeySpkiB64, serverTimeMs) {
+      if (serverTimeMs) {
+        await this.setServerTime(serverTimeMs);
+      }
       if (this.mode === 'host') {
         var host = hostApi();
         if (!host) throw new Error('Host bridge missing');
-        await host.credEstablish(channelId, serverPublicKeySpkiB64);
+        await host.credEstablish(channelId, serverPublicKeySpkiB64, serverTimeMs ? Math.round(Number(serverTimeMs)) : undefined);
         this.channelId = channelId;
         this.aesCryptoKey = true;
         return true;
@@ -107,7 +122,7 @@
         return await host.credMac(attemptId, stage);
       }
       var subtle = subtleApi();
-      var ts = Date.now();
+      var ts = Math.round(Date.now() + (this.clockOffsetMs || 0));
       var msg = this.channelId + '|' + attemptId + '|' + stage + '|' + ts;
       var sig = await subtle.sign('HMAC', this.hmacKey, new TextEncoder().encode(msg));
       return { ts: ts, mac: b64urlFromBuf(sig) };

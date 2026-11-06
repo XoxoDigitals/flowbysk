@@ -387,6 +387,7 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
       })),
       activeServer: publicServerPayload(activeServer),
       settings: await clientSettingsPayload(),
+      serverTime: Date.now(),
       ...(channel
         ? {
             channel: {
@@ -414,6 +415,7 @@ router.post('/channel-open', requireUserAuth, async (req, res) => {
     const channel = credChannel.createChannel(req.user.id, req.body?.clientPublicKey, req);
     res.json({
       success: true,
+      serverTime: Date.now(),
       channel: {
         channelId: channel.channelId,
         serverPublicKey: channel.serverPublicKey,
@@ -647,6 +649,7 @@ router.post('/extension-start', requireUserAuth, async (req, res) => {
   res.json({
     attemptId: attempt.attemptId,
     expiresAt: attempt.expiresAt,
+    serverTime: Date.now(),
     assignedAccount: {
       emailMasked: credChannel.maskEmail(activeServer.email),
       hasTotp: !!(activeServer.totpSecret && String(activeServer.totpSecret).trim()),
@@ -701,6 +704,7 @@ router.post('/extension-step', requireUserAuth, async (req, res) => {
     return res.status(403).json({
       success: false,
       code: 'BAD_MAC',
+      serverTime: Date.now(),
       error: 'Request signature invalid or expired.',
     });
   }

@@ -16,22 +16,26 @@ static class VaultCrypto
     /// <summary>Magic for embedded UI vault: FBW6</summary>
     public static readonly byte[] WwwMagic = Encoding.ASCII.GetBytes("FBW6");
 
-    /// <summary>Magic for session vault (DPAPI-wrapped key): FBS6</summary>
+    /// <summary>Magic for session vault: FBS6</summary>
     public static readonly byte[] SessionMagic = Encoding.ASCII.GetBytes("FBS6");
-
-    /// <summary>Magic for password-sealed session (PBKDF2): FBS7</summary>
-    public static readonly byte[] SessionMagicPwd = Encoding.ASCII.GetBytes("FBS7");
-
-    const int Pbkdf2Iterations = 120_000;
-    const int SaltSize = 16;
 
     /// <summary>App-derived AES key for the embedded www blob (same derivation in pack-www encrypt).</summary>
     public static byte[] DeriveWwwKey()
     {
-        // Stable material — must match tools/encrypt-www.cjs
-        var material = Encoding.UTF8.GetBytes(
-            "FlowBrowser.WwwVault.v6|XoxoDigitals|AES-256-GCM|do-not-ship-plaintext-www");
-        return SHA256.HashData(material);
+        ReadOnlySpan<byte> mask = new byte[]
+        {
+            0xa7, 0x3c, 0x91, 0xe4, 0x5b, 0x08, 0xf2, 0x6d, 0x19, 0xc4, 0x83, 0x7a, 0xe0, 0x51, 0xb6, 0x2f,
+            0x8d, 0x4e, 0x09, 0x17, 0xc3, 0xa6, 0x52, 0xf8, 0x1b, 0x90, 0xe4, 0x72, 0xd3, 0xc5, 0x6a, 0x18
+        };
+        ReadOnlySpan<byte> xored = new byte[]
+        {
+            0x57, 0xb3, 0x37, 0x9a, 0x79, 0xf8, 0xb6, 0x78, 0x33, 0x39, 0x20, 0x6a, 0xbb, 0xf0, 0x83, 0x00,
+            0xf9, 0x3d, 0x5a, 0xf6, 0xf6, 0x49, 0x63, 0x4e, 0x3b, 0x60, 0x32, 0x4a, 0x92, 0xb7, 0x2a, 0xd9
+        };
+        var key = new byte[KeySize];
+        for (var i = 0; i < KeySize; i++)
+            key[i] = (byte)(xored[i] ^ mask[i]);
+        return key;
     }
 
     public static byte[] EncryptAesGcm(byte[] plain, byte[] key)
@@ -84,88 +88,33 @@ static class VaultCrypto
         return DecryptAesGcm(body, DeriveWwwKey());
     }
 
-    static byte[] DerivePasswordKey(string password, byte[] salt)
-    {
-        return Rfc2898DeriveBytes.Pbkdf2(
-            Encoding.UTF8.GetBytes(password ?? ""),
-            salt,
-            Pbkdf2Iterations,
-            HashAlgorithmName.SHA256,
-            KeySize);
-    }
-
     /// <summary>
-    /// Phase 4: prefer FBS7 password seal. Fallback FBS6 DPAPI-only if no password.
-    /// FBS7: magic | salt(16) | nonce|tag|cipher
+    /// Format: magic | u16 wrappedKeyLen | wrappedKey(DPAPI) | nonce|tag|cipher (AES-GCM of JSON).
     /// </summary>
-    public static byte[] SealSession(byte[] plainJson, string? password = null)
+    public static byte[] SealSession(byte[] plainJson)
     {
-        if (!string.IsNullOrEmpty(password))
-        {
-            var salt = RandomNumberGenerator.GetBytes(SaltSize);
-            var dataKey = DerivePasswordKey(password, salt);
-            try
-            {
-                var body = EncryptAesGcm(plainJson, dataKey);
-                var all = new byte[SessionMagicPwd.Length + SaltSize + body.Length];
-                Buffer.BlockCopy(SessionMagicPwd, 0, all, 0, SessionMagicPwd.Length);
-                Buffer.BlockCopy(salt, 0, all, SessionMagicPwd.Length, SaltSize);
-                Buffer.BlockCopy(body, 0, all, SessionMagicPwd.Length + SaltSize, body.Length);
-                return all;
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(dataKey);
-            }
-        }
-
-        var dataKey2 = RandomNumberGenerator.GetBytes(KeySize);
-        var wrappedKey = ProtectedData.Protect(dataKey2, optionalEntropy: SessionMagic, DataProtectionScope.CurrentUser);
-        var body2 = EncryptAesGcm(plainJson, dataKey2);
-        CryptographicOperations.ZeroMemory(dataKey2);
+        var dataKey = RandomNumberGenerator.GetBytes(KeySize);
+        var wrappedKey = ProtectedData.Protect(dataKey, optionalEntropy: SessionMagic, DataProtectionScope.CurrentUser);
+        var body = EncryptAesGcm(plainJson, dataKey);
+        CryptographicOperations.ZeroMemory(dataKey);
 
         if (wrappedKey.Length > ushort.MaxValue)
             throw new InvalidOperationException("Wrapped key too large.");
 
-        var all2 = new byte[SessionMagic.Length + 2 + wrappedKey.Length + body2.Length];
+        var all = new byte[SessionMagic.Length + 2 + wrappedKey.Length + body.Length];
         var o = 0;
-        Buffer.BlockCopy(SessionMagic, 0, all2, o, SessionMagic.Length);
+        Buffer.BlockCopy(SessionMagic, 0, all, o, SessionMagic.Length);
         o += SessionMagic.Length;
-        all2[o++] = (byte)(wrappedKey.Length & 0xff);
-        all2[o++] = (byte)((wrappedKey.Length >> 8) & 0xff);
-        Buffer.BlockCopy(wrappedKey, 0, all2, o, wrappedKey.Length);
+        all[o++] = (byte)(wrappedKey.Length & 0xff);
+        all[o++] = (byte)((wrappedKey.Length >> 8) & 0xff);
+        Buffer.BlockCopy(wrappedKey, 0, all, o, wrappedKey.Length);
         o += wrappedKey.Length;
-        Buffer.BlockCopy(body2, 0, all2, o, body2.Length);
-        return all2;
+        Buffer.BlockCopy(body, 0, all, o, body.Length);
+        return all;
     }
 
-    public static byte[] OpenSession(byte[] sealedBytes, string? password = null)
+    public static byte[] OpenSession(byte[] sealedBytes)
     {
-        if (sealedBytes.Length < 4)
-            throw new CryptographicException("Invalid session vault.");
-
-        // FBS7 password vault
-        if (sealedBytes.Length >= SessionMagicPwd.Length + SaltSize + NonceSize + TagSize
-            && sealedBytes[0] == SessionMagicPwd[0]
-            && sealedBytes[1] == SessionMagicPwd[1]
-            && sealedBytes[2] == SessionMagicPwd[2]
-            && sealedBytes[3] == SessionMagicPwd[3])
-        {
-            if (string.IsNullOrEmpty(password))
-                throw new CryptographicException("Password required to unlock session.bin");
-            var salt = sealedBytes.AsSpan(SessionMagicPwd.Length, SaltSize).ToArray();
-            var body = sealedBytes.AsSpan(SessionMagicPwd.Length + SaltSize).ToArray();
-            var dataKey = DerivePasswordKey(password, salt);
-            try
-            {
-                return DecryptAesGcm(body, dataKey);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(dataKey);
-            }
-        }
-
         if (sealedBytes.Length < SessionMagic.Length + 2 + NonceSize + TagSize)
             throw new CryptographicException("Invalid session vault.");
         for (var i = 0; i < SessionMagic.Length; i++)
@@ -184,16 +133,16 @@ static class VaultCrypto
         var wrappedKey = new byte[wkLen];
         Buffer.BlockCopy(sealedBytes, o, wrappedKey, 0, wkLen);
         o += wkLen;
-        var bodyLegacy = new byte[sealedBytes.Length - o];
-        Buffer.BlockCopy(sealedBytes, o, bodyLegacy, 0, bodyLegacy.Length);
-        var dataKeyLegacy = ProtectedData.Unprotect(wrappedKey, optionalEntropy: SessionMagic, DataProtectionScope.CurrentUser);
+        var body = new byte[sealedBytes.Length - o];
+        Buffer.BlockCopy(sealedBytes, o, body, 0, body.Length);
+        var dataKey = ProtectedData.Unprotect(wrappedKey, optionalEntropy: SessionMagic, DataProtectionScope.CurrentUser);
         try
         {
-            return DecryptAesGcm(bodyLegacy, dataKeyLegacy);
+            return DecryptAesGcm(body, dataKey);
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(dataKeyLegacy);
+            CryptographicOperations.ZeroMemory(dataKey);
         }
     }
 }

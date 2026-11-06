@@ -134,8 +134,9 @@ public partial class MainWindow : Window
                 RuntimeProfiles.CleanupLegacyTempProfiles();
 
                 _wwwRoot = WwwExtractor.ResolveWwwRoot();
-                // Strip UTF-8 BOM — WebView2 document-created scripts can fail oddly with BOM
-                _flowInject = File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
+                // Load flow-inject directly from encrypted in-memory vault (never left on disk)
+                _flowInject = WwwExtractor.ReadEmbeddedText("scripts/flow-inject.js")
+                    ?? File.ReadAllText(Path.Combine(_wwwRoot, "scripts", "flow-inject.js")).TrimStart('\uFEFF');
                 LoadVeoContentBundle();
 
                 // v6.1+: durable LocalAppData profiles + session.bin (cookies survive close)
@@ -244,7 +245,8 @@ public partial class MainWindow : Window
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
 
-        // Real Edge WebView2 — no Electron UA spoofing needed
+        // Spoof Whale Browser UA + Client Hints (matches Whale/4.0.0.0 fingerprint)
+        ApplyWhaleUserAgent(core);
         core.WebMessageReceived += Flow_WebMessageReceived;
 
         core.SetVirtualHostNameToFolderMapping(
@@ -300,6 +302,7 @@ public partial class MainWindow : Window
 
         core.NavigationStarting += (_, e) =>
         {
+            ApplyWhaleUserAgent(core);
             var uri = e.Uri ?? "";
             var cur = FlowView.CoreWebView2?.Source ?? "";
 
@@ -432,12 +435,33 @@ public partial class MainWindow : Window
             ApplyVeoDownloadPath(e);
             var name = e.ResultFilePath;
             try { name = Path.GetFileName(e.ResultFilePath); } catch { /* ignore */ }
+            var initialTotal = (long)(e.DownloadOperation.TotalBytesToReceive ?? 0);
             PostToShell(new
             {
                 type = "download",
                 phase = "started",
-                data = new { filename = name, totalBytes = 0 }
+                data = new { filename = name, totalBytes = initialTotal, receivedBytes = 0L, savePath = e.ResultFilePath }
             });
+            e.DownloadOperation.BytesReceivedChanged += (op, __) =>
+            {
+                try
+                {
+                    var d = (CoreWebView2DownloadOperation)op!;
+                    PostToShell(new
+                    {
+                        type = "download",
+                        phase = "progress",
+                        data = new
+                        {
+                            filename = Path.GetFileName(d.ResultFilePath),
+                            receivedBytes = d.BytesReceived,
+                            totalBytes = (long)(d.TotalBytesToReceive ?? 0),
+                            savePath = d.ResultFilePath
+                        }
+                    });
+                }
+                catch { /* ignore */ }
+            };
             e.DownloadOperation.StateChanged += (op, __) =>
             {
                 var d = (CoreWebView2DownloadOperation)op!;
@@ -447,7 +471,13 @@ public partial class MainWindow : Window
                     {
                         type = "download",
                         phase = "completed",
-                        data = new { filename = Path.GetFileName(d.ResultFilePath), savePath = d.ResultFilePath }
+                        data = new
+                        {
+                            filename = Path.GetFileName(d.ResultFilePath),
+                            savePath = d.ResultFilePath,
+                            receivedBytes = d.BytesReceived,
+                            totalBytes = (long?)d.TotalBytesToReceive ?? d.BytesReceived
+                        }
                     });
                 }
                 else if (d.State == CoreWebView2DownloadState.Interrupted)
@@ -464,6 +494,65 @@ public partial class MainWindow : Window
 
         _ = core.AddScriptToExecuteOnDocumentCreatedAsync(_flowInject);
         InjectVeoContentBundle(core);
+    }
+
+    void ApplyWhaleUserAgent(CoreWebView2 core)
+    {
+        try
+        {
+            var rawUa = core.Settings.UserAgent ?? "";
+            var cleaned = System.Text.RegularExpressions.Regex.Replace(rawUa, @"\s*\bEdg(?:e|A|iOS)?/[\d.]+\b", "").Trim();
+            if (string.IsNullOrWhiteSpace(cleaned))
+                cleaned = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+            if (!cleaned.Contains("Whale/", StringComparison.OrdinalIgnoreCase))
+                cleaned += " Whale/4.0.0.0";
+
+            if (!string.Equals(core.Settings.UserAgent, cleaned, StringComparison.Ordinal))
+                core.Settings.UserAgent = cleaned;
+
+            var chromeFull = "134.0.0.0";
+            var chromeMajor = "134";
+            var m = System.Text.RegularExpressions.Regex.Match(cleaned, @"Chrome/(([\d]+)[\d.]*)");
+            if (m.Success)
+            {
+                chromeFull = m.Groups[1].Value;
+                chromeMajor = m.Groups[2].Value;
+            }
+
+            var cdpPayload = JsonSerializer.Serialize(new
+            {
+                userAgent = cleaned,
+                platform = "Win32",
+                userAgentMetadata = new
+                {
+                    brands = new object[]
+                    {
+                        new { brand = "Not:A-Brand", version = "99" },
+                        new { brand = "Chromium", version = chromeMajor },
+                        new { brand = "Whale", version = "4" }
+                    },
+                    fullVersionList = new object[]
+                    {
+                        new { brand = "Not:A-Brand", version = "99.0.0.0" },
+                        new { brand = "Chromium", version = chromeFull },
+                        new { brand = "Whale", version = "4.0.0.0" }
+                    },
+                    fullVersion = chromeFull,
+                    platform = "Windows",
+                    platformVersion = "15.0.0",
+                    architecture = "x86",
+                    model = "",
+                    mobile = false,
+                    bitness = "64",
+                    wow64 = false
+                }
+            });
+            _ = core.CallDevToolsProtocolMethodAsync("Emulation.setUserAgentOverride", cdpPayload);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("[WhaleUA] error: " + ex.Message);
+        }
     }
 
     void SetShellMode(string mode)
@@ -1672,9 +1761,38 @@ public partial class MainWindow : Window
     }}
   }}
 
+  // Auto-click 'Try again' button on Google login interstitial error pages ('Something went wrong', etc.)
+  const tryAgainBtn = Array.from(document.querySelectorAll('button, div[role=""button""], a[role=""button""], a')).find(el => {{
+    if (!visible(el)) return false;
+    const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    return /^try again$/i.test(t);
+  }});
+  if (tryAgainBtn) {{
+    const taKey = 'try_again:' + stepKey;
+    const now = Date.now();
+    if (!st[taKey] || (now - st[taKey]) > 2500) {{
+      st[taKey] = now;
+      try {{ tryAgainBtn.click(); }} catch (e) {{}}
+      return {{ ok:true, step:'try-again-clicked', path }};
+    }}
+  }}
+
   // TOTP / SetSID — do not re-fill email/password; Next is handled by FillTotp / inject
   const totpEl = document.querySelector('input[name=""totpPin""], input#totpPin, input[autocomplete=""one-time-code""]');
   if (totpEl && visible(totpEl)) {{
+    const pageText = ((document.body && document.body.innerText) || '').slice(0, 3000);
+    if (/wrong code|incorrect code|couldn't verify|could not verify|invalid code|enter a valid code/i.test(pageText) ||
+        totpEl.getAttribute('aria-invalid') === 'true') {{
+      const retryTs = st['totp_err_ts'] || 0;
+      if (Date.now() - retryTs > 3500) {{
+        st['totp_err_ts'] = Date.now();
+        try {{ totpEl.value = ''; }} catch (e) {{}}
+        try {{
+          if (window.ipcRenderer) window.ipcRenderer.sendToHost('flow:totp-retry-needed', {{ path, href: location.href }});
+        }} catch (e) {{}}
+        return {{ ok:true, step:'totp-error-retry', path }};
+      }}
+    }}
     return {{ ok:true, step:'totp-wait', path }};
   }}
 
@@ -2081,6 +2199,18 @@ public partial class MainWindow : Window
                 HandleAuthOverlayCommand(show, captcha, done);
                 break;
             }
+            case "startFileDrag":
+            {
+                var fp = root.TryGetProperty("filePath", out var fpEl) ? fpEl.GetString() : null;
+                StartNativeFileDrag(fp);
+                break;
+            }
+            case "openDownloadedFile":
+            {
+                var fp = root.TryGetProperty("filePath", out var fpEl) ? fpEl.GetString() : null;
+                OpenDownloadedFile(fp);
+                break;
+            }
         }
         await Task.CompletedTask;
     }
@@ -2157,6 +2287,18 @@ public partial class MainWindow : Window
                 }
                 return new { success = true };
             }
+            case "openDownloadedFile":
+            {
+                var path = payload.TryGetProperty("filePath", out var fp) ? fp.GetString() : null;
+                var ok = OpenDownloadedFile(path);
+                return new { success = ok };
+            }
+            case "startFileDrag":
+            {
+                var path = payload.TryGetProperty("filePath", out var fp) ? fp.GetString() : null;
+                var ok = StartNativeFileDrag(path);
+                return new { success = ok };
+            }
             case "executeFlow":
             {
                 var code = payload.TryGetProperty("code", out var c) ? c.GetString() : "null";
@@ -2173,8 +2315,16 @@ public partial class MainWindow : Window
                 var serverPublicKey = payload.TryGetProperty("serverPublicKey", out var spk) ? spk.GetString() : null;
                 if (string.IsNullOrWhiteSpace(channelId) || string.IsNullOrWhiteSpace(serverPublicKey))
                     throw new ArgumentException("channelId and serverPublicKey required");
+                if (payload.TryGetProperty("serverTime", out var stEl) && stEl.ValueKind == JsonValueKind.Number && stEl.TryGetInt64(out var stMs))
+                    _credChannel.SetServerTime(stMs);
                 _credChannel.Establish(channelId!, serverPublicKey!);
                 return new { success = true, channelId = _credChannel.ChannelId };
+            }
+            case "credSetServerTime":
+            {
+                if (payload.TryGetProperty("serverTime", out var stEl) && stEl.ValueKind == JsonValueKind.Number && stEl.TryGetInt64(out var stMs))
+                    _credChannel.SetServerTime(stMs);
+                return new { success = true };
             }
             case "credMac":
             {
@@ -2208,6 +2358,111 @@ public partial class MainWindow : Window
                 return new { deviceId = GetStableDeviceId(), client = "windows-exe/" + AppVersion(), version = AppVersion() };
             default:
                 throw new InvalidOperationException("Unknown command: " + cmd);
+        }
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    static extern int SHParseDisplayName(
+        string pszName,
+        IntPtr pbc,
+        out IntPtr ppidl,
+        uint sfgaoIn,
+        out uint psfgaoOut);
+
+    [DllImport("shell32.dll")]
+    static extern int SHCreateDataObject(
+        IntPtr pidlFolder,
+        uint cidl,
+        IntPtr[] apidl,
+        IntPtr pdtInner,
+        ref Guid riid,
+        out IntPtr ppv);
+
+    [DllImport("shell32.dll")]
+    static extern int SHDoDragDrop(
+        IntPtr hwnd,
+        IntPtr pdtobj,
+        IntPtr pdsrc,
+        uint dwEffect,
+        out uint pdwEffect);
+
+    [DllImport("ole32.dll")]
+    static extern void CoTaskMemFree(IntPtr pv);
+
+    bool OpenDownloadedFile(string? filePath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+                return false;
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = filePath,
+                UseShellExecute = true
+            });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("OpenDownloadedFile error: " + ex.Message);
+            return false;
+        }
+    }
+
+    bool StartNativeFileDrag(string? filePath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+                return false;
+            var fullPath = Path.GetFullPath(filePath);
+            Dispatcher.Invoke(() =>
+            {
+                if (_shellMode == "full")
+                    SetShellMode("chrome");
+            });
+
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    Thread.Sleep(60);
+                    var hr = SHParseDisplayName(fullPath, IntPtr.Zero, out var pidl, 0, out _);
+                    if (hr < 0 || pidl == IntPtr.Zero) return;
+                    try
+                    {
+                        var iidDataObject = new Guid("0000010E-0000-0000-C000-000000000046");
+                        hr = SHCreateDataObject(IntPtr.Zero, 1, new[] { pidl }, IntPtr.Zero, ref iidDataObject, out var dataObj);
+                        if (hr < 0 || dataObj == IntPtr.Zero) return;
+                        try
+                        {
+                            const uint dropEffectCopyOrLink = 1 | 4; // DROPEFFECT_COPY | DROPEFFECT_LINK
+                            SHDoDragDrop(IntPtr.Zero, dataObj, IntPtr.Zero, dropEffectCopyOrLink, out _);
+                        }
+                        finally
+                        {
+                            Marshal.Release(dataObj);
+                        }
+                    }
+                    finally
+                    {
+                        CoTaskMemFree(pidl);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine("[NativeFileDrag] worker error: " + ex.Message);
+                }
+            });
+            thread.IsBackground = true;
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("[NativeFileDrag] error: " + ex.Message);
+            return false;
         }
     }
 

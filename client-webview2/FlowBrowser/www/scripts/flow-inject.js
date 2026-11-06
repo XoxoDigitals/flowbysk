@@ -37,6 +37,146 @@ if (window.__flowInjectBootstrapped || location.hostname === 'app.flowbrowser.lo
   window.__flowInjectBootstrapped = true;
 
 // =========================================================================
+// CID PROTOCOL RANDOMIZER (fetch / XHR / sendBeacon / WebSocket / EventSource)
+// =========================================================================
+(function installCidRandomizer() {
+  if (window.__flowCidRandomizerInstalled) return;
+  window.__flowCidRandomizerInstalled = true;
+
+  const CID_QUERY_REGEX = /([?&]cid=)(\d+\.\d+)(?=(?:&|#|$))/gi;
+  const CID_BARE_REGEX = /^(\s*cid=)(\d+\.\d+)(\s*)$/i;
+
+  function randomDigit(nonZero) {
+    const min = nonZero ? 1 : 0;
+    const max = 9;
+    return String(Math.floor(Math.random() * (max - min + 1)) + min);
+  }
+
+  function randomDigits(length, nonZeroFirst) {
+    const safeLen = Math.max(1, Number(length) || 1);
+    let out = '';
+    for (let i = 0; i < safeLen; i += 1) {
+      out += randomDigit(Boolean(nonZeroFirst && i === 0));
+    }
+    return out;
+  }
+
+  function generateCidLike(sampleCid) {
+    const raw = String(sampleCid || '').trim();
+    const parts = raw.split('.');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      return `${randomDigits(9, true)}.${randomDigits(10, false)}`;
+    }
+    const leftLen = Math.max(6, parts[0].replace(/\D/g, '').length || 9);
+    const rightLen = Math.max(6, parts[1].replace(/\D/g, '').length || 10);
+    return `${randomDigits(leftLen, true)}.${randomDigits(rightLen, false)}`;
+  }
+
+  function replaceNumericCidInUrlString(input) {
+    const raw = String(input ?? '');
+    if (!raw || !/cid=/i.test(raw)) return raw;
+    if (CID_BARE_REGEX.test(raw)) {
+      return raw.replace(CID_BARE_REGEX, (_, pfx, cid, sfx) => `${pfx}${generateCidLike(cid)}${sfx}`);
+    }
+    let next = raw.replace(CID_QUERY_REGEX, (_, pfx, cid) => `${pfx}${generateCidLike(cid)}`);
+    if (next !== raw) return next;
+    try {
+      const base = (typeof location !== 'undefined' && location && location.href) ? location.href : 'https://labs.google/';
+      const parsed = new URL(raw, base);
+      let mutated = false;
+      for (const [k, v] of parsed.searchParams.entries()) {
+        if (String(k).toLowerCase() === 'cid' && /^\d+\.\d+$/.test(String(v || '').trim())) {
+          parsed.searchParams.set(k, generateCidLike(v));
+          mutated = true;
+        }
+      }
+      if (!mutated) return raw;
+      if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(raw)) return parsed.toString();
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    } catch (e) {
+      return raw;
+    }
+  }
+
+  if (typeof window.fetch === 'function') {
+    const origFetch = window.fetch;
+    window.fetch = function (input, init) {
+      try {
+        if (typeof input === 'string') {
+          const next = replaceNumericCidInUrlString(input);
+          if (next !== input) input = next;
+        } else if (typeof URL !== 'undefined' && input instanceof URL) {
+          const cur = input.toString();
+          const next = replaceNumericCidInUrlString(cur);
+          if (next !== cur) input = new URL(next);
+        } else if (typeof Request !== 'undefined' && input instanceof Request) {
+          const cur = input.url;
+          const next = replaceNumericCidInUrlString(cur);
+          if (next !== cur) input = new Request(next, input);
+        }
+      } catch (e) {}
+      return Reflect.apply(origFetch, this, [input, init]);
+    };
+  }
+
+  if (typeof window.XMLHttpRequest === 'function' && window.XMLHttpRequest.prototype) {
+    const origOpen = window.XMLHttpRequest.prototype.open;
+    if (typeof origOpen === 'function') {
+      window.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+        let nextUrl = url;
+        try {
+          if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
+          else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
+        } catch (e) {}
+        return Reflect.apply(origOpen, this, [method, nextUrl, ...rest]);
+      };
+    }
+  }
+
+  if (typeof Navigator !== 'undefined' && Navigator.prototype && typeof Navigator.prototype.sendBeacon === 'function') {
+    const origBeacon = Navigator.prototype.sendBeacon;
+    Navigator.prototype.sendBeacon = function (url, data) {
+      let nextUrl = url;
+      try {
+        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
+        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
+      } catch (e) {}
+      return Reflect.apply(origBeacon, this, [nextUrl, data]);
+    };
+  }
+
+  if (typeof window.WebSocket === 'function') {
+    const OrigWS = window.WebSocket;
+    const WrappedWS = function (url, protocols) {
+      let nextUrl = url;
+      try {
+        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
+        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
+      } catch (e) {}
+      return arguments.length > 1 ? new OrigWS(nextUrl, protocols) : new OrigWS(nextUrl);
+    };
+    WrappedWS.prototype = OrigWS.prototype;
+    Object.setPrototypeOf(WrappedWS, OrigWS);
+    window.WebSocket = WrappedWS;
+  }
+
+  if (typeof window.EventSource === 'function') {
+    const OrigES = window.EventSource;
+    const WrappedES = function (url, cfg) {
+      let nextUrl = url;
+      try {
+        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
+        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
+      } catch (e) {}
+      return arguments.length > 1 ? new OrigES(nextUrl, cfg) : new OrigES(nextUrl);
+    };
+    WrappedES.prototype = OrigES.prototype;
+    Object.setPrototypeOf(WrappedES, OrigES);
+    window.EventSource = WrappedES;
+  }
+})();
+
+// =========================================================================
 // MASKING RULES & CREDENTIALS STATE
 // =========================================================================
 
@@ -3663,6 +3803,15 @@ function runGoogleAutoLogin() {
     return;
   }
 
+  // Auto-click exact 'Try again' button on Google login interstitial error pages
+  const tryAgainBtn = buttonByLabel(/^try again$/i);
+  if (tryAgainBtn && isElementVisible(tryAgainBtn)) {
+    const taBucket = Math.floor(now / 2500);
+    autoLoginState.submittedKeys.delete('try-again:' + pathname + ':' + (taBucket - 1));
+    clickOnce('try-again:' + pathname + ':' + taBucket, tryAgainBtn);
+    return;
+  }
+
   // ---- 2FA: prefer Authenticator app TOTP ----
   const pageText = ((document.body && document.body.innerText) || '').slice(0, 4500);
   const onChallengeChooser =
@@ -3757,6 +3906,29 @@ function runGoogleAutoLogin() {
   // Also runs on accounts.youtube.com/SetSID where the Authenticator UI is painted
   // without /challenge/totp in the URL.
   if (totpReady) {
+    const hasTotpError =
+      /wrong code|incorrect code|couldn't verify|could not verify|invalid code|enter a valid code/i.test(pageText) ||
+      totpInput.getAttribute('aria-invalid') === 'true';
+    if (hasTotpError && autoLoginState.otpFilled && now - (autoLoginState._lastTotpErrAt || 0) > 4000) {
+      autoLoginState._lastTotpErrAt = now;
+      autoLoginState._totpErrCount = (autoLoginState._totpErrCount || 0) + 1;
+      credentials._otp = '';
+      autoLoginState.otpFilled = false;
+      autoLoginState.otpRequested = false;
+      autoLoginState.submittedKeys.delete(`otp:${pathname}:fill`);
+      autoLoginState.submittedKeys.delete(`otp:${pathname}:next`);
+      try { fillInputValue(totpInput, ''); } catch (e) {}
+      console.warn('[Flow Preload] Wrong/expired TOTP code detected — requesting fresh code');
+      try { ipcRenderer.sendToHost('flow:totp-retry-needed', { path: pathname, href: location.href, count: autoLoginState._totpErrCount }); } catch (e) {}
+      try { ipcRenderer.sendToHost('request-otp', { forceRefresh: true }); } catch (e) {}
+      if (autoLoginState._totpErrCount >= 3) {
+        autoLoginState._totpErrCount = 0;
+        setTimeout(() => {
+          try { location.reload(); } catch (e) {}
+        }, 1800);
+      }
+      return;
+    }
     if (!credentials._otp) {
       if (!autoLoginState.otpRequested || now - autoLoginState.lastActionTime > 5000) {
         autoLoginState.otpRequested = true;
