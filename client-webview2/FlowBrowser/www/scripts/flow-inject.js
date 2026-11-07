@@ -1,10 +1,5 @@
 /* WebView2 bridge — replaces Electron ipcRenderer */
 (function () {
-  try {
-    if (window !== window.top) return;
-  } catch (e) {
-    return;
-  }
   if (typeof window.chrome === 'undefined' || !window.chrome.webview) {
     console.warn('[Flow Inject] chrome.webview missing');
   }
@@ -23,182 +18,176 @@
       }
     });
   } catch (e) {}
-  try {
-    Object.defineProperty(window, 'ipcRenderer', {
-      value: {
-        sendToHost(channel, data) {
-          post({ type: 'toHost', channel: channel, data: data === undefined ? null : data });
-        },
-        on(channel, listener) {
-          handlers[channel] = listener;
-        },
-        send() {},
-        invoke() { return Promise.resolve(null); }
-      },
-      enumerable: false,
-      configurable: true
-    });
-  } catch (e) {}
+  window.ipcRenderer = {
+    sendToHost(channel, data) {
+      post({ type: 'toHost', channel: channel, data: data === undefined ? null : data });
+    },
+    on(channel, listener) {
+      handlers[channel] = listener;
+    },
+    send() {},
+    invoke() { return Promise.resolve(null); }
+  };
 })();
-(function () {
+const { ipcRenderer } = window;
+
 const __flowIsSubFrame = (() => {
   try { return window !== window.top; } catch (e) { return true; }
 })();
-const __flowIsRecaptchaFrame = (() => {
-  try { return /recaptcha|challenge/i.test(location.href || ''); } catch (e) { return false; }
-})();
-if (__flowIsSubFrame && !__flowIsRecaptchaFrame) return;
+const __flowIsRecaptchaFrame = /recaptcha|challenge/i.test(location.href || '');
 
-/**
- * Per-page-load canvas / WebGL / audio fingerprint noise (ported from Whale extension content/cid.js).
- */
+if (
+  window.__flowInjectBootstrapped ||
+  location.hostname === 'app.flowbrowser.localhost' ||
+  location.hostname === 'flowbrowser.local' ||
+  (__flowIsSubFrame && !__flowIsRecaptchaFrame)
+) {
+  // Skip duplicate inject, built-in local studio pages (TTS STUDIO), or non-captcha background iframes
+} else {
+  window.__flowInjectBootstrapped = true;
+
+// =========================================================================
+// CID PROTOCOL RANDOMIZER (fetch / XHR / sendBeacon / WebSocket / EventSource)
+// =========================================================================
 (function installCidRandomizer() {
-  if (window.__flowCidInstalled) return;
-  window.__flowCidInstalled = true;
-  const _a = new Uint8Array(64);
-  try {
-    crypto.getRandomValues(_a);
-  } catch (e) {
-    for (let i = 0; i < _a.length; i++) _a[i] = (Math.random() * 256) | 0;
-  }
-  let _b = 0;
-  const _c = () => _a[_b++ & 63];
-  const _d = _c();
-  const _e = _c();
-  const _f = (_c() & 15) - 7;
-  const _g = (_c() & 15) - 7;
-  const _h = (_c() - 128) * 1e-7;
-  const _i = new WeakSet();
+  if (window.__flowCidRandomizerInstalled) return;
+  window.__flowCidRandomizerInstalled = true;
 
-  const _j = (ctx, w, h) => {
-    if (!w || !h || _i.has(ctx)) return;
-    _i.add(ctx);
+  const CID_QUERY_REGEX = /([?&]cid=)(\d+\.\d+)(?=(?:&|#|$))/gi;
+  const CID_BARE_REGEX = /^(\s*cid=)(\d+\.\d+)(\s*)$/i;
+
+  function randomDigit(nonZero) {
+    const min = nonZero ? 1 : 0;
+    const max = 9;
+    return String(Math.floor(Math.random() * (max - min + 1)) + min);
+  }
+
+  function randomDigits(length, nonZeroFirst) {
+    const safeLen = Math.max(1, Number(length) || 1);
+    let out = '';
+    for (let i = 0; i < safeLen; i += 1) {
+      out += randomDigit(Boolean(nonZeroFirst && i === 0));
+    }
+    return out;
+  }
+
+  function generateCidLike(sampleCid) {
+    const raw = String(sampleCid || '').trim();
+    const parts = raw.split('.');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      return `${randomDigits(9, true)}.${randomDigits(10, false)}`;
+    }
+    const leftLen = Math.max(6, parts[0].replace(/\D/g, '').length || 9);
+    const rightLen = Math.max(6, parts[1].replace(/\D/g, '').length || 10);
+    return `${randomDigits(leftLen, true)}.${randomDigits(rightLen, false)}`;
+  }
+
+  function replaceNumericCidInUrlString(input) {
+    const raw = String(input ?? '');
+    if (!raw || !/cid=/i.test(raw)) return raw;
+    if (CID_BARE_REGEX.test(raw)) {
+      return raw.replace(CID_BARE_REGEX, (_, pfx, cid, sfx) => `${pfx}${generateCidLike(cid)}${sfx}`);
+    }
+    let next = raw.replace(CID_QUERY_REGEX, (_, pfx, cid) => `${pfx}${generateCidLike(cid)}`);
+    if (next !== raw) return next;
     try {
-      const x = _d % w;
-      const y = _e % h;
-      const px = _k.call(ctx, x, y, 1, 1);
-      px.data[0] = (px.data[0] + _f) & 255;
-      px.data[1] = (px.data[1] + _g) & 255;
-      ctx.putImageData(px, x, y);
-    } catch (e) {}
-  };
-
-  const _k = CanvasRenderingContext2D.prototype.getImageData;
-  const _l = HTMLCanvasElement.prototype.toDataURL;
-  const _m = HTMLCanvasElement.prototype.toBlob;
-
-  HTMLCanvasElement.prototype.toDataURL = new Proxy(_l, {
-    apply(t, s, a) {
-      try {
-        const c = s.getContext('2d');
-        if (c) _j(c, s.width, s.height);
-      } catch (e) {}
-      return Reflect.apply(t, s, a);
+      const base = (typeof location !== 'undefined' && location && location.href) ? location.href : 'https://labs.google/';
+      const parsed = new URL(raw, base);
+      let mutated = false;
+      for (const [k, v] of parsed.searchParams.entries()) {
+        if (String(k).toLowerCase() === 'cid' && /^\d+\.\d+$/.test(String(v || '').trim())) {
+          parsed.searchParams.set(k, generateCidLike(v));
+          mutated = true;
+        }
+      }
+      if (!mutated) return raw;
+      if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(raw)) return parsed.toString();
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    } catch (e) {
+      return raw;
     }
-  });
-
-  HTMLCanvasElement.prototype.toBlob = new Proxy(_m, {
-    apply(t, s, a) {
-      try {
-        const c = s.getContext('2d');
-        if (c) _j(c, s.width, s.height);
-      } catch (e) {}
-      return Reflect.apply(t, s, a);
-    }
-  });
-
-  CanvasRenderingContext2D.prototype.getImageData = new Proxy(_k, {
-    apply(t, s, a) {
-      const r = Reflect.apply(t, s, a);
-      if (!_i.has(s) && r.data.length >= 4) {
-        _i.add(s);
-        const idx = ((_d % Math.max(1, r.width)) + (_e % Math.max(1, r.height)) * r.width) * 4;
-        if (idx + 2 < r.data.length) {
-          r.data[idx] = (r.data[idx] + _f) & 255;
-          r.data[idx + 1] = (r.data[idx + 1] + _g) & 255;
-        }
-      }
-      return r;
-    }
-  });
-
-  const _n = (_o) => {
-    if (!_o) return;
-    const _p = _o.prototype.getParameter;
-    const _q = _o.prototype.readPixels;
-    _o.prototype.getParameter = new Proxy(_p, {
-      apply(t, s, a) {
-        const r = Reflect.apply(t, s, a);
-        const p = a[0];
-        if (p === 33901 || p === 33902) {
-          if (r instanceof Float32Array && r.length >= 2) {
-            const c = new Float32Array(r);
-            c[1] += (_f || 1) * 1e-4;
-            return c;
-          }
-        }
-        return r;
-      }
-    });
-    _o.prototype.readPixels = new Proxy(_q, {
-      apply(t, s, a) {
-        Reflect.apply(t, s, a);
-        const buf = a[6];
-        if (buf && buf.length >= 4) {
-          buf[0] = (buf[0] + _f) & 255;
-        }
-      }
-    });
-  };
-
-  if (typeof WebGLRenderingContext !== 'undefined') _n(WebGLRenderingContext);
-  if (typeof WebGL2RenderingContext !== 'undefined') _n(WebGL2RenderingContext);
-
-  if (typeof AudioBuffer !== 'undefined') {
-    const _r = AudioBuffer.prototype.getChannelData;
-    AudioBuffer.prototype.getChannelData = new Proxy(_r, {
-      apply(t, s, a) {
-        const r = Reflect.apply(t, s, a);
-        if (!_i.has(r) && r.length > 0) {
-          _i.add(r);
-          for (let i = 0, l = r.length; i < l; i += 100) {
-            r[i] += _h;
-          }
-        }
-        return r;
-      }
-    });
   }
 
-  if (typeof AnalyserNode !== 'undefined') {
-    const _s = AnalyserNode.prototype.getFloatFrequencyData;
-    AnalyserNode.prototype.getFloatFrequencyData = new Proxy(_s, {
-      apply(t, s, a) {
-        Reflect.apply(t, s, a);
-        const arr = a[0];
-        if (arr && arr.length > 0) {
-          for (let i = 0, l = arr.length; i < l; i += 16) {
-            arr[i] += _h * 100;
-          }
+  if (typeof window.fetch === 'function') {
+    const origFetch = window.fetch;
+    window.fetch = function (input, init) {
+      try {
+        if (typeof input === 'string') {
+          const next = replaceNumericCidInUrlString(input);
+          if (next !== input) input = next;
+        } else if (typeof URL !== 'undefined' && input instanceof URL) {
+          const cur = input.toString();
+          const next = replaceNumericCidInUrlString(cur);
+          if (next !== cur) input = new URL(next);
+        } else if (typeof Request !== 'undefined' && input instanceof Request) {
+          const cur = input.url;
+          const next = replaceNumericCidInUrlString(cur);
+          if (next !== cur) input = new Request(next, input);
         }
-      }
-    });
+      } catch (e) {}
+      return Reflect.apply(origFetch, this, [input, init]);
+    };
+  }
+
+  if (typeof window.XMLHttpRequest === 'function' && window.XMLHttpRequest.prototype) {
+    const origOpen = window.XMLHttpRequest.prototype.open;
+    if (typeof origOpen === 'function') {
+      window.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+        let nextUrl = url;
+        try {
+          if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
+          else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
+        } catch (e) {}
+        return Reflect.apply(origOpen, this, [method, nextUrl, ...rest]);
+      };
+    }
+  }
+
+  if (typeof Navigator !== 'undefined' && Navigator.prototype && typeof Navigator.prototype.sendBeacon === 'function') {
+    const origBeacon = Navigator.prototype.sendBeacon;
+    Navigator.prototype.sendBeacon = function (url, data) {
+      let nextUrl = url;
+      try {
+        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
+        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
+      } catch (e) {}
+      return Reflect.apply(origBeacon, this, [nextUrl, data]);
+    };
+  }
+
+  if (typeof window.WebSocket === 'function') {
+    const OrigWS = window.WebSocket;
+    const WrappedWS = function (url, protocols) {
+      let nextUrl = url;
+      try {
+        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
+        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
+      } catch (e) {}
+      return arguments.length > 1 ? new OrigWS(nextUrl, protocols) : new OrigWS(nextUrl);
+    };
+    WrappedWS.prototype = OrigWS.prototype;
+    Object.setPrototypeOf(WrappedWS, OrigWS);
+    window.WebSocket = WrappedWS;
+  }
+
+  if (typeof window.EventSource === 'function') {
+    const OrigES = window.EventSource;
+    const WrappedES = function (url, cfg) {
+      let nextUrl = url;
+      try {
+        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
+        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
+      } catch (e) {}
+      return arguments.length > 1 ? new OrigES(nextUrl, cfg) : new OrigES(nextUrl);
+    };
+    WrappedES.prototype = OrigES.prototype;
+    Object.setPrototypeOf(WrappedES, OrigES);
+    window.EventSource = WrappedES;
   }
 })();
 
 // Never run DOM observers, styles, or UI hooks inside subframes (including reCAPTCHA iframes)
 if (__flowIsSubFrame) return;
-
-const { ipcRenderer } = window;
-
-if (
-  window.__flowInjectBootstrapped ||
-  location.hostname === 'app.flowbrowser.localhost' ||
-  location.hostname === 'flowbrowser.local'
-) {
-  // Skip duplicate inject or built-in local studio pages (TTS STUDIO)
-} else {
-  window.__flowInjectBootstrapped = true;
 
 // =========================================================================
 // MASKING RULES & CREDENTIALS STATE
@@ -497,8 +486,6 @@ function getActiveDomModelText() {
       [aria-label*="model" i]
     `);
     for (const el of candidates) {
-      const fk = el.getAttribute('data-fake-model');
-      if (fk && creditMap[fk]) return fk;
       const txt = (el.innerText || el.textContent || '').trim();
       if (txt && (txt.includes('Banana') || txt.includes('Veo') || txt.includes('Nano') || txt.includes('Fast') || txt.includes('Pro') || txt.includes('Lite'))) {
         return txt;
@@ -536,10 +523,10 @@ function getGenerationModelDetails(forceType = '', modelHint = '', requestBodyTe
       const rawDom = getActiveDomModelText();
       if (rawDom.includes('Quality')) detectedModel = 'Veo 3.1 - Quality';
       else if (rawDom.includes('Fast')) detectedModel = 'Veo 3.1 - Fast';
-      else if (rawDom.includes('Omni') && rawDom.includes('1.1')) detectedModel = 'Omni 1.1 Flash';
+      else if (rawDom.includes('Omni')) detectedModel = 'Omni 1.1 Flash';
       else if (rawDom.includes('Lite')) detectedModel = 'Veo 3.1 - Lite';
     }
-    const mName = detectedModel && creditMap[detectedModel] ? detectedModel : 'Veo 3.1 - Lite';
+    const mName = detectedModel && creditMap[detectedModel] ? detectedModel : 'Veo 3.1 - Fast';
     const mRate = parseInt(creditMap[mName] || '5', 10) || 5;
     return { type: 'video', modelName: mName, rate: mRate };
   }
@@ -640,24 +627,8 @@ function deductCredits(modelDetails, count = 1, uniqueId = '') {
 let lastJobStartTime = 0;
 let lastTypedPromptText = '';
 let lastTypedPromptAt = 0;
-let allPendingClearedAt = 0;
 const seenPendingTiles = new WeakSet();
 const seenGridTiles = new WeakSet();
-const seenErrorTiles = new WeakSet();
-const seenErrorAlertNodes = new WeakSet();
-const seenFailedOpIds = new Set();
-
-function snapshotPreExistingErrors() {
-  try {
-    document.querySelectorAll('flow-grid-tile-container').forEach((gt) => {
-      const st = inspectFlowGridTileState(gt);
-      if (st.hasErrorIcon) seenErrorTiles.add(gt);
-    });
-    document.querySelectorAll('[role="alert"], [role="status"], mat-snack-bar-container, .mat-mdc-snack-bar-label, .mdc-snackbar__label').forEach((el) => {
-      seenErrorAlertNodes.add(el);
-    });
-  } catch (e) {}
-}
 
 function getPromptTextboxContent() {
   try {
@@ -704,7 +675,6 @@ function startGenerationJob(source = '', boundPendingTile = null) {
     isWaitingForPercentage = false;
     lastTypedPromptText = '';
     markInitialMediaAsSeen();
-    snapshotPreExistingErrors();
     return null;
   }
   const totalAmount = Math.max(1, details.rate * multiplier);
@@ -712,11 +682,9 @@ function startGenerationJob(source = '', boundPendingTile = null) {
   pendingGeneration = null;
   isWaitingForPercentage = false;
   lastTypedPromptText = '';
-  allPendingClearedAt = 0;
 
-  // Snapshot existing completed media and any pre-existing error tiles/alerts before this job starts
+  // Snapshot existing completed media before this job completes
   markInitialMediaAsSeen();
-  snapshotPreExistingErrors();
 
   const tileContainer = boundPendingTile ? boundPendingTile.closest('flow-grid-tile-container') : null;
 
@@ -796,11 +764,9 @@ function failSpecificJob(job, failReason = '') {
   return true;
 }
 
-// Fail & refund the newest running job on immediate API/snackbar error, or oldest running job on tile failure
-function failOldestRunningJob(failReason = '', preferNewest = false) {
-  const running = activeGenerationJobs.filter((j) => j && j.status === 'running' && !j.refunded);
-  if (!running.length) return false;
-  const job = preferNewest ? running[running.length - 1] : running[0];
+// Fail & refund the oldest running job (or most recently started running job if an immediate API error occurred)
+function failOldestRunningJob(failReason = '') {
+  let job = activeGenerationJobs.find((j) => j && j.status === 'running' && !j.refunded);
   return failSpecificJob(job, failReason);
 }
 
@@ -872,18 +838,23 @@ document.addEventListener('drop', (e) => {
 }, true);
 
 // Concurrent-safe tile & progress watcher: never false-refunds when Video 2 is requested while Video 1 is in progress
+const seenErrorTiles = new WeakSet();
+let allPendingClearedAt = 0;
+
 function updateConcurrentTileJobs() {
   const now = Date.now();
 
-  // During initial 3.5s after page load or navigation, mark existing tiles & errors as pre-existing
+  // During initial 3.5s after page load or navigation, mark existing tiles as pre-existing
   if (!pageInitialLoadDone || now - lastNavigationTime < 3500) {
     document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
-    document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
-    snapshotPreExistingErrors();
+    document.querySelectorAll('flow-grid-tile-container').forEach((gt) => {
+      seenGridTiles.add(gt);
+      const st = inspectFlowGridTileState(gt);
+      if (st.hasErrorIcon) seenErrorTiles.add(gt);
+    });
     return;
   }
 
-  // First check if any new media finished mounting so completed jobs are marked completed before any failure check
   checkForNewGeneratedMedia();
 
   const runningJobs = activeGenerationJobs.filter((j) => j && j.status === 'running' && !j.refunded);
@@ -892,7 +863,6 @@ function updateConcurrentTileJobs() {
     return;
   }
 
-  // Count active pending tiles across the entire grid (safe against Angular virtual-scroll recycling when Video 2 is added)
   let activePendingCount = 0;
   const pendingTiles = document.querySelectorAll('flow-pending-tile');
   for (const pt of pendingTiles) {
@@ -908,15 +878,13 @@ function updateConcurrentTileJobs() {
     if (state.hasPending && !gt.querySelector('flow-pending-tile')) {
       activePendingCount++;
     }
-    // Only treat a tile as failed if it explicitly displays a warning/error icon and was NOT a pre-existing error tile
     if (state.hasErrorIcon && !state.hasPending && !state.hasResource && !seenErrorTiles.has(gt)) {
       seenErrorTiles.add(gt);
-      failOldestRunningJob('Tile displayed warning/error icon', false);
+      failOldestRunningJob('Tile displayed warning/error icon');
       return;
     }
   }
 
-  // While any video/tile is actively generating on the page, keep all running jobs alive (never false-refund queued Video 2!)
   if (activePendingCount > 0) {
     allPendingClearedAt = 0;
     for (const job of runningJobs) {
@@ -928,7 +896,6 @@ function updateConcurrentTileJobs() {
     return;
   }
 
-  // Zero pending tiles are currently on the page: wait a generous settle window before concluding an unfulfilled job failed
   if (!allPendingClearedAt) {
     allPendingClearedAt = now;
     return;
@@ -939,7 +906,6 @@ function updateConcurrentTileJobs() {
     for (const job of activeGenerationJobs) {
       if (!job || job.status !== 'running' || job.refunded) continue;
       if (job.projectPath && window.location.pathname !== job.projectPath && !job.projectPath.endsWith('/')) continue;
-      // Only refund if this job either already had a pending tile that vanished without media, or waited > 30s with zero pending tiles
       if ((job.sawProgress && now - job.startedAt > 6000) || (now - job.startedAt > 30000)) {
         failSpecificJob(job, 'Generation ended without producing media');
       }
@@ -976,12 +942,7 @@ function inspectDataForGenerations(url, data, requestBodyText = '') {
     (Array.isArray(resp.raiMediaFilteredReasons) && resp.raiMediaFilteredReasons.length > 0);
 
   if (hasExplicitError) {
-    const opKey = String(data.name || data.operationId || resp.name || '').trim();
-    if (opKey) {
-      if (seenFailedOpIds.has(opKey)) return;
-      seenFailedOpIds.add(opKey);
-    }
-    failOldestRunningJob('API generation error or safety filter', true);
+    failOldestRunningJob('API generation error or safety filter');
     return;
   }
 
@@ -1090,29 +1051,19 @@ function setupGenerateActionHook() {
 // Network hooks: watch generation & operation endpoints for completion or explicit error
 (function installNetworkCreditHooks() {
   try {
-    const isGenSubmitUrl = (url) => {
-      const u = String(url || '').toLowerCase();
-      if (u.includes('listprojects') || u.includes('listmedia') || u.includes('userinfo') || u.includes('log') || u.includes('telemetry') || u.includes('check') || u.includes('status')) {
-        return false;
-      }
-      return (
-        u.includes('batchgenerate') ||
-        u.includes('batch_generate') ||
-        u.includes('generatevideo') ||
-        u.includes('generateasyncvideo') ||
-        u.includes('generateimage')
-      );
-    };
     const isGenOrOpUrl = (url) => {
       const u = String(url || '').toLowerCase();
       if (u.includes('listprojects') || u.includes('listmedia') || u.includes('userinfo') || u.includes('log') || u.includes('telemetry')) {
         return false;
       }
       return (
-        isGenSubmitUrl(u) ||
+        u.includes('batchgenerate') ||
+        u.includes('batch_generate') ||
+        u.includes('generatevideo') ||
+        u.includes('generateimage') ||
         u.includes('checkoperations') ||
-        u.includes('checkasyncvideogeneration') ||
-        u.includes('/operations/')
+        u.includes('/operations/') ||
+        (u.includes('aisandbox') && (u.includes('generate') || u.includes('flow') || u.includes('video') || u.includes('image') || u.includes('batch')))
       );
     };
 
@@ -1123,8 +1074,8 @@ function setupGenerateActionHook() {
         return origFetch(input, init).then((res) => {
           try {
             if (isGenOrOpUrl(url)) {
-              if (!res.ok && res.status >= 400 && isGenSubmitUrl(url)) {
-                failOldestRunningJob('Generation HTTP ' + res.status, true);
+              if (!res.ok && res.status >= 400) {
+                failOldestRunningJob('Generation HTTP ' + res.status);
               } else if (res.ok && typeof res.clone === 'function') {
                 res.clone().json().then((data) => {
                   inspectDataForGenerations(url, data);
@@ -1150,8 +1101,8 @@ function setupGenerateActionHook() {
         this.addEventListener('load', () => {
           try {
             if (!isGenOrOpUrl(this.__flowUrl)) return;
-            if (this.status >= 400 && isGenSubmitUrl(this.__flowUrl)) {
-              failOldestRunningJob('Generation XHR HTTP ' + this.status, true);
+            if (this.status >= 400) {
+              failOldestRunningJob('Generation XHR HTTP ' + this.status);
             } else if (this.status >= 200 && this.status < 300 && this.responseText) {
               try {
                 const data = JSON.parse(this.responseText);
@@ -1211,24 +1162,22 @@ function scanDomForFailedGenerations() {
   const hasRunningJob = activeGenerationJobs.some((j) => j && j.status === 'running' && !j.refunded);
   if (!hasRunningJob) return;
 
-  // Match explicit generation failure messages in transient snackbars/alerts only (tiles are tracked via seenErrorTiles)
+  // Match explicit generation failure messages in snackbars/alerts/tiles — never match "Privacy Policy" or account dialogs!
   const explicitFailRegex = /\b(couldn'?t generate|could not generate|failed to generate|generation failed|unable to generate|error generating|can'?t generate|violates our|blocked by|something went wrong|try again later|prompt was blocked)\b/i;
-  const candidates = document.querySelectorAll('[role="alert"], mat-snack-bar-container, .mat-mdc-snack-bar-label, .mdc-snackbar__label');
+  const candidates = document.querySelectorAll('[role="alert"], [role="status"], mat-snack-bar-container, .mat-mdc-snack-bar-label, .mdc-snackbar__label, flow-grid-tile-container');
   for (const el of candidates) {
-    if (!el || seenErrorAlertNodes.has(el)) continue;
-    if (el.id === 'flow-generation-toast' || el.closest('#flow-generation-toast')) continue;
-    if (el.closest('[role="menu"], [role="dialog"], .mat-mdc-menu-panel, header, footer, #flow-saved-projects-backdrop, flow-grid-tile-container')) continue;
+    if (!el || el.id === 'flow-generation-toast' || el.closest('#flow-generation-toast')) continue;
+    if (el.closest('[role="menu"], [role="dialog"], .mat-mdc-menu-panel, header, footer, #flow-saved-projects-backdrop')) continue;
     const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
     if (!txt || txt.length > 260) continue;
     if (!explicitFailRegex.test(txt)) continue;
 
-    seenErrorAlertNodes.add(el);
     const sig = txt.slice(0, 100);
     if (seenErrorSignATURES.has(sig)) continue;
     seenErrorSignATURES.add(sig);
-    setTimeout(() => seenErrorSignATURES.delete(sig), 4000);
+    setTimeout(() => seenErrorSignATURES.delete(sig), 12000);
 
-    failOldestRunningJob(txt.slice(0, 60), true);
+    failOldestRunningJob(txt.slice(0, 60));
     return;
   }
 }
@@ -1240,12 +1189,10 @@ function checkForNewGeneratedMedia() {
     lastNavigationTime = Date.now();
     pageInitialLoadDone = false;
     markInitialMediaAsSeen();
-    snapshotPreExistingErrors();
     document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
     document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
     setTimeout(() => {
       markInitialMediaAsSeen();
-      snapshotPreExistingErrors();
       document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
       document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
       pageInitialLoadDone = true;
@@ -1256,7 +1203,6 @@ function checkForNewGeneratedMedia() {
   // Always keep marking initial media during the first 3.5 seconds after navigation
   if (!pageInitialLoadDone || Date.now() - lastNavigationTime < 3500) {
     markInitialMediaAsSeen();
-    snapshotPreExistingErrors();
     return;
   }
 
@@ -1286,7 +1232,6 @@ function checkForNewGeneratedMedia() {
 
 setTimeout(() => {
   markInitialMediaAsSeen();
-  snapshotPreExistingErrors();
   document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
   document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
   pageInitialLoadDone = true;
@@ -1302,8 +1247,8 @@ setupGenerateActionHook();
 
 function cleanText(str) {
   return String(str || '')
-    .replace(new RegExp('volume_up|arrow_drop_down|check|done|spark|auto_awesome|videocam|chevron_right|expand_more', 'gi'), '')
-    .replace(new RegExp('leaving\\s+[a-z]+\\s+\\d+', 'gi'), '')
+    .replace(/volume_up|arrow_drop_down|check|done|spark|auto_awesome|videocam|chevron_right|expand_more/gi, '')
+    .replace(/leaving\s+[a-z]+\s+\d+/gi, '')
     .replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/\s*-\s*/g, ' - ')
     .replace(/\s+/g, ' ')
@@ -1313,7 +1258,6 @@ function cleanText(str) {
 function isHiddenNewModelText(rawText) {
   const t = cleanText(rawText || '').toLowerCase();
   if (!t) return false;
-  // Hide Google's new Omni 1.2 Flash (and any Omni model other than Omni 1.1 Flash)
   if (t.includes('omni') && !t.includes('1.1')) return true;
   return false;
 }
@@ -2064,10 +2008,10 @@ loadSavedProjectsFromDevice();
         "button[data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path),[role='combobox'][data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path){color:transparent!important}" +
         "button[data-fake-model]::after,[role='combobox'][data-fake-model]::after{content:attr(data-fake-model)!important;position:absolute!important;left:var(--fake-model-left,14px)!important;top:50%!important;transform:translateY(-50%)!important;color:#fff!important;font-family:'Google Sans Text','Google Sans',sans-serif!important;font-size:13px!important;font-weight:500!important;pointer-events:none!important;white-space:nowrap!important}" +
         "button[data-fake-model] i,button[data-fake-model] .google-symbols,button[data-fake-model] mat-icon,button[data-fake-model] svg,[role='combobox'][data-fake-model] i,[role='combobox'][data-fake-model] .google-symbols,[role='combobox'][data-fake-model] mat-icon,[role='combobox'][data-fake-model] svg{color:#fff!important;visibility:visible!important}" +
-        "[role='menuitem'][data-hide-lp='true'],[role='option'][data-hide-lp='true'],flow-menu-item[data-hide-lp='true'],flow-menu-item:has([data-hide-lp='true']){height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
-        "[role='menuitem'][data-hide-model='true'],[role='option'][data-hide-model='true'],flow-menu-item[data-hide-model='true'],flow-menu-item:has([data-hide-model='true']),mat-option:has([data-hide-model='true']){display:none!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
-        "[role='menuitem'][data-fake-active='true'],[role='option'][data-fake-active='true'],flow-menu-item[data-fake-active='true'] button,flow-menu-item:has([data-fake-active='true']) button{background-color:rgba(255,255,255,.12)!important;border-radius:12px!important}" +
-        "[role='menuitem'][data-fake-inactive='true'],[role='option'][data-fake-inactive='true'],flow-menu-item[data-fake-inactive='true'] button,flow-menu-item:has([data-fake-inactive='true']) button{background-color:transparent!important}" +
+        "[role='menuitem'][data-hide-lp='true'],[role='option'][data-hide-lp='true']{height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
+        "flow-menu-item:has([data-hide-lp='true']){height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
+        "[role='menuitem'][data-fake-active='true'],[role='option'][data-fake-active='true']{background-color:rgba(255,255,255,.12)!important;border-radius:12px!important}" +
+        "[role='menuitem'][data-fake-inactive='true'],[role='option'][data-fake-inactive='true']{background-color:transparent!important}" +
         "[data-pakflow-autosetup-hide='true']{opacity:0!important;pointer-events:none!important;transition:none!important}" +
         "body[data-pakflow-boot-hide='true'] [role='dialog'],body[data-pakflow-boot-hide='true'] [data-radix-popper-content-wrapper],body[data-pakflow-boot-hide='true'] .cdk-overlay-pane,body[data-pakflow-boot-hide='true'] flow-prompt-box-settings,body[data-pakflow-boot-hide='true'] [role='menu'],body[data-pakflow-boot-hide='true'] [role='listbox']{opacity:0!important;pointer-events:none!important;transition:none!important}" +
         "a[data-fake-credits]{color:transparent!important;position:relative!important}" +
@@ -2185,7 +2129,7 @@ loadSavedProjectsFromDevice();
 
   function matchKnownModelName(rawItemText) {
     if (isHiddenNewModelText(rawItemText)) return '';
-    const cleaned = cleanText(rawItemText || '').replace(new RegExp('\\s*\\[Lower Priority\\]', 'gi'), '').trim();
+    const cleaned = cleanText(rawItemText || '').replace(/\s*\[Lower Priority\]/gi, '').trim();
     if (!cleaned) return '';
     if (creditMap[cleaned]) return cleaned;
     const lower = cleaned.toLowerCase();
@@ -2200,9 +2144,7 @@ loadSavedProjectsFromDevice();
   }
 
   function findBestBackendModelItem(allMenuItems) {
-    const items = Array.from(
-      allMenuItems || document.querySelectorAll('[role="menuitem"], [role="option"]')
-    );
+    const items = Array.from(allMenuItems || document.querySelectorAll('[role="menuitem"], [role="option"]'));
     const lpTarget =
       items.find((mi) => {
         const t = cleanText(mi.textContent);
@@ -2228,29 +2170,64 @@ loadSavedProjectsFromDevice();
   }
 
   function findModelDropdownButton() {
-    const exactMenuBtn = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(
-      (b) => b.textContent && (b.textContent.includes('Veo') || b.textContent.includes('Omni') || b.textContent.includes('Lower Priority'))
+    const allBtns = Array.from(document.querySelectorAll('button, [role="combobox"]'));
+    return (
+      allBtns.find((b) => {
+        if (b.closest('#flow-my-projects-dock, #flow-saved-projects-backdrop, header')) return false;
+        const txt = (b.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!txt || txt.length > 70) return false;
+        if (txt.includes('Extend (') || txt.includes('pen_magic')) return false;
+        return txt.includes('Veo') || txt.includes('Omni') || txt.includes('Lower Priority');
+      }) || null
     );
-    if (exactMenuBtn) return exactMenuBtn;
-    return Array.from(document.querySelectorAll('button, [role="combobox"]')).find((b) => {
-      if (b.closest('[role="menu"], [role="listbox"]')) return false;
-      const txt = (b.textContent || '').trim();
-      if (!txt || txt.length > 70) return false;
-      if (txt.includes('Extend (')) return false;
-      return txt.includes('Veo') || txt.includes('Omni') || txt.includes('Lower Priority');
+  }
+
+  function syncCreditCostInDom(hideCompletely) {
+    const creditLink = document.querySelector('a[href*="g1_ai_credit_menu"], a[href*="credit_menu"], a[href*="ai_credit"]');
+    const containers = new Set();
+    if (creditLink) {
+      containers.add(creditLink.parentElement || creditLink);
+    }
+    document.querySelectorAll('div, p, span').forEach((el) => {
+      if (el.children.length <= 3) {
+        const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (txt.startsWith('Generating will use') && txt.length < 80) {
+          containers.add(el);
+        }
+      }
     });
+    if (hideCompletely) {
+      containers.forEach((row) => {
+        row.style.setProperty('display', 'none', 'important');
+      });
+      if (creditLink) creditLink.removeAttribute('data-fake-credits');
+      return;
+    }
+    const targetCredits = creditMap[fakeModelName || 'Veo 3.1 - Lite'] || '5';
+    containers.forEach((row) => {
+      row.style.removeProperty('display');
+      const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+      let tn;
+      while ((tn = walker.nextNode())) {
+        const val = tn.nodeValue || '';
+        if (/\b\d+\s*credits\b/i.test(val)) {
+          const desired = val.replace(/\b\d+\s*credits\b/i, targetCredits + ' credits');
+          if (tn.nodeValue !== desired) tn.nodeValue = desired;
+        }
+      }
+    });
+    if (creditLink) {
+      creditLink.removeAttribute('data-fake-credits');
+    }
   }
 
   function applyFakeModelToDomNow() {
-    if (!fakeModelName) return;
+    if (!fakeModelName) fakeModelName = 'Veo 3.1 - Lite';
     const modelMenuBtn = findModelDropdownButton();
     if (modelMenuBtn) {
       modelMenuBtn.setAttribute('data-fake-model', fakeModelName);
     }
-    const creditLink = document.querySelector('a[href*="g1_ai_credit_menu"]');
-    if (creditLink && creditMap[fakeModelName]) {
-      creditLink.setAttribute('data-fake-credits', creditMap[fakeModelName]);
-    }
+    syncCreditCostInDom(false);
   }
 
   function closeOpenModelDropdownMenu() {
@@ -2264,7 +2241,7 @@ loadSavedProjectsFromDevice();
       setTimeout(() => {
         const stillOpen = document.querySelector('[role="menu"], [role="listbox"]');
         if (stillOpen) {
-          const expandedTrigger = document.querySelector('button[aria-haspopup="menu"][aria-expanded="true"], [aria-expanded="true"][data-fake-model]');
+          const expandedTrigger = document.querySelector('button[aria-expanded="true"], [role="combobox"][aria-expanded="true"]');
           if (expandedTrigger) {
             try { expandedTrigger.click(); } catch (e) {}
           }
@@ -2292,7 +2269,7 @@ loadSavedProjectsFromDevice();
     return false;
   }
 
-  // Capture-phase click interception on model & upscale menu items
+  // Click interception for 4K Upscaled -> 1080p (-50 cr) and redirecting model selection -> [Lower Priority] / Lite
   document.addEventListener('click', (e) => {
     if (!isFlowHost()) return;
     const target = e.target;
@@ -2300,28 +2277,19 @@ loadSavedProjectsFromDevice();
 
     const menuItem = target.closest('[role="menuitem"], [role="option"]');
     if (!menuItem || menuItem.__pakflowInternalClick) return;
-    const rawText = menuItem.textContent || '';
-    const itemText = cleanText(rawText);
-
-    // Block any interaction with hidden new models (e.g. Omni 1.2 Flash)
-    if (isHiddenNewModelText(rawText)) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-      return;
-    }
+    const itemText = cleanText(menuItem.textContent);
 
     // 4K Upscaled interception -> click 1080p and deduct 50 credits
     if (itemText.includes('4K') && itemText.includes('Upscaled')) {
-      let has1080 = false;
+      let has1080p = false;
       const allMenuItems = document.querySelectorAll('[role="menuitem"]');
       for (const mi of allMenuItems) {
         if ((mi.textContent || '').includes('1080p')) {
-          has1080 = true;
+          has1080p = true;
           break;
         }
       }
-      if (has1080) {
+      if (has1080p) {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
@@ -2337,20 +2305,20 @@ loadSavedProjectsFromDevice();
       }
     }
 
-    // PakFlow Model Redirection: user selects ANY model -> display & charge user's selection,
-    // while routing the backend selection to [Lower Priority] (or Veo 3.1 - Lite if no LP exists)
+    // PakFlow Model Redirection: user selects ANY model -> display & charge user's selection, but select [Lower Priority] (or Lite) in Flow
     if (!isImageModeActive && !isImageOnlyAccount() && (itemText.includes('Veo') || itemText.includes('Omni'))) {
       if (!itemText.includes('Lower Priority')) {
-        const matched = matchKnownModelName(rawText);
+        const matched = matchKnownModelName(itemText);
         if (matched) {
-          initPakflowDomEngine._userExplicitlyPickedModel = true;
           fakeModelName = matched;
+          initPakflowDomEngine._userExplicitlyPickedModel = true;
           try { sessionStorage.setItem('__pakflow_fake_model', fakeModelName); } catch (err) {}
           applyFakeModelToDomNow();
         }
         const allMenuItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
         const best = findBestBackendModelItem(allMenuItems);
         if (!best.target || best.target === menuItem) {
+          // Allow native click on Veo 3.1 - Lite to select it & close the dropdown naturally
           closeOpenModelDropdownMenu();
           return;
         }
@@ -2616,7 +2584,7 @@ loadSavedProjectsFromDevice();
     if (window.location.pathname !== lastPakflowPathname) {
       lastPakflowPathname = window.location.pathname;
       setupState = 0;
-      setupStartTime = now;
+      setupStartTime = 0;
       if (!initPakflowDomEngine._userExplicitlyPickedModel) {
         fakeModelName = 'Veo 3.1 - Lite';
       }
@@ -2916,9 +2884,10 @@ loadSavedProjectsFromDevice();
 
     isLockedBySubmission = false;
 
-    // Hide sign-out buttons & x2/x3/x4 batch multiplier tabs
-    const allButtons = document.querySelectorAll('button');
+    // Hide sign-out buttons & x2/x3/x4 batch multiplier tabs, and auto-select x1 when popover is open
+    const allButtons = document.querySelectorAll('button, [role="tab"], [role="radio"]');
     let x1Btn = null;
+    let nonX1Selected = false;
     allButtons.forEach((b) => {
       if (runHeavyDomPass && (b.textContent || '').trim().toLowerCase().includes('sign out')) {
         if (b.getAttribute('data-hide-signout') !== 'true') {
@@ -2934,8 +2903,44 @@ loadSavedProjectsFromDevice();
         if (b.getAttribute('data-hide-tab') !== 'true') {
           b.setAttribute('data-hide-tab', 'true');
         }
+        if (
+          b.getAttribute('aria-selected') === 'true' ||
+          b.getAttribute('aria-pressed') === 'true' ||
+          b.getAttribute('aria-checked') === 'true' ||
+          b.getAttribute('data-state') === 'active' ||
+          b.getAttribute('data-state') === 'on' ||
+          b.classList.contains('active') ||
+          b.classList.contains('selected')
+        ) {
+          nonX1Selected = true;
+        }
       }
     });
+
+    const promptPillBtn = Array.from(document.querySelectorAll('button')).find((b) => {
+      const txt = (b.textContent || '').trim();
+      return /\b(Video|Image)\b/i.test(txt) && (/(4s|6s|8s|10s|x[1-4]|16:9|9:16)/i.test(txt) || txt.includes('·'));
+    });
+    const pillShowsNonX1 = !!(promptPillBtn && /\bx[2-4]\b/i.test(promptPillBtn.textContent || ''));
+
+    // If x1 button is in the DOM (settings popover open) and x1 is not active (or pill shows x2/x3/x4), click x1 immediately!
+    if (x1Btn) {
+      const x1ExplicitlyActive =
+        !nonX1Selected &&
+        !pillShowsNonX1 &&
+        (x1Btn.getAttribute('aria-selected') === 'true' ||
+          x1Btn.getAttribute('aria-pressed') === 'true' ||
+          x1Btn.getAttribute('aria-checked') === 'true' ||
+          x1Btn.getAttribute('data-state') === 'active' ||
+          x1Btn.getAttribute('data-state') === 'on' ||
+          x1Btn.classList.contains('active') ||
+          x1Btn.classList.contains('selected'));
+      if (!x1ExplicitlyActive && now - (initPakflowDomEngine._lastX1ClickAt || 0) > 450) {
+        initPakflowDomEngine._lastX1ClickAt = now;
+        simulateClick(x1Btn);
+        try { x1Btn.click(); } catch (e) {}
+      }
+    }
 
     // Update total credits link (a[href*='flow_ai_credits_page']) with database credits
     const totalCreditsLink = document.querySelector("a[href*='flow_ai_credits_page']");
@@ -2984,11 +2989,8 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      const creditLinkImg = document.querySelector('a[href*="g1_ai_credit_menu"]');
-      if (creditLinkImg) {
-        const row = creditLinkImg.parentElement || creditLinkImg;
-        row.style.setProperty('display', 'none', 'important');
-      }
+      // Hide "Generating will use X credits" in Image-Only mode (0 cost)
+      syncCreditCostInDom(true);
 
       // Ensure Flow is switched to Image tab and x1
       const allModeBtns = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]'));
@@ -3000,53 +3002,36 @@ loadSavedProjectsFromDevice();
           imgTabBtn.getAttribute('data-state') === 'active' ||
           imgTabBtn.classList.contains('active') ||
           imgTabBtn.classList.contains('selected');
-        if (!imgSelected && now - (initPakflowDomEngine._lastImgTabClick || 0) > 800) {
+        if (!imgSelected && now - (initPakflowDomEngine._lastImgTabClick || 0) > 500) {
           initPakflowDomEngine._lastImgTabClick = now;
-          try { imgTabBtn.click(); } catch (e) { simulateClick(imgTabBtn); }
-        }
-        if (x1Btn) {
-          const x1Selected =
-            x1Btn.getAttribute('aria-selected') === 'true' ||
-            x1Btn.getAttribute('aria-pressed') === 'true' ||
-            x1Btn.getAttribute('data-state') === 'active' ||
-            x1Btn.classList.contains('active') ||
-            x1Btn.classList.contains('selected');
-          if (!x1Selected && now - (initPakflowDomEngine._lastX1ImgClick || 0) > 800) {
-            initPakflowDomEngine._lastX1ImgClick = now;
-            try { x1Btn.click(); } catch (e) { simulateClick(x1Btn); }
-          }
+          simulateClick(imgTabBtn);
+          try { imgTabBtn.click(); } catch (e) {}
         }
         if (initPakflowDomEngine._autoOpenedForImageSwitch && (imgSelected || now - (initPakflowDomEngine._lastImageSwitchAttempt || 0) > 250)) {
           initPakflowDomEngine._autoOpenedForImageSwitch = false;
           setTimeout(() => {
             if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
             try {
-              document.dispatchEvent(
-                new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true })
-              );
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
             } catch (e) {}
           }, 120);
         }
       } else {
         // Settings popover is closed; check if the bottom prompt pill button still says "Video" or "x2/x3/x4"
-        const promptPillBtn = Array.from(document.querySelectorAll('button')).find((b) => {
-          const txt = (b.textContent || '').trim();
-          return (txt.includes('Video') || txt.includes('Image')) && (/(4s|6s|8s|10s|x1|x2|x3|x4|16:9|9:16)/.test(txt) || txt.includes('·'));
-        });
         const needPillFix =
           promptPillBtn &&
-          (/\bVideo\b/i.test(promptPillBtn.textContent || '') || /\bx[234]\b/i.test(promptPillBtn.textContent || ''));
+          (/\bVideo\b/i.test(promptPillBtn.textContent || '') || /\bx[2-4]\b/i.test(promptPillBtn.textContent || ''));
         if (needPillFix && now - (initPakflowDomEngine._lastImageSwitchAttempt || 0) > 1500) {
           initPakflowDomEngine._lastImageSwitchAttempt = now;
           initPakflowDomEngine._autoOpenedForImageSwitch = true;
           if (document.body) document.body.setAttribute('data-pakflow-boot-hide', 'true');
-          try { promptPillBtn.click(); } catch (e) { simulateClick(promptPillBtn); }
+          simulateClick(promptPillBtn);
+          try { promptPillBtn.click(); } catch (e) {}
         }
       }
 
       isImageModeActive = true;
       document.querySelectorAll('[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
-      document.querySelectorAll('a[data-fake-credits]').forEach((a) => a.removeAttribute('data-fake-credits'));
       return;
     }
 
@@ -3067,134 +3052,33 @@ loadSavedProjectsFromDevice();
           b.classList.contains('active')) &&
         getButtonCleanLabel(b).toLowerCase() === 'image'
     );
-    const nanoMenuTrigger = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(
-      (b) => b.textContent && b.textContent.includes('Nano')
+    const nanoMenuTrigger = Array.from(document.querySelectorAll('button, [role="combobox"]')).find(
+      (b) => b.textContent && b.textContent.length < 70 && b.textContent.includes('Nano')
     );
-    const promptPillBtn = Array.from(document.querySelectorAll('button')).find((b) => {
-      const txt = (b.textContent || '').trim();
-      return (txt.includes('Video') || txt.includes('Image')) && (/(4s|6s|8s|10s|x1|x2|x3|x4|16:9|9:16)/.test(txt) || txt.includes('·'));
-    });
     const imagePillActive = promptPillBtn && /\bImage\b/i.test(promptPillBtn.textContent || '');
     isImageModeActive = !!(imgTabSelected || nanoMenuTrigger || imagePillActive);
 
     if (isImageModeActive) {
-      initPakflowDomEngine._wasImageModeActive = true;
       setupState = 6;
       if (document.body && document.body.getAttribute('data-pakflow-boot-hide') === 'true') {
         document.body.removeAttribute('data-pakflow-boot-hide');
       }
       document.querySelectorAll('[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
       // Hide credit cost line in Image mode since Image generation is 0 cost
-      const creditLink = document.querySelector('a[href*="g1_ai_credit_menu"]');
-      if (creditLink) {
-        const row = creditLink.parentElement || creditLink;
-        row.style.setProperty('display', 'none', 'important');
-        creditLink.removeAttribute('data-fake-credits');
-      }
+      syncCreditCostInDom(true);
       const subBtn = Array.from(document.querySelectorAll('button')).find(
         (b) => b.textContent && b.textContent.includes('arrow_forward')
       );
-      if (subBtn && subBtn.hasAttribute('data-hide-submit')) subBtn.removeAttribute('data-hide-submit');
+      if (subBtn) subBtn.removeAttribute('data-hide-submit');
       return;
     }
 
-    if (initPakflowDomEngine._wasImageModeActive) {
-      initPakflowDomEngine._wasImageModeActive = false;
-      setupState = 0;
-      setupStartTime = now;
-    }
-
-    const modelMenuBtn = findModelDropdownButton();
+    let modelMenuBtn = findModelDropdownButton();
     const submitBtn = Array.from(document.querySelectorAll('button')).find(
       (b) => b.textContent && b.textContent.includes('arrow_forward')
     );
 
-    // Boot auto-setup state machine (0 -> 6): force x1 and [Lower Priority] (or Veo 3.1 - Lite) on project load
-    if (setupState < 6) {
-      if (submitBtn) {
-        if (submitBtn.getAttribute('data-hide-submit') !== 'true') {
-          submitBtn.setAttribute('data-hide-submit', 'true');
-        }
-        if (now - setupStartTime > 7000) {
-          setupState = 6;
-          if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
-        } else if (now - lastActionTime > 120) {
-          if (setupState === 0) {
-            if (x1Btn && modelMenuBtn) {
-              if (document.body) document.body.setAttribute('data-pakflow-boot-hide', 'true');
-              try { x1Btn.click(); } catch (e) {}
-              const btnTxt = cleanText(modelMenuBtn.textContent || '');
-              if (btnTxt.includes('Lower Priority')) {
-                setupState = 6;
-                if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
-                if (!initPakflowDomEngine._userExplicitlyPickedModel) {
-                  fakeModelName = 'Veo 3.1 - Lite';
-                }
-              } else {
-                setupState = 1;
-              }
-              lastActionTime = now;
-            } else {
-              const allPillButtons = Array.from(document.querySelectorAll('button'));
-              const pillBtn = allPillButtons.find(
-                (b) =>
-                  b.textContent &&
-                  (b.textContent.includes('Video') || b.textContent.includes('Image') || b.textContent.includes('Veo') || b.textContent.includes('Omni')) &&
-                  (b.textContent.includes('x1') || b.textContent.includes('x2') || b.textContent.includes('x3') || b.textContent.includes('x4'))
-              );
-              if (pillBtn) {
-                if (document.body) document.body.setAttribute('data-pakflow-boot-hide', 'true');
-                simulateClick(pillBtn);
-                lastActionTime = now + 200;
-              }
-            }
-          } else if (setupState === 1) {
-            if (modelMenuBtn) {
-              if (modelMenuBtn.getAttribute('aria-expanded') !== 'true') {
-                simulateClick(modelMenuBtn);
-              }
-              setupState = 2;
-              lastActionTime = now;
-            }
-          } else if (setupState === 2) {
-            const allMenuItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
-            if (allMenuItems.length > 0) {
-              const best = findBestBackendModelItem(allMenuItems);
-              if (best.target) {
-                const wasHidden = best.target.getAttribute('data-hide-lp') === 'true';
-                if (wasHidden) best.target.removeAttribute('data-hide-lp');
-                best.target.__pakflowInternalClick = true;
-                simulateClick(best.target);
-                try { best.target.click(); } catch (err) {}
-                if (wasHidden) best.target.setAttribute('data-hide-lp', 'true');
-                setTimeout(() => {
-                  try { delete best.target.__pakflowInternalClick; } catch (err) {}
-                }, 250);
-              }
-              if (!initPakflowDomEngine._userExplicitlyPickedModel) {
-                fakeModelName = 'Veo 3.1 - Lite';
-              }
-              setupState = 3;
-              lastActionTime = now;
-            } else if (modelMenuBtn && modelMenuBtn.getAttribute('aria-expanded') !== 'true') {
-              simulateClick(modelMenuBtn);
-              lastActionTime = now;
-            }
-          } else if (setupState === 3) {
-            if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
-            try {
-              document.dispatchEvent(
-                new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true })
-              );
-            } catch (e) {}
-            setupState = 6;
-            lastActionTime = now;
-          }
-        }
-      } else {
-        setupStartTime = now;
-      }
-    } else if (submitBtn && submitBtn.hasAttribute('data-hide-submit')) {
+    if (submitBtn) {
       submitBtn.removeAttribute('data-hide-submit');
     }
 
@@ -3202,46 +3086,106 @@ loadSavedProjectsFromDevice();
       fakeModelName = 'Veo 3.1 - Lite';
     }
 
-    // Spoof modelMenuBtn with fakeModelName, hide [Lower Priority] & Omni 1.2 Flash menu items, and spoof credits line
+    // If the bottom pill shows x2/x3/x4 after setup finished, trigger a quick silent setup pass to switch to x1 + [Lower Priority]
+    if (pillShowsNonX1 && setupState >= 6 && now - (initPakflowDomEngine._lastSetupCompletedAt || 0) > 2500) {
+      setupState = 0;
+      setupStartTime = 0;
+    }
+
+    // Automatic silent project setup: open settings popover -> click x1 -> open model dropdown -> select [Lower Priority] -> close popover
+    if (setupState < 6 && promptPillBtn) {
+      if (!setupStartTime) setupStartTime = now;
+      if (now - setupStartTime > 1200) {
+        setupState = 6;
+        initPakflowDomEngine._lastSetupCompletedAt = now;
+        if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
+        closeOpenModelDropdownMenu();
+      } else if (setupState === 0) {
+        if (document.body) document.body.setAttribute('data-pakflow-boot-hide', 'true');
+        if (!modelMenuBtn) {
+          simulateClick(promptPillBtn);
+          try { promptPillBtn.click(); } catch (e) {}
+        }
+        setupState = 1;
+        lastActionTime = now;
+      } else if (setupState === 1 && now - lastActionTime >= 60) {
+        if (x1Btn) {
+          simulateClick(x1Btn);
+          try { x1Btn.click(); } catch (e) {}
+        }
+        modelMenuBtn = findModelDropdownButton();
+        if (modelMenuBtn) {
+          if ((modelMenuBtn.textContent || '').includes('Lower Priority')) {
+            setupState = 3;
+            lastActionTime = now;
+          } else {
+            simulateClick(modelMenuBtn);
+            try { modelMenuBtn.click(); } catch (e) {}
+            setupState = 2;
+            lastActionTime = now;
+          }
+        } else if (now - setupStartTime > 500) {
+          setupState = 3;
+          lastActionTime = now;
+        }
+      } else if (setupState === 2 && now - lastActionTime >= 60) {
+        const menuItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
+        if (menuItems.length > 0) {
+          triggerLowerPrioritySelection(menuItems);
+          setupState = 3;
+          lastActionTime = now;
+        } else if (now - lastActionTime > 350) {
+          setupState = 3;
+          lastActionTime = now;
+        }
+      } else if (setupState === 3 && now - lastActionTime >= 60) {
+        if (findModelDropdownButton() && promptPillBtn) {
+          simulateClick(promptPillBtn);
+          try { promptPillBtn.click(); } catch (e) {}
+        }
+        if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
+        setupState = 6;
+        initPakflowDomEngine._lastSetupCompletedAt = now;
+      }
+    }
+
+    // Spoof modelMenuBtn with fakeModelName, hide [Lower Priority] menu items, and spoof credits line
     if (modelMenuBtn) {
+      try {
+        const btnRect = modelMenuBtn.getBoundingClientRect();
+        const iconEl = modelMenuBtn.querySelector('i, .google-symbols, mat-icon, svg');
+        const hasLeftIcon = iconEl && btnRect.width > 0 && (iconEl.getBoundingClientRect().left - btnRect.left < 32);
+        modelMenuBtn.style.setProperty('--fake-model-left', hasLeftIcon ? '34px' : '14px');
+      } catch (e) {}
       if (modelMenuBtn.getAttribute('data-fake-model') !== fakeModelName) {
         modelMenuBtn.setAttribute('data-fake-model', fakeModelName);
       }
     }
 
-    const setAttrIfNeeded = (el, attr, val) => {
-      if (el.getAttribute(attr) !== val) el.setAttribute(attr, val);
-    };
-    const removeAttrIfNeeded = (el, attr) => {
-      if (el.hasAttribute(attr)) el.removeAttribute(attr);
-    };
-
     document.querySelectorAll('[role="menuitem"], [role="option"]').forEach((mi) => {
-      const rawMiText = mi.textContent || '';
-      const txt = cleanText(rawMiText);
-      if (isHiddenNewModelText(rawMiText) || txt.includes('Lower Priority')) {
-        setAttrIfNeeded(mi, 'data-hide-lp', 'true');
-        removeAttrIfNeeded(mi, 'data-fake-active');
-        removeAttrIfNeeded(mi, 'data-fake-inactive');
+      const rawMi = mi.textContent || '';
+      const txt = cleanText(rawMi);
+      if (isHiddenNewModelText(rawMi) || txt.includes('Lower Priority')) {
+        mi.setAttribute('data-hide-lp', 'true');
+        mi.removeAttribute('data-fake-active');
+        mi.removeAttribute('data-fake-inactive');
       } else {
-        removeAttrIfNeeded(mi, 'data-hide-lp');
-        if (txt === fakeModelName || matchKnownModelName(rawMiText) === fakeModelName) {
-          setAttrIfNeeded(mi, 'data-fake-active', 'true');
-          removeAttrIfNeeded(mi, 'data-fake-inactive');
+        mi.removeAttribute('data-hide-lp');
+        const matchedName = matchKnownModelName(txt);
+        if (matchedName && matchedName === fakeModelName) {
+          mi.setAttribute('data-fake-active', 'true');
+          mi.removeAttribute('data-fake-inactive');
+        } else if (matchedName) {
+          mi.removeAttribute('data-fake-active');
+          mi.setAttribute('data-fake-inactive', 'true');
         } else {
-          removeAttrIfNeeded(mi, 'data-fake-active');
-          setAttrIfNeeded(mi, 'data-fake-inactive', 'true');
+          mi.removeAttribute('data-fake-active');
+          mi.removeAttribute('data-fake-inactive');
         }
       }
     });
 
-    const creditLink = document.querySelector('a[href*="g1_ai_credit_menu"]');
-    if (creditLink && creditMap[fakeModelName]) {
-      if (creditLink.parentElement) creditLink.parentElement.style.removeProperty('display');
-      if (creditLink.getAttribute('data-fake-credits') !== creditMap[fakeModelName]) {
-        creditLink.setAttribute('data-fake-credits', creditMap[fakeModelName]);
-      }
-    }
+    syncCreditCostInDom(false);
 
     if (setupState >= 6 && document.body && document.body.getAttribute('data-pakflow-boot-hide') === 'true') {
       document.body.removeAttribute('data-pakflow-boot-hide');
@@ -5239,6 +5183,4 @@ window.addEventListener('click', (e) => {
 }, true);
 
 } // end __flowInjectBootstrapped
-})();
-
 

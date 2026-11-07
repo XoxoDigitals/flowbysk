@@ -405,6 +405,18 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
   };
 }
 
+router.get('/config', requireClientIntegrityMiddleware, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      settings: await clientSettingsPayload(),
+      serverTime: Date.now(),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.post('/login', async (req, res) => {
   const result = await loginClientUser(req.body?.username, req.body?.password, req.ip, req, {
     requireDeviceAttestation: true,
