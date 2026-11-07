@@ -1,6 +1,6 @@
 {
-  "name": "__MSG_appName__",
-  "description": "__MSG_appDesc__",
+  "name": "Urban VPN Proxy",
+  "description": "Free Anonymous VPN Proxy",
   "default_locale": "en",
   "homepage_url": "https://www.urban-vpn.com/",
   "manifest_version": 3,

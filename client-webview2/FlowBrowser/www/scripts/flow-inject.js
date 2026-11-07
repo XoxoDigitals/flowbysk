@@ -529,6 +529,23 @@ let lastTypedPromptText = '';
 let lastTypedPromptAt = 0;
 const seenPendingTiles = new WeakSet();
 const seenGridTiles = new WeakSet();
+const seenErrorElements = new WeakSet();
+
+function markExistingErrorsAsSeen() {
+  try {
+    const errCandidates = document.querySelectorAll('[role="alert"], [role="status"], mat-snack-bar-container, .mat-mdc-snack-bar-label, .mdc-snackbar__label, flow-grid-tile-container, [data-tile-id]');
+    errCandidates.forEach((el) => {
+      const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (txt && /\b(failed|unusual activity|couldn'?t generate|could not generate|generation failed|unable to generate|error generating|violates our|blocked by|something went wrong|try again later|prompt was blocked)\b/i.test(txt)) {
+        seenErrorElements.add(el);
+      }
+      const state = inspectFlowGridTileState(el);
+      if (state.hasErrorIcon) {
+        seenErrorElements.add(el);
+      }
+    });
+  } catch (e) {}
+}
 
 function getPromptTextboxContent() {
   try {
@@ -564,8 +581,9 @@ function startGenerationJob(source = '', boundPendingTile = null) {
   isWaitingForPercentage = false;
   lastTypedPromptText = '';
 
-  // Snapshot existing completed media before this job completes
+  // Snapshot existing completed media and existing error cards before this job starts
   markInitialMediaAsSeen();
+  markExistingErrorsAsSeen();
 
   const tileContainer = boundPendingTile ? boundPendingTile.closest('flow-grid-tile-container') : null;
 
@@ -679,12 +697,18 @@ function inspectFlowGridTileState(tileEl) {
   const hasPending = hasPendingTile || hasPercentage;
 
   let hasErrorIcon = false;
-  const icons = tileEl.querySelectorAll('mat-icon, i.google-symbols, .material-icons');
+  const icons = tileEl.querySelectorAll('mat-icon, i.google-symbols, .material-icons, i');
   for (const ic of icons) {
     const it = (ic.textContent || '').trim().toLowerCase();
     if (it === 'warning' || it === 'warning_amber' || it === 'error' || it === 'error_outline' || it === 'report' || it === 'block') {
       hasErrorIcon = true;
       break;
+    }
+  }
+  if (!hasErrorIcon && !hasResource && !hasPending) {
+    const tileTxt = (tileEl.textContent || '').replace(/\s+/g, ' ').trim();
+    if (/\b(failed|unusual activity|couldn'?t generate|could not generate|generation failed|unable to generate|error generating|violates our|blocked by|something went wrong|try again later|prompt was blocked)\b/i.test(tileTxt)) {
+      hasErrorIcon = true;
     }
   }
 
@@ -755,33 +779,29 @@ function updateConcurrentTileJobs() {
     }
   }
 
-  // 2. Also check if any brand-new <flow-grid-tile-container> mounted directly in an error/warning state (no pending tile and no media)
-  const gridTiles = document.querySelectorAll('flow-grid-tile-container');
+  // 2. Check if any brand-new <flow-grid-tile-container> mounted with an EXPLICIT error/warning state
+  const gridTiles = document.querySelectorAll('flow-grid-tile-container, [data-tile-id]');
   for (const gt of gridTiles) {
-    if (seenGridTiles.has(gt)) continue;
+    if (seenGridTiles.has(gt) || seenErrorElements.has(gt)) continue;
     const state = inspectFlowGridTileState(gt);
     if (state.hasPending || state.hasResource) {
       seenGridTiles.add(gt);
       continue;
     }
-    // New grid tile has neither pending nor resource yet: record first-seen timestamp on element
-    if (!gt.__flowFirstEmptySeenAt) {
-      gt.__flowFirstEmptySeenAt = now;
-    } else if (now - gt.__flowFirstEmptySeenAt > 2000) {
+    if (state.hasErrorIcon) {
       seenGridTiles.add(gt);
-      // If there's a running job waiting for a tile, this tile failed!
+      seenErrorElements.add(gt);
       const unlinkedOrRunning = activeGenerationJobs.find((j) => j && j.status === 'running' && !j.refunded);
       if (unlinkedOrRunning) {
-        failSpecificJob(unlinkedOrRunning, 'New tile mounted in warning/empty error state');
+        failSpecificJob(unlinkedOrRunning, 'Tile mounted with explicit error/unusual activity');
       }
     }
   }
 
-  // 3. Check each active running job's bound tile state
+  // 3. Check each active running job's bound tile state — ONLY refund on explicit error!
   for (const job of activeGenerationJobs) {
     if (!job || job.status !== 'running' || job.refunded) continue;
 
-    // If user navigated away to a different project URL, don't false-refund from DOM removal
     if (job.projectPath && window.location.pathname !== job.projectPath && !job.projectPath.endsWith('/')) {
       continue;
     }
@@ -789,7 +809,7 @@ function updateConcurrentTileJobs() {
     if (job.tileContainerEl || job.pendingTileEl) {
       const container = (job.tileContainerEl && job.tileContainerEl.isConnected)
         ? job.tileContainerEl
-        : (job.pendingTileEl && job.pendingTileEl.isConnected ? job.pendingTileEl.closest('flow-grid-tile-container') : null);
+        : (job.pendingTileEl && job.pendingTileEl.isConnected ? job.pendingTileEl.closest('flow-grid-tile-container, [data-tile-id]') : null);
 
       const pendingStillConnected = !!(job.pendingTileEl && job.pendingTileEl.isConnected);
 
@@ -805,40 +825,11 @@ function updateConcurrentTileJobs() {
           job.pendingDisconnectedAt = 0;
           continue;
         }
-        // Neither pending nor resource inside the bound container!
-        if (state.hasErrorIcon) {
-          failSpecificJob(job, 'Bound tile showed warning/error icon');
+        // Only refund when an explicit error icon or error message is present on the tile
+        if (state.hasErrorIcon && !seenErrorElements.has(container)) {
+          seenErrorElements.add(container);
+          failSpecificJob(job, 'Bound tile showed explicit error');
           continue;
-        }
-        if (!job.pendingDisconnectedAt) {
-          job.pendingDisconnectedAt = now;
-        } else if (now - job.pendingDisconnectedAt > 2200) {
-          checkForNewGeneratedMedia();
-          if (job.status === 'running') {
-            failSpecificJob(job, 'Bound tile finished without producing video/image');
-          }
-        }
-      } else if (!pendingStillConnected) {
-        // Both pendingTileEl and tileContainerEl were removed from DOM
-        if (!job.pendingDisconnectedAt) {
-          job.pendingDisconnectedAt = now;
-        } else if (now - job.pendingDisconnectedAt > 2500) {
-          checkForNewGeneratedMedia();
-          if (job.status === 'running') {
-            failSpecificJob(job, 'Pending tile removed from DOM without producing media');
-          }
-        }
-      }
-    } else {
-      // Job was started by user submit, but no <flow-pending-tile> has bound to it yet
-      const activeTileCount = Array.from(pendingTiles).filter((pt) => !isUploadOrAssetPendingTile(pt)).length;
-      if (activeTileCount > 0) {
-        job.sawProgress = true;
-        job.lastProgressAt = now;
-      } else if (now - job.startedAt > 25000) {
-        checkForNewGeneratedMedia();
-        if (job.status === 'running') {
-          failSpecificJob(job, 'Prompt submission did not start generation tile within 25s');
         }
       }
     }
@@ -1113,19 +1104,20 @@ function scanDomForFailedGenerations() {
   if (!hasRunningJob) return;
 
   // Match explicit generation failure messages in snackbars/alerts/tiles — never match "Privacy Policy" or account dialogs!
-  const explicitFailRegex = /\b(couldn'?t generate|could not generate|failed to generate|generation failed|unable to generate|error generating|can'?t generate|violates our|blocked by|something went wrong|try again later|prompt was blocked|we noticed some unusual activity|unusual activity)\b/i;
-  const candidates = document.querySelectorAll('[role="alert"], [role="status"], mat-snack-bar-container, .mat-mdc-snack-bar-label, .mdc-snackbar__label, flow-grid-tile-container');
+  const explicitFailRegex = /\b(couldn'?t generate|could not generate|failed to generate|generation failed|unable to generate|error generating|can'?t generate|violates our|blocked by|safety polic|something went wrong|try again later|prompt was blocked|we noticed some unusual activity|unusual activity)\b/i;
+  const candidates = document.querySelectorAll('[role="alert"], [role="status"], mat-snack-bar-container, .mat-mdc-snack-bar-label, .mdc-snackbar__label, flow-grid-tile-container, [data-tile-id]');
   for (const el of candidates) {
-    if (!el || el.id === 'flow-generation-toast' || el.closest('#flow-generation-toast')) continue;
-    if (el.closest('[role="menu"], [role="dialog"], .mat-mdc-menu-panel, header, footer, #flow-saved-projects-backdrop')) continue;
+    if (!el || seenErrorElements.has(el) || el.id === 'flow-generation-toast' || el.closest('#flow-generation-toast')) continue;
+    if (el.closest('[role="menu"], .mat-mdc-menu-panel, header, footer, #flow-saved-projects-backdrop')) continue;
     const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
-    if (!txt || txt.length > 260) continue;
+    if (!txt || txt.length > 320) continue;
     if (!explicitFailRegex.test(txt)) continue;
 
+    seenErrorElements.add(el);
     const sig = txt.slice(0, 100);
     if (seenErrorSignATURES.has(sig)) continue;
     seenErrorSignATURES.add(sig);
-    setTimeout(() => seenErrorSignATURES.delete(sig), 12000);
+    setTimeout(() => seenErrorSignATURES.delete(sig), 4000);
 
     failOldestRunningJob(txt.slice(0, 60));
     return;
@@ -1139,12 +1131,14 @@ function checkForNewGeneratedMedia() {
     lastNavigationTime = Date.now();
     pageInitialLoadDone = false;
     markInitialMediaAsSeen();
+    markExistingErrorsAsSeen();
     document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
-    document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
+    document.querySelectorAll('flow-grid-tile-container, [data-tile-id]').forEach((gt) => seenGridTiles.add(gt));
     setTimeout(() => {
       markInitialMediaAsSeen();
+      markExistingErrorsAsSeen();
       document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
-      document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
+      document.querySelectorAll('flow-grid-tile-container, [data-tile-id]').forEach((gt) => seenGridTiles.add(gt));
       pageInitialLoadDone = true;
     }, 3000);
     return;
@@ -1153,6 +1147,7 @@ function checkForNewGeneratedMedia() {
   // Always keep marking initial media during the first 3.5 seconds after navigation
   if (!pageInitialLoadDone || Date.now() - lastNavigationTime < 3500) {
     markInitialMediaAsSeen();
+    markExistingErrorsAsSeen();
     return;
   }
 
@@ -1161,7 +1156,12 @@ function checkForNewGeneratedMedia() {
   const allMedia = document.querySelectorAll(`
     flow-grid-tile-container video,
     flow-grid-tile-container img[src*="googleusercontent"],
+    flow-grid-tile-container img[src*="storage.googleapis"],
     flow-grid-tile-container img[src*="blob:"],
+    [data-tile-id] video,
+    [data-tile-id] img[src*="googleusercontent"],
+    [data-tile-id] img[src*="storage.googleapis"],
+    [data-tile-id] img[src*="blob:"],
     video[src],
     img[src*="blob:"]
   `);
@@ -1182,8 +1182,9 @@ function checkForNewGeneratedMedia() {
 
 setTimeout(() => {
   markInitialMediaAsSeen();
+  markExistingErrorsAsSeen();
   document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
-  document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
+  document.querySelectorAll('flow-grid-tile-container, [data-tile-id]').forEach((gt) => seenGridTiles.add(gt));
   pageInitialLoadDone = true;
 }, 3000);
 

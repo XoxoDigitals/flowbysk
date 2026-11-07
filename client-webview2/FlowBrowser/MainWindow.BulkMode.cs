@@ -278,6 +278,27 @@ public partial class MainWindow
             var extDir = Path.Combine(_wwwRoot, "extensions", "urban-vpn");
             if (!Directory.Exists(extDir)) return;
 
+            bool IsUrbanVpnExt(CoreWebView2BrowserExtension item) =>
+                (item.Name != null && (item.Name.Contains("Urban", StringComparison.OrdinalIgnoreCase) || item.Name.Contains("__MSG_appName__", StringComparison.OrdinalIgnoreCase)))
+                || (!string.IsNullOrEmpty(_urbanVpnExtensionId) && string.Equals(item.Id, _urbanVpnExtensionId, StringComparison.OrdinalIgnoreCase));
+
+            try
+            {
+                var existing = await profile.GetBrowserExtensionsAsync();
+                foreach (var item in existing)
+                {
+                    if (IsUrbanVpnExt(item))
+                    {
+                        try
+                        {
+                            await item.RemoveAsync();
+                        }
+                        catch { /* ignore */ }
+                    }
+                }
+            }
+            catch { /* ignore */ }
+
             try
             {
                 var ext = await profile.AddBrowserExtensionAsync(extDir);
@@ -295,36 +316,10 @@ public partial class MainWindow
                 Debug.WriteLine("[VPN] AddBrowserExtensionAsync fallback: " + addEx.Message);
             }
 
-            var existing = await profile.GetBrowserExtensionsAsync();
-            foreach (var item in existing)
-            {
-                if (item.Name != null && item.Name.Contains("Urban", StringComparison.OrdinalIgnoreCase))
-                {
-                    try
-                    {
-                        await item.RemoveAsync();
-                    }
-                    catch { /* ignore */ }
-                }
-            }
-
-            try
-            {
-                var ext2 = await profile.AddBrowserExtensionAsync(extDir);
-                if (ext2 != null)
-                {
-                    _urbanVpnExtensionId = ext2.Id ?? "";
-                    if (!ext2.IsEnabled)
-                        await ext2.EnableAsync(true);
-                    return;
-                }
-            }
-            catch { /* ignore */ }
-
             var afterList = await profile.GetBrowserExtensionsAsync();
             foreach (var item in afterList)
             {
-                if (item.Name != null && item.Name.Contains("Urban", StringComparison.OrdinalIgnoreCase))
+                if (IsUrbanVpnExt(item))
                 {
                     _urbanVpnExtensionId = item.Id ?? "";
                     if (!item.IsEnabled)

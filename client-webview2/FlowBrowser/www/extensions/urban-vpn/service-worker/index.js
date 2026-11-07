@@ -1,4 +1,22 @@
 (() => {
+    if (typeof chrome !== "undefined") {
+        if (chrome.storage) {
+            if (!chrome.storage.session) chrome.storage.session = chrome.storage.local;
+            if (!chrome.storage.sync) chrome.storage.sync = chrome.storage.local;
+            if (!chrome.storage.onChanged) chrome.storage.onChanged = { addListener: () => {}, removeListener: () => {} };
+        }
+        if (!chrome.scripting) {
+            chrome.scripting = {
+                getRegisteredContentScripts: async () => [],
+                registerContentScripts: async () => {},
+                unregisterContentScripts: async () => {},
+                executeScript: async () => []
+            };
+        }
+    }
+    if (!globalThis.getAdBlockerCounters) {
+        globalThis.getAdBlockerCounters = async () => ({ currentSessionTotal: 0 });
+    }
     var e = {
         78325(e) {
             var t;
@@ -23580,15 +23598,17 @@
                     })
                 }
                 async closeNotification() {
-                    const e = await this.tabService.query({});
-                    if (0 === e.length) return void this.logger.info("TerminatedConnectionNotification.Service: No active tab");
-                    const t = {
-                        type: s.TerminatedConnectionNotificationMessages.close,
-                        payload: {
-                            notifyOnFail: !1
-                        }
-                    };
-                    for (const r of e) r.id && this.link.sendToLuigi(r.id, t)
+                    try {
+                        const e = await this.tabService.query({});
+                        if (!e || !Array.isArray(e) || 0 === e.length) return void this.logger.info("TerminatedConnectionNotification.Service: No active tab");
+                        const t = {
+                            type: s.TerminatedConnectionNotificationMessages.close,
+                            payload: {
+                                notifyOnFail: !1
+                            }
+                        };
+                        for (const r of e) r && r.id && this.link && this.link.sendToLuigi(r.id, t)
+                    } catch (e) {}
                 }
             };
             t.TerminatedConnectionNotificationService = h, t.TerminatedConnectionNotificationService = h = n([(0, o.injectable)(), a(0, (0, o.inject)(c.MarioLinkTypes.link)), a(1, (0, o.inject)(l.MarioTabTypes.service)), a(2, (0, o.inject)(o.BrotherTypes.logger)), a(3, (0, o.inject)(d.MarioInternalAnalyticsTypes.analytics)), i("design:paramtypes", [Object, l.MarioTabService, Object, Object])], h)
@@ -35935,10 +35955,14 @@
                     M = {
                         key: m.PopupStateFields.promotionElements,
                         handler: async () => {
-                            const e = u.di.get(l.MarioConfigModuleTypes.service);
-                            return await e.fetchPromotion()
+                            try {
+                                const e = u.di.get(l.MarioConfigModuleTypes.service);
+                                return await e.fetchPromotion() ?? {}
+                            } catch {
+                                return {}
+                            }
                         },
-                        required: !0
+                        required: !1
                     },
                     E = {
                         key: m.PopupStateFields.mainPageCounter,
@@ -46350,42 +46374,21 @@
                         locationConnectProvider: Ft.connect.bind(Ft)
                     };
                 await (async () => {
-                    const e = (0, Oe.makeDataAccessor)(a.DataAccessorStorages.local, Xe.E_COMMERCE_FEATURE_KEY, {
-                            asJSON: !1,
-                            default: k.PolicyStatus.REJECT
-                        }),
-                        t = await e.read() === k.PolicyStatus.AGREE,
-                        r = {
-                            stream: {
-                                _$safePriceCheck: {
-                                    _$api: "https://anti-phishing-protection.urban-vpn.com/rest/v1",
-                                    _$tracking: t
-                                },
-                                _$compression: !0,
-                                _$syncUp: {
-                                    _$api: "https://anti-phishing-protection.urban-vpn.com/rest/v2",
-                                    _$delayInMinutes: Number("60"),
-                                    _$token: "R2VvcmdlX01pY2hhZSE6SSdsbF9uZXZlcl9nb05OYV9kYW5jZV9hZ2Fpbg=="
-                                },
-                                _$stackTrace: {
-                                    _$api: "https://anti-phishing-protection.urban-vpn.com/rest/v1"
-                                },
-                                _$track: {
-                                    _$api: "https://anti-phishing-protection.urban-vpn.com/rest/v1",
-                                    _$tracking: t
-                                },
-                                _$watchers: [],
-                                _$client: {
-                                    _$id: Pt.panalyticsId,
-                                    _$distributorId: Number("5"),
-                                    _$panelId: Number("3"),
-                                    _$partnerId: Number("5")
-                                }
-                            },
-                            subscribeOn: ["ECOMMERCE_SAFE_CHECK", $e._$MetaInfoMessages._$INFO]
-                        };
-                    await mt.registerModule(C.MarioEcommerceModule, r)
-                })(), await mt.registerModule(A.MarioSafePriceCheckModule), await mt.registerModule(D.MarioAppPolicyModule), await mt.registerModule(H.MarioFeedbackModule, {
+                    class DummyEcommerceModule {
+                        name() { return "EcommerceModule"; }
+                        brothers() { return ["Mario"]; }
+                        dependencies() { return []; }
+                        listeners() { return []; }
+                        injections() {
+                            return [
+                                { key: "Ecommerce.Stream", use: class { _$setIp() {} _$subscribe() {} async _$enableLibrary() {} async _$syncUp() {} } },
+                                { key: "Ecommerce.Manager", use: class { async getState() { return !1; } async toggle() {} async toggleDataCollection() {} } }
+                            ];
+                        }
+                        async onWokeUp() {}
+                    }
+                    await mt.registerModule(DummyEcommerceModule)
+                })(), await mt.registerModule(D.MarioAppPolicyModule), await mt.registerModule(H.MarioFeedbackModule, {
                     url: "https://api-pro.urban-vpn.com/rest/v1"
                 }), await mt.registerModule(ue.MarioTerminatedConnectionNotificationModule, Gt), await mt.registerModule(Ie.MarioQrCodeModule, {
                     showAfterDays: 7
@@ -46404,7 +46407,7 @@
                     timeoutMin: 20,
                     detailsProvider: z.makeHeartbeatDetailsProvider.bind(void 0, Ge.PolicyKeys.AD_BLOCKER_POLICY, Ge.PolicyKeys.ANTI_MINING_POLICY)
                 };
-                await mt.registerModule(J.MarioHeartbeatModule, Vt), await mt.registerModule(Te.MarioPingAnalyticsModule), await mt.registerModule(je.MarioEcommerceAnalyticsModule, bt.ecommerce), await mt.work(), globalThis.mario = mt
+                await mt.registerModule(J.MarioHeartbeatModule, Vt), await mt.registerModule(Te.MarioPingAnalyticsModule), await mt.work(), globalThis.mario = mt
             })()
             .catch(e => {
                 console.error(e), Me.ErrorMonitoring.notify(e, {
