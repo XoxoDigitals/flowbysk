@@ -120,8 +120,8 @@ static class DataPaths
             TryHide(Root);
             TryHide(SecureDir);
             TryHide(DataRoot);
-            TryHide(ShellProfile);
-            TryHide(FlowProfile);
+            TryUnhide(ShellProfile);
+            TryUnhide(FlowProfile);
             TryHide(UiBase);
             HardenVaultDirectory(SecureDir);
             _profilesInitialized = true;
@@ -312,6 +312,18 @@ static class DataPaths
                 var fi = new FileInfo(path);
                 fi.Attributes = (fi.Attributes | FileAttributes.Hidden) & ~FileAttributes.System;
             }
+        }
+        catch { /* ignore */ }
+    }
+
+    public static void TryUnhide(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
+            var di = new DirectoryInfo(path);
+            if (di.Exists)
+                di.Attributes &= ~(FileAttributes.Hidden | FileAttributes.System);
         }
         catch { /* ignore */ }
     }

@@ -1,5 +1,6 @@
 /* WebView2 bridge — replaces Electron ipcRenderer */
 (function () {
+try { if (window !== window.top) return; } catch (e) { return; }
 (function () {
   if (typeof window.chrome === 'undefined' || !window.chrome.webview) {
     console.warn('[Flow Inject] chrome.webview missing');
@@ -32,163 +33,10 @@
 })();
 const { ipcRenderer } = window;
 
-const __flowIsSubFrame = (() => {
-  try { return window !== window.top; } catch (e) { return true; }
-})();
-const __flowIsRecaptchaFrame = /recaptcha|challenge/i.test(location.href || '');
-
-if (
-  window.__flowInjectBootstrapped ||
-  location.hostname === 'app.flowbrowser.localhost' ||
-  location.hostname === 'flowbrowser.local' ||
-  (__flowIsSubFrame && !__flowIsRecaptchaFrame)
-) {
-  // Skip duplicate inject, built-in local studio pages (TTS STUDIO), or non-captcha background iframes
+if (window.__flowInjectBootstrapped || location.hostname === 'app.flowbrowser.localhost' || location.hostname === 'flowbrowser.local') {
+  // Skip duplicate inject or built-in local studio pages (TTS STUDIO)
 } else {
   window.__flowInjectBootstrapped = true;
-
-// =========================================================================
-// CID PROTOCOL RANDOMIZER (fetch / XHR / sendBeacon / WebSocket / EventSource)
-// =========================================================================
-(function installCidRandomizer() {
-  if (window.__flowCidRandomizerInstalled) return;
-  window.__flowCidRandomizerInstalled = true;
-
-  const CID_QUERY_REGEX = /([?&]cid=)(\d+\.\d+)(?=(?:&|#|$))/gi;
-  const CID_BARE_REGEX = /^(\s*cid=)(\d+\.\d+)(\s*)$/i;
-
-  function randomDigit(nonZero) {
-    const min = nonZero ? 1 : 0;
-    const max = 9;
-    return String(Math.floor(Math.random() * (max - min + 1)) + min);
-  }
-
-  function randomDigits(length, nonZeroFirst) {
-    const safeLen = Math.max(1, Number(length) || 1);
-    let out = '';
-    for (let i = 0; i < safeLen; i += 1) {
-      out += randomDigit(Boolean(nonZeroFirst && i === 0));
-    }
-    return out;
-  }
-
-  function generateCidLike(sampleCid) {
-    const raw = String(sampleCid || '').trim();
-    const parts = raw.split('.');
-    if (parts.length !== 2 || !parts[0] || !parts[1]) {
-      return `${randomDigits(9, true)}.${randomDigits(10, false)}`;
-    }
-    const leftLen = Math.max(6, parts[0].replace(/\D/g, '').length || 9);
-    const rightLen = Math.max(6, parts[1].replace(/\D/g, '').length || 10);
-    return `${randomDigits(leftLen, true)}.${randomDigits(rightLen, false)}`;
-  }
-
-  function replaceNumericCidInUrlString(input) {
-    const raw = String(input ?? '');
-    if (!raw || !/cid=/i.test(raw)) return raw;
-    if (CID_BARE_REGEX.test(raw)) {
-      return raw.replace(CID_BARE_REGEX, (_, pfx, cid, sfx) => `${pfx}${generateCidLike(cid)}${sfx}`);
-    }
-    let next = raw.replace(CID_QUERY_REGEX, (_, pfx, cid) => `${pfx}${generateCidLike(cid)}`);
-    if (next !== raw) return next;
-    try {
-      const base = (typeof location !== 'undefined' && location && location.href) ? location.href : 'https://labs.google/';
-      const parsed = new URL(raw, base);
-      let mutated = false;
-      for (const [k, v] of parsed.searchParams.entries()) {
-        if (String(k).toLowerCase() === 'cid' && /^\d+\.\d+$/.test(String(v || '').trim())) {
-          parsed.searchParams.set(k, generateCidLike(v));
-          mutated = true;
-        }
-      }
-      if (!mutated) return raw;
-      if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(raw)) return parsed.toString();
-      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
-    } catch (e) {
-      return raw;
-    }
-  }
-
-  if (typeof window.fetch === 'function') {
-    const origFetch = window.fetch;
-    window.fetch = function (input, init) {
-      try {
-        if (typeof input === 'string') {
-          const next = replaceNumericCidInUrlString(input);
-          if (next !== input) input = next;
-        } else if (typeof URL !== 'undefined' && input instanceof URL) {
-          const cur = input.toString();
-          const next = replaceNumericCidInUrlString(cur);
-          if (next !== cur) input = new URL(next);
-        } else if (typeof Request !== 'undefined' && input instanceof Request) {
-          const cur = input.url;
-          const next = replaceNumericCidInUrlString(cur);
-          if (next !== cur) input = new Request(next, input);
-        }
-      } catch (e) {}
-      return Reflect.apply(origFetch, this, [input, init]);
-    };
-  }
-
-  if (typeof window.XMLHttpRequest === 'function' && window.XMLHttpRequest.prototype) {
-    const origOpen = window.XMLHttpRequest.prototype.open;
-    if (typeof origOpen === 'function') {
-      window.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-        let nextUrl = url;
-        try {
-          if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
-          else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
-        } catch (e) {}
-        return Reflect.apply(origOpen, this, [method, nextUrl, ...rest]);
-      };
-    }
-  }
-
-  if (typeof Navigator !== 'undefined' && Navigator.prototype && typeof Navigator.prototype.sendBeacon === 'function') {
-    const origBeacon = Navigator.prototype.sendBeacon;
-    Navigator.prototype.sendBeacon = function (url, data) {
-      let nextUrl = url;
-      try {
-        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
-        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
-      } catch (e) {}
-      return Reflect.apply(origBeacon, this, [nextUrl, data]);
-    };
-  }
-
-  if (typeof window.WebSocket === 'function') {
-    const OrigWS = window.WebSocket;
-    const WrappedWS = function (url, protocols) {
-      let nextUrl = url;
-      try {
-        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
-        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
-      } catch (e) {}
-      return arguments.length > 1 ? new OrigWS(nextUrl, protocols) : new OrigWS(nextUrl);
-    };
-    WrappedWS.prototype = OrigWS.prototype;
-    Object.setPrototypeOf(WrappedWS, OrigWS);
-    window.WebSocket = WrappedWS;
-  }
-
-  if (typeof window.EventSource === 'function') {
-    const OrigES = window.EventSource;
-    const WrappedES = function (url, cfg) {
-      let nextUrl = url;
-      try {
-        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
-        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
-      } catch (e) {}
-      return arguments.length > 1 ? new OrigES(nextUrl, cfg) : new OrigES(nextUrl);
-    };
-    WrappedES.prototype = OrigES.prototype;
-    Object.setPrototypeOf(WrappedES, OrigES);
-    window.EventSource = WrappedES;
-  }
-})();
-
-// Never run DOM observers, styles, or UI hooks inside subframes (including reCAPTCHA iframes)
-if (__flowIsSubFrame) return;
 
 // =========================================================================
 // MASKING RULES & CREDENTIALS STATE
@@ -472,6 +320,26 @@ function getActivePromptMode() {
 }
 
 function getActiveBatchMultiplier() {
+  try {
+    const multipliers = Array.from(document.querySelectorAll('button, [role="radio"], [role="tab"]')).filter(b => {
+      const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+      return /^x[1-4]$/.test(t);
+    });
+
+    for (const b of multipliers) {
+      const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+      const style = window.getComputedStyle(b);
+      const isSelected = b.getAttribute('aria-checked') === 'true' ||
+                         b.getAttribute('aria-selected') === 'true' ||
+                         b.classList.contains('active') ||
+                         b.classList.contains('selected') ||
+                         (style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)' && !style.backgroundColor.includes('transparent'));
+      if (isSelected) {
+        const num = parseInt(t.replace('x', ''), 10);
+        if (!isNaN(num) && num >= 1 && num <= 4) return num;
+      }
+    }
+  } catch (e) {}
   return 1;
 }
 
@@ -838,77 +706,124 @@ document.addEventListener('drop', (e) => {
   }
 }, true);
 
-// Concurrent-safe tile & progress watcher: never false-refunds when Video 2 is requested while Video 1 is in progress
-const seenErrorTiles = new WeakSet();
-let allPendingClearedAt = 0;
-
+// Scan all flow-pending-tile and flow-grid-tile-container elements to bind concurrent jobs & detect per-tile completion or failure
 function updateConcurrentTileJobs() {
   const now = Date.now();
 
   // During initial 3.5s after page load or navigation, mark existing tiles as pre-existing
   if (!pageInitialLoadDone || now - lastNavigationTime < 3500) {
     document.querySelectorAll('flow-pending-tile').forEach((pt) => seenPendingTiles.add(pt));
-    document.querySelectorAll('flow-grid-tile-container').forEach((gt) => {
-      seenGridTiles.add(gt);
-      const st = inspectFlowGridTileState(gt);
-      if (st.hasErrorIcon) seenErrorTiles.add(gt);
-    });
+    document.querySelectorAll('flow-grid-tile-container').forEach((gt) => seenGridTiles.add(gt));
     return;
   }
 
-  checkForNewGeneratedMedia();
-
-  const runningJobs = activeGenerationJobs.filter((j) => j && j.status === 'running' && !j.refunded);
-  if (runningJobs.length === 0) {
-    allPendingClearedAt = 0;
-    return;
-  }
-
-  let activePendingCount = 0;
+  // 1. Bind any newly mounted <flow-pending-tile> to an unlinked running job
   const pendingTiles = document.querySelectorAll('flow-pending-tile');
   for (const pt of pendingTiles) {
+    if (seenPendingTiles.has(pt)) continue;
     seenPendingTiles.add(pt);
-    if (isUploadOrAssetPendingTile(pt)) continue;
-    activePendingCount++;
+
+    const container = pt.closest('flow-grid-tile-container');
+    if (container) seenGridTiles.add(container);
+
+    if (isUploadOrAssetPendingTile(pt)) {
+      continue;
+    }
+
+    // Look for an unlinked running job started recently by prompt submit
+    const unlinkedJob = activeGenerationJobs.find(
+      (j) => j && j.status === 'running' && !j.pendingTileEl && (now - j.startedAt < 15000)
+    );
+    if (unlinkedJob) {
+      unlinkedJob.pendingTileEl = pt;
+      unlinkedJob.tileContainerEl = container || null;
+      unlinkedJob.sawProgress = true;
+      unlinkedJob.lastProgressAt = now;
+      console.log('[Flow Credit Engine] Linked pending tile to running job:', unlinkedJob.id);
+    }
   }
 
+  // 2. Also check if any brand-new <flow-grid-tile-container> mounted directly in an error/warning state (no pending tile and no media)
   const gridTiles = document.querySelectorAll('flow-grid-tile-container');
   for (const gt of gridTiles) {
-    seenGridTiles.add(gt);
+    if (seenGridTiles.has(gt)) continue;
     const state = inspectFlowGridTileState(gt);
-    if (state.hasPending && !gt.querySelector('flow-pending-tile')) {
-      activePendingCount++;
+    if (state.hasPending || state.hasResource) {
+      seenGridTiles.add(gt);
+      continue;
     }
-    if (state.hasErrorIcon && !state.hasPending && !state.hasResource && !seenErrorTiles.has(gt)) {
-      seenErrorTiles.add(gt);
-      failOldestRunningJob('Tile displayed warning/error icon');
-      return;
-    }
-  }
-
-  if (activePendingCount > 0) {
-    allPendingClearedAt = 0;
-    for (const job of runningJobs) {
-      if (now >= job.startedAt) {
-        job.sawProgress = true;
-        job.lastProgressAt = now;
+    // New grid tile has neither pending nor resource yet: record first-seen timestamp on element
+    if (!gt.__flowFirstEmptySeenAt) {
+      gt.__flowFirstEmptySeenAt = now;
+    } else if (now - gt.__flowFirstEmptySeenAt > 2000) {
+      seenGridTiles.add(gt);
+      // If there's a running job waiting for a tile, this tile failed!
+      const unlinkedOrRunning = activeGenerationJobs.find((j) => j && j.status === 'running' && !j.refunded);
+      if (unlinkedOrRunning) {
+        failSpecificJob(unlinkedOrRunning, 'New tile mounted in warning/empty error state');
       }
     }
-    return;
   }
 
-  if (!allPendingClearedAt) {
-    allPendingClearedAt = now;
-    return;
-  }
+  // 3. Check each active running job's bound tile state
+  for (const job of activeGenerationJobs) {
+    if (!job || job.status !== 'running' || job.refunded) continue;
 
-  if (now - allPendingClearedAt > 5000) {
-    checkForNewGeneratedMedia();
-    for (const job of activeGenerationJobs) {
-      if (!job || job.status !== 'running' || job.refunded) continue;
-      if (job.projectPath && window.location.pathname !== job.projectPath && !job.projectPath.endsWith('/')) continue;
-      if ((job.sawProgress && now - job.startedAt > 6000) || (now - job.startedAt > 30000)) {
-        failSpecificJob(job, 'Generation ended without producing media');
+    // If user navigated away to a different project URL, don't false-refund from DOM removal
+    if (job.projectPath && window.location.pathname !== job.projectPath && !job.projectPath.endsWith('/')) {
+      continue;
+    }
+
+    if (job.tileContainerEl || job.pendingTileEl) {
+      const container = (job.tileContainerEl && job.tileContainerEl.isConnected)
+        ? job.tileContainerEl
+        : (job.pendingTileEl && job.pendingTileEl.isConnected ? job.pendingTileEl.closest('flow-grid-tile-container') : null);
+
+      const pendingStillConnected = !!(job.pendingTileEl && job.pendingTileEl.isConnected);
+
+      if (container) {
+        const state = inspectFlowGridTileState(container);
+        if (state.hasResource) {
+          completeSpecificJob(job, 'Bound tile media mounted');
+          continue;
+        }
+        if (state.hasPending || pendingStillConnected) {
+          job.sawProgress = true;
+          job.lastProgressAt = now;
+          job.pendingDisconnectedAt = 0;
+          continue;
+        }
+        // Neither pending nor resource inside the bound container!
+        if (state.hasErrorIcon) {
+          failSpecificJob(job, 'Bound tile showed warning/error icon');
+          continue;
+        }
+        if (!job.pendingDisconnectedAt) {
+          job.pendingDisconnectedAt = now;
+        } else if (now - job.pendingDisconnectedAt > 2200) {
+          checkForNewGeneratedMedia();
+          if (job.status === 'running') {
+            failSpecificJob(job, 'Bound tile finished without producing video/image');
+          }
+        }
+      } else if (!pendingStillConnected) {
+        // Both pendingTileEl and tileContainerEl were removed from DOM
+        if (!job.pendingDisconnectedAt) {
+          job.pendingDisconnectedAt = now;
+        } else if (now - job.pendingDisconnectedAt > 2500) {
+          checkForNewGeneratedMedia();
+          if (job.status === 'running') {
+            failSpecificJob(job, 'Pending tile removed from DOM without producing media');
+          }
+        }
+      }
+    } else {
+      // Job was started by user submit, but no <flow-pending-tile> has bound to it yet
+      if (now - job.startedAt > 12000) {
+        checkForNewGeneratedMedia();
+        if (job.status === 'running') {
+          failSpecificJob(job, 'Prompt submission did not start generation tile within 12s');
+        }
       }
     }
   }
@@ -1248,19 +1163,11 @@ setupGenerateActionHook();
 
 function cleanText(str) {
   return String(str || '')
-    .replace(/volume_up|arrow_drop_down|check|done|spark|auto_awesome|videocam|chevron_right|expand_more/gi, '')
-    .replace(/leaving\s+[a-z]+\s+\d+/gi, '')
+    .replace(/volume_up|arrow_drop_down|check|done/gi, '')
     .replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/\s*-\s*/g, ' - ')
     .replace(/\s+/g, ' ')
     .trim();
-}
-
-function isHiddenNewModelText(rawText) {
-  const t = cleanText(rawText || '').toLowerCase();
-  if (!t) return false;
-  if (t.includes('omni') && !t.includes('1.1')) return true;
-  return false;
 }
 
 function getButtonCleanLabel(btn) {
@@ -1351,25 +1258,23 @@ function spoofAccountIdentityInDom() {
   try {
     const emailTestRegex = /[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/;
     const emailReplaceRegex = /[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/g;
-    // 1. Spoof aria-label / title on header profile buttons and avatar initial inside header button
-    document.querySelectorAll('header button, header a, .header-user-button, [aria-label*="@"]').forEach((el) => {
+    // 1. Spoof aria-label / title on header profile buttons & avatar initial
+    document.querySelectorAll('header button, header a, .header-user-button, [aria-label*="@"], [aria-label*="Google Account" i]').forEach((el) => {
       ['aria-label', 'title'].forEach((attr) => {
         const val = el.getAttribute(attr);
         if (val && emailTestRegex.test(val) && !val.includes('flowcreator@gmail.com')) {
           el.setAttribute(attr, 'Google Account: Flow Creator (flowcreator@gmail.com)');
         }
       });
-      if (el.classList.contains('header-user-button') || /account/i.test(el.getAttribute('aria-label') || '')) {
-        el.querySelectorAll('div, span').forEach((av) => {
-          if (av.children.length === 0 && /^[A-Z]$/.test((av.textContent || '').trim())) {
-            if (av.textContent.trim() !== 'F') av.textContent = 'F';
-          }
-        });
-      }
+      el.querySelectorAll('div, span').forEach((av) => {
+        if (av.children.length === 0 && /^[A-Z]$/.test((av.textContent || '').trim())) {
+          if (av.textContent.trim() !== 'F') av.textContent = 'F';
+        }
+      });
     });
 
     // 2. Spoof visible email text nodes & adjacent display name in the account popup
-    const nodes = document.querySelectorAll('div, span, p, a, h1, h2, h3, h4');
+    const nodes = document.querySelectorAll('[aria-label="Account details"] *, [role="dialog"] *, [role="menu"] *, div, span, p, a, h1, h2, h3, h4');
     for (const el of nodes) {
       if (el.children.length > 0) continue;
       const txt = (el.textContent || '').trim();
@@ -1380,7 +1285,7 @@ function spoofAccountIdentityInDom() {
         }
         // Check sibling above email (account holder's display name, e.g. "Jitendar Kumawat")
         const prev = el.previousElementSibling;
-        if (prev && prev.children.length === 0) {
+        if (prev) {
           const prevTxt = (prev.textContent || '').trim();
           if (prevTxt && prevTxt !== 'Flow Creator' && prevTxt !== 'Google' && !prevTxt.includes('@')) {
             prev.textContent = 'Flow Creator';
@@ -1388,38 +1293,33 @@ function spoofAccountIdentityInDom() {
         }
         if (el.parentElement) {
           Array.from(el.parentElement.children).forEach((sib) => {
-            if (sib !== el && sib.children.length === 0) {
-              const sTxt = (sib.textContent || '').trim();
-              if (sTxt && sTxt !== 'Flow Creator' && sTxt !== 'Google' && !sTxt.includes('@') && !sTxt.includes('Switch account')) {
-                sib.textContent = 'Flow Creator';
-              }
+            if (sib === el) return;
+            const sibTxt = (sib.textContent || '').trim();
+            if (sibTxt && sibTxt.length < 60 && sibTxt !== 'Flow Creator' && sibTxt !== 'Google' && !sibTxt.includes('@') && !sibTxt.toLowerCase().includes('switch account')) {
+              if (sib.children.length === 0) sib.textContent = 'Flow Creator';
             }
           });
         }
         // Also check parent container for single-letter avatar circle (e.g. "J")
-        const card = el.closest('[aria-label="Account details"]') || (el.parentElement && el.parentElement.parentElement);
-        if (card) {
-          card.querySelectorAll('div, span').forEach((av) => {
+        const popupRoot = el.closest('[aria-label="Account details"], [role="dialog"]') || (el.parentElement && el.parentElement.parentElement);
+        if (popupRoot) {
+          popupRoot.querySelectorAll('div, span').forEach((av) => {
             if (av.children.length === 0 && /^[A-Z]$/.test((av.textContent || '').trim())) {
               if (av.textContent.trim() !== 'F') av.textContent = 'F';
             }
           });
+          if (popupRoot.getAttribute('aria-label') === 'Account details') {
+            popupRoot.setAttribute('data-flow-spoofed', '1');
+          }
         }
       }
     }
 
-    // 3. Reveal Account details popup ONLY once its email/name have been spoofed to Flow Creator
-    document.querySelectorAll('[aria-label="Account details"]:not(button):not(.header-user-button):not(.account-switcher-placeholder)').forEach((popup) => {
-      if (popup.querySelector('.header-user-button')) return;
-      const rawText = popup.textContent || '';
-      const allEmails = rawText.match(emailReplaceRegex) || [];
-      const hasUnspoofedEmail = allEmails.some((em) => em.toLowerCase() !== 'flowcreator@gmail.com');
-      if (!hasUnspoofedEmail && rawText.includes('flowcreator@gmail.com')) {
-        if (popup.getAttribute('data-flow-spoofed') !== '1') {
-          popup.setAttribute('data-flow-spoofed', '1');
-        }
-      } else if (hasUnspoofedEmail) {
-        popup.removeAttribute('data-flow-spoofed');
+    // 3. Ensure any [aria-label="Account details"] container is marked data-flow-spoofed="1" ONLY after its email is spoofed
+    document.querySelectorAll('[aria-label="Account details"]:not(button):not(.header-user-button)').forEach((popup) => {
+      const fullText = popup.textContent || '';
+      if (fullText.includes('flowcreator@gmail.com') || !emailTestRegex.test(fullText)) {
+        popup.setAttribute('data-flow-spoofed', '1');
       }
     });
   } catch (e) {}
@@ -1523,20 +1423,10 @@ function ensureProfileIconVisible() {
           setPopupAllowed(false);
         } else {
           setPopupAllowed(true);
-          if (typeof requestAnimationFrame === 'function') {
-            requestAnimationFrame(() => {
-              spoofAccountIdentityInDom();
-              purgeSignoutElements();
-            });
-          }
-          setTimeout(() => {
+          [0, 16, 40, 80, 150, 300].forEach((ms) => setTimeout(() => {
             spoofAccountIdentityInDom();
             purgeSignoutElements();
-          }, 16);
-          setTimeout(() => {
-            spoofAccountIdentityInDom();
-            purgeSignoutElements();
-          }, 50);
+          }, ms));
         }
         return;
       }
@@ -2041,12 +1931,8 @@ loadSavedProjectsFromDevice();
     const savedFakeModel = sessionStorage.getItem('__pakflow_fake_model');
     if (savedFakeModel && creditMap[savedFakeModel]) {
       fakeModelName = savedFakeModel;
-    } else {
-      fakeModelName = 'Veo 3.1 - Lite';
     }
-  } catch (e) {
-    fakeModelName = 'Veo 3.1 - Lite';
-  }
+  } catch (e) {}
 
   function injectPakflowStyles() {
     if (!isProtectedWorkspaceHost()) return;
@@ -2054,10 +1940,10 @@ loadSavedProjectsFromDevice();
       const style = document.createElement('style');
       style.id = 'pakflow-core-style';
       style.textContent =
-        "button[data-fake-model],[role='combobox'][data-fake-model]{color:transparent!important;position:relative!important}" +
-        "button[data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path),[role='combobox'][data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path){color:transparent!important}" +
-        "button[data-fake-model]::after,[role='combobox'][data-fake-model]::after{content:attr(data-fake-model)!important;position:absolute!important;left:var(--fake-model-left,14px)!important;top:50%!important;transform:translateY(-50%)!important;color:#fff!important;font-family:'Google Sans Text','Google Sans',sans-serif!important;font-size:13px!important;font-weight:500!important;pointer-events:none!important;white-space:nowrap!important}" +
-        "button[data-fake-model] i,button[data-fake-model] .google-symbols,button[data-fake-model] mat-icon,button[data-fake-model] svg,[role='combobox'][data-fake-model] i,[role='combobox'][data-fake-model] .google-symbols,[role='combobox'][data-fake-model] mat-icon,[role='combobox'][data-fake-model] svg{color:#fff!important;visibility:visible!important}" +
+        "button[data-fake-model]{color:transparent!important;position:relative!important}" +
+        "button[data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path){color:transparent!important}" +
+        "button[data-fake-model]::after{content:attr(data-fake-model)!important;position:absolute!important;left:var(--fake-model-left,14px)!important;top:50%!important;transform:translateY(-50%)!important;color:#fff!important;font-family:'Google Sans Text','Google Sans',sans-serif!important;font-size:13px!important;font-weight:500!important;pointer-events:none!important;white-space:nowrap!important}" +
+        "button[data-fake-model] i,button[data-fake-model] .google-symbols,button[data-fake-model] mat-icon,button[data-fake-model] svg{color:#fff!important;visibility:visible!important}" +
         "[role='menuitem'][data-hide-lp='true'],[role='option'][data-hide-lp='true']{height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
         "flow-menu-item:has([data-hide-lp='true']){height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
         "[role='menuitem'][data-fake-active='true'],[role='option'][data-fake-active='true']{background-color:rgba(255,255,255,.12)!important;border-radius:12px!important}" +
@@ -2067,7 +1953,8 @@ loadSavedProjectsFromDevice();
         "a[data-fake-credits]{color:transparent!important;position:relative!important}" +
         "a[data-fake-credits] *{color:transparent!important}" +
         "a[data-fake-credits]::after{content:attr(data-fake-credits) ' credits'!important;position:absolute!important;left:0.25rem!important;top:0!important;color:#DADCE0!important;text-decoration:underline!important;white-space:nowrap!important}" +
-        "button[data-hide-tab='true'],[data-hide-tab='true'],mat-button-toggle:has(button[data-hide-tab='true']),mat-button-toggle:has([data-hide-tab='true']){display:none!important}" +
+        "button[data-hide-tab='true']{display:none!important}" +
+        "mat-button-toggle:has(button[data-hide-tab='true']){display:none!important}" +
         "mat-button-toggle{flex:1!important;}" +
         "button[data-hide-submit='true']{display:none!important;pointer-events:none!important;opacity:0!important}" +
         "button[data-hide-signout='true'],[data-hide-signout='true']{display:none!important;visibility:hidden!important;pointer-events:none!important;opacity:0!important;height:0!important;min-height:0!important;padding:0!important;margin:0!important;}" +
@@ -2117,19 +2004,11 @@ loadSavedProjectsFromDevice();
   else document.addEventListener('DOMContentLoaded', injectPakflowStyles);
 
   try {
-    let lastSignoutObsAt = 0;
     const signoutObserver = new MutationObserver(() => {
-      if (!isProtectedWorkspaceHost()) return;
-      // Always spoof account identity immediately when Account details popup is mounted or updated
-      if (document.querySelector('[aria-label="Account details"]')) {
-        spoofAccountIdentityInDom();
+      if (isProtectedWorkspaceHost()) {
         purgeSignoutElements();
+        spoofAccountIdentityInDom();
       }
-      const now = Date.now();
-      if (now - lastSignoutObsAt < 250) return;
-      lastSignoutObsAt = now;
-      purgeSignoutElements();
-      spoofAccountIdentityInDom();
     });
     if (document.documentElement) {
       signoutObserver.observe(document.documentElement, { childList: true, subtree: true });
@@ -2183,6 +2062,11 @@ loadSavedProjectsFromDevice();
     }, true);
   });
 
+function isHiddenNewModelText(rawText) {
+  const t = cleanText(rawText || '').toLowerCase();
+  return t.includes('omni') && !t.includes('1.1');
+}
+
   function matchKnownModelName(rawItemText) {
     if (isHiddenNewModelText(rawItemText)) return '';
     const cleaned = cleanText(rawItemText || '').replace(/\s*\[Lower Priority\]/gi, '').trim();
@@ -2204,86 +2088,38 @@ loadSavedProjectsFromDevice();
     const lpTarget =
       items.find((mi) => {
         const t = cleanText(mi.textContent);
-        return !isHiddenNewModelText(t) && t.includes('Lower Priority') && t.includes('Fast');
+        return t.includes('Lower Priority') && t.includes('Fast');
       }) ||
       items.find((mi) => {
         const t = cleanText(mi.textContent);
-        return !isHiddenNewModelText(t) && t.includes('Lower Priority') && t.includes('Lite');
+        return t.includes('Lower Priority') && t.includes('Lite');
       }) ||
-      items.find((mi) => {
-        const t = cleanText(mi.textContent);
-        return !isHiddenNewModelText(t) && t.includes('Lower Priority');
-      });
+      items.find((mi) => cleanText(mi.textContent).includes('Lower Priority'));
     if (lpTarget) return { target: lpTarget, isLp: true };
 
     // Fallback when account has no [Lower Priority] option: use Veo 3.1 - Lite
     const liteTarget = items.find((mi) => {
       const t = cleanText(mi.textContent);
-      return !isHiddenNewModelText(t) && t.includes('Veo') && t.includes('Lite');
+      return t.includes('Veo') && t.includes('Lite');
     });
     if (liteTarget) return { target: liteTarget, isLp: false };
     return { target: null, isLp: false };
   }
 
-  function findModelDropdownButton() {
-    const allBtns = Array.from(document.querySelectorAll('button, [role="combobox"]'));
-    return (
-      allBtns.find((b) => {
-        if (b.closest('#flow-my-projects-dock, #flow-saved-projects-backdrop, header')) return false;
-        const txt = (b.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!txt || txt.length > 70) return false;
-        if (txt.includes('Extend (') || txt.includes('pen_magic')) return false;
-        return txt.includes('Veo') || txt.includes('Omni') || txt.includes('Lower Priority');
-      }) || null
-    );
-  }
-
-  function syncCreditCostInDom(hideCompletely) {
-    const creditLink = document.querySelector('a[href*="g1_ai_credit_menu"], a[href*="credit_menu"], a[href*="ai_credit"]');
-    const containers = new Set();
-    if (creditLink) {
-      containers.add(creditLink.parentElement || creditLink);
-    }
-    document.querySelectorAll('div, p, span').forEach((el) => {
-      if (el.children.length <= 3) {
-        const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
-        if (txt.startsWith('Generating will use') && txt.length < 80) {
-          containers.add(el);
-        }
-      }
-    });
-    if (hideCompletely) {
-      containers.forEach((row) => {
-        row.style.setProperty('display', 'none', 'important');
-      });
-      if (creditLink) creditLink.removeAttribute('data-fake-credits');
-      return;
-    }
-    const targetCredits = creditMap[fakeModelName || 'Veo 3.1 - Lite'] || '5';
-    containers.forEach((row) => {
-      row.style.removeProperty('display');
-      const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
-      let tn;
-      while ((tn = walker.nextNode())) {
-        const val = tn.nodeValue || '';
-        if (/\b\d+\s*credits\b/i.test(val)) {
-          const desired = val.replace(/\b\d+\s*credits\b/i, targetCredits + ' credits');
-          if (tn.nodeValue !== desired) tn.nodeValue = desired;
-        }
-      }
-    });
-    if (creditLink) {
-      creditLink.removeAttribute('data-fake-credits');
-    }
-  }
-
   function applyFakeModelToDomNow() {
-    if (!fakeModelName) fakeModelName = 'Veo 3.1 - Lite';
-    const modelMenuBtn = findModelDropdownButton();
+    if (!fakeModelName) return;
+    const modelMenuBtn = Array.from(document.querySelectorAll('button[aria-haspopup="menu"], button[aria-haspopup="listbox"], button[role="combobox"]')).find(
+      (b) =>
+        b.textContent &&
+        (b.textContent.includes('Veo') || b.textContent.includes('Omni') || b.textContent.includes('Lower Priority'))
+    );
     if (modelMenuBtn) {
       modelMenuBtn.setAttribute('data-fake-model', fakeModelName);
     }
-    syncCreditCostInDom(false);
+    const creditMenuLink = document.querySelector('a[href*="g1_ai_credit_menu"]');
+    if (creditMenuLink && creditMap[fakeModelName]) {
+      creditMenuLink.setAttribute('data-fake-credits', creditMap[fakeModelName]);
+    }
   }
 
   function closeOpenModelDropdownMenu() {
@@ -2297,7 +2133,7 @@ loadSavedProjectsFromDevice();
       setTimeout(() => {
         const stillOpen = document.querySelector('[role="menu"], [role="listbox"]');
         if (stillOpen) {
-          const expandedTrigger = document.querySelector('button[aria-expanded="true"], [role="combobox"][aria-expanded="true"]');
+          const expandedTrigger = document.querySelector('button[aria-haspopup="menu"][aria-expanded="true"]');
           if (expandedTrigger) {
             try { expandedTrigger.click(); } catch (e) {}
           }
@@ -2333,14 +2169,7 @@ loadSavedProjectsFromDevice();
 
     const menuItem = target.closest('[role="menuitem"], [role="option"]');
     if (!menuItem || menuItem.__pakflowInternalClick) return;
-    const rawText = menuItem.textContent || '';
-    if (isHiddenNewModelText(rawText)) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-      return;
-    }
-    const itemText = cleanText(rawText);
+    const itemText = cleanText(menuItem.textContent);
 
     // 4K Upscaled interception -> click 1080p and deduct 50 credits
     if (itemText.includes('4K') && itemText.includes('Upscaled')) {
@@ -2374,7 +2203,6 @@ loadSavedProjectsFromDevice();
         const matched = matchKnownModelName(itemText);
         if (matched) {
           fakeModelName = matched;
-          initPakflowDomEngine._userExplicitlyPickedModel = true;
           try { sessionStorage.setItem('__pakflow_fake_model', fakeModelName); } catch (err) {}
           applyFakeModelToDomNow();
         }
@@ -2646,19 +2474,15 @@ loadSavedProjectsFromDevice();
 
     if (window.location.pathname !== lastPakflowPathname) {
       lastPakflowPathname = window.location.pathname;
-      setupState = 0;
-      setupStartTime = 0;
-      if (!initPakflowDomEngine._userExplicitlyPickedModel) {
-        fakeModelName = 'Veo 3.1 - Lite';
-      }
+      setupState = 6;
+      setupStartTime = now;
     }
-
-    spoofAccountIdentityInDom();
 
     const runHeavyDomPass = now - (initPakflowDomEngine._lastHeavyDomPass || 0) >= 600;
     if (runHeavyDomPass) {
       initPakflowDomEngine._lastHeavyDomPass = now;
       purgeSignoutElements();
+      spoofAccountIdentityInDom();
       ensureProfileIconVisible();
       updateMyProjectsUI();
       ensureExitAgentModeAndHideToggle();
@@ -2727,18 +2551,26 @@ loadSavedProjectsFromDevice();
           }
           cur.style.setProperty('display', 'none', 'important');
         }
-        if (textOrPh && (textOrPh.includes('Introducing Gemini') || textOrPh.includes('Omni 1.2 Flash'))) {
-          let cur = el;
-          for (let i = 0; i < 5; i++) {
-            if (cur.parentElement && cur.parentElement.tagName !== 'BODY' && cur.parentElement.tagName !== 'MAIN') {
-              cur = cur.parentElement;
-            }
+      });
+
+      // Hide promotional hero banner on Flow home page (e.g. "Introducing Gemini Omni 1.2 Flash")
+      document.querySelectorAll('h1, h2, h3, div, span, p').forEach((el) => {
+        if (el.children.length > 2) return;
+        const txt = (el.textContent || '').trim();
+        if (txt && /Introducing\s+Gemini|Omni\s*1\.2/i.test(txt)) {
+          let banner = el;
+          for (let i = 0; i < 7 && banner && banner.parentElement && banner.parentElement.tagName !== 'BODY' && banner.parentElement.tagName !== 'MAIN'; i++) {
+            const p = banner.parentElement;
+            if (p.querySelector && (p.querySelector('button') && (p.textContent || '').includes('New project'))) break;
+            banner = p;
           }
-          cur.style.setProperty('display', 'none', 'important');
+          if (banner && banner.tagName !== 'BODY' && banner.tagName !== 'MAIN' && !(banner.textContent || '').includes('New project')) {
+            banner.style.setProperty('display', 'none', 'important');
+          }
         }
       });
 
-      // Elevate "New project" button with #ct-blur-overlay on home page, and allow Tools tab & Create tool on all servers (Video + Image-Only)
+      // Elevate "New project" button with #ct-blur-overlay on home page AND allow Tools tab & Create tool on ALL servers (Video & Image-Only)
       if (!initPakflowDomEngine._toolsTabListenerBound) {
         initPakflowDomEngine._toolsTabListenerBound = true;
         document.addEventListener('click', (ev) => {
@@ -2829,7 +2661,7 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      // Keep Tools / Apps tab enabled on all accounts (both Video and Image-Only servers)
+      // Keep Tools & Apps tab enabled on ALL servers (Video and Image-Only)
       document.querySelectorAll('span').forEach((sp) => {
         const st = (sp.textContent || '').trim();
         if (st === 'Tools' || st === 'Apps') {
@@ -2846,7 +2678,7 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      // Hide Extend (Veo / Omni), pen_magic Omni, keep Create tool enabled on all servers, and enable 4K Upscaled menuitem
+      // Keep Create tool enabled on ALL servers, hide Extend (Veo / Omni), pen_magic Omni, and enable 4K Upscaled menuitem
       document.querySelectorAll('button, a, [role="button"], [role="menuitem"]').forEach((el) => {
         if (!el.textContent) return;
         const t = el.textContent.trim();
@@ -2938,63 +2770,24 @@ loadSavedProjectsFromDevice();
 
     isLockedBySubmission = false;
 
-    // Hide sign-out buttons & x2/x3/x4 batch multiplier tabs, and auto-select x1 when popover is open
-    const allButtons = document.querySelectorAll('button, [role="tab"], [role="radio"]');
-    let x1Btn = null;
-    let nonX1Selected = false;
+    // Hide sign-out buttons & x2/x3/x4 batch multiplier tabs
+    const allButtons = document.querySelectorAll('button');
     allButtons.forEach((b) => {
-      if (runHeavyDomPass && (b.textContent || '').trim().toLowerCase().includes('sign out')) {
+      if (runHeavyDomPass && (b.textContent || '').trim().includes('sign out')) {
         if (b.getAttribute('data-hide-signout') !== 'true') {
           b.setAttribute('data-hide-signout', 'true');
         }
       }
-      const cleanLbl = getButtonCleanLabel(b).toLowerCase();
-      const rawLbl = (b.textContent || '').trim().toLowerCase();
-      const t = cleanLbl || rawLbl;
-      if (t === 'x1' || t === '1x') {
-        x1Btn = b;
-      } else if (['x2', 'x3', 'x4', '2x', '3x', '4x'].includes(t)) {
-        if (b.getAttribute('data-hide-tab') !== 'true') {
-          b.setAttribute('data-hide-tab', 'true');
-        }
-        if (
-          b.getAttribute('aria-selected') === 'true' ||
-          b.getAttribute('aria-pressed') === 'true' ||
-          b.getAttribute('aria-checked') === 'true' ||
-          b.getAttribute('data-state') === 'active' ||
-          b.getAttribute('data-state') === 'on' ||
-          b.classList.contains('active') ||
-          b.classList.contains('selected')
-        ) {
-          nonX1Selected = true;
+      const role = b.getAttribute('role');
+      if (role === 'tab' || role === 'radio') {
+        const t = (b.textContent || '').trim().toLowerCase();
+        if (['x2', 'x3', 'x4', '2x', '3x', '4x'].includes(t)) {
+          if (b.getAttribute('data-hide-tab') !== 'true') {
+            b.setAttribute('data-hide-tab', 'true');
+          }
         }
       }
     });
-
-    const promptPillBtn = Array.from(document.querySelectorAll('button')).find((b) => {
-      const txt = (b.textContent || '').trim();
-      return /\b(Video|Image)\b/i.test(txt) && (/(4s|6s|8s|10s|x[1-4]|16:9|9:16)/i.test(txt) || txt.includes('·'));
-    });
-    const pillShowsNonX1 = !!(promptPillBtn && /\bx[2-4]\b/i.test(promptPillBtn.textContent || ''));
-
-    // If x1 button is in the DOM (settings popover open) and x1 is not active (or pill shows x2/x3/x4), click x1 immediately!
-    if (x1Btn) {
-      const x1ExplicitlyActive =
-        !nonX1Selected &&
-        !pillShowsNonX1 &&
-        (x1Btn.getAttribute('aria-selected') === 'true' ||
-          x1Btn.getAttribute('aria-pressed') === 'true' ||
-          x1Btn.getAttribute('aria-checked') === 'true' ||
-          x1Btn.getAttribute('data-state') === 'active' ||
-          x1Btn.getAttribute('data-state') === 'on' ||
-          x1Btn.classList.contains('active') ||
-          x1Btn.classList.contains('selected'));
-      if (!x1ExplicitlyActive && now - (initPakflowDomEngine._lastX1ClickAt || 0) > 450) {
-        initPakflowDomEngine._lastX1ClickAt = now;
-        simulateClick(x1Btn);
-        try { x1Btn.click(); } catch (e) {}
-      }
-    }
 
     // Update total credits link (a[href*='flow_ai_credits_page']) with database credits
     const totalCreditsLink = document.querySelector("a[href*='flow_ai_credits_page']");
@@ -3011,7 +2804,7 @@ loadSavedProjectsFromDevice();
         document.body.setAttribute('data-flow-image-only', 'true');
       }
       // Hide Video tab, Frames tab, Video models, Durations (4s/6s/8s/10s), Agent, and credit cost line (keep Tools / Apps / Create tool enabled!)
-      document.querySelectorAll('button, [role="tab"], [role="radio"], [role="combobox"]').forEach((b) => {
+      document.querySelectorAll('button, [role="tab"], [role="radio"]').forEach((b) => {
         const cleanLbl = getButtonCleanLabel(b).toLowerCase();
         if (cleanLbl === 'tools' || cleanLbl === 'apps' || cleanLbl.includes('create tool')) {
           if (b.getAttribute('data-hide-image-only') === 'true') {
@@ -3035,57 +2828,62 @@ loadSavedProjectsFromDevice();
             b.setAttribute('data-hide-image-only', 'true');
           }
         }
-        const bt = (b.textContent || '').trim();
-        if (bt.length < 70 && !bt.includes('Extend (') && (bt.includes('Veo') || bt.includes('Omni') || bt.includes('Lower Priority'))) {
-          if (b.getAttribute('data-hide-image-only') !== 'true') {
-            b.setAttribute('data-hide-image-only', 'true');
+        if (b.getAttribute('aria-haspopup') === 'menu') {
+          const bt = (b.textContent || '');
+          if (bt.includes('Veo') || bt.includes('Omni') || bt.includes('Lower Priority')) {
+            if (b.getAttribute('data-hide-image-only') !== 'true') {
+              b.setAttribute('data-hide-image-only', 'true');
+            }
           }
         }
       });
 
       // Hide "Generating will use X credits" in Image-Only mode (0 cost)
-      syncCreditCostInDom(true);
+      const creditMenuLinkImg = document.querySelector('a[href*="g1_ai_credit_menu"]');
+      if (creditMenuLinkImg) {
+        const creditRow = creditMenuLinkImg.parentElement || creditMenuLinkImg;
+        creditRow.style.setProperty('display', 'none', 'important');
+      }
 
-      // Ensure Flow is switched to Image tab and x1
+      // Ensure Flow is switched to Image tab
       const allModeBtns = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]'));
       const imgTabBtn = allModeBtns.find((b) => getButtonCleanLabel(b).toLowerCase() === 'image');
       if (imgTabBtn) {
         const imgSelected =
           imgTabBtn.getAttribute('aria-selected') === 'true' ||
           imgTabBtn.getAttribute('aria-pressed') === 'true' ||
-          imgTabBtn.getAttribute('data-state') === 'active' ||
           imgTabBtn.classList.contains('active') ||
           imgTabBtn.classList.contains('selected');
-        if (!imgSelected && now - (initPakflowDomEngine._lastImgTabClick || 0) > 500) {
+        if (!imgSelected && now - (initPakflowDomEngine._lastImgTabClick || 0) > 600) {
           initPakflowDomEngine._lastImgTabClick = now;
           simulateClick(imgTabBtn);
           try { imgTabBtn.click(); } catch (e) {}
-        }
-        if (initPakflowDomEngine._autoOpenedForImageSwitch && (imgSelected || now - (initPakflowDomEngine._lastImageSwitchAttempt || 0) > 250)) {
-          initPakflowDomEngine._autoOpenedForImageSwitch = false;
-          setTimeout(() => {
-            if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
-            try {
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
-            } catch (e) {}
-          }, 120);
+          if (initPakflowDomEngine._autoOpenedForImageSwitch) {
+            initPakflowDomEngine._autoOpenedForImageSwitch = false;
+            setTimeout(() => {
+              try {
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+              } catch (e) {}
+            }, 180);
+          }
         }
       } else {
-        // Settings popover is closed; check if the bottom prompt pill button still says "Video" or "x2/x3/x4"
-        const needPillFix =
-          promptPillBtn &&
-          (/\bVideo\b/i.test(promptPillBtn.textContent || '') || /\bx[2-4]\b/i.test(promptPillBtn.textContent || ''));
-        if (needPillFix && now - (initPakflowDomEngine._lastImageSwitchAttempt || 0) > 1500) {
+        // Settings popover is closed; check if the bottom prompt pill button still says "Video"
+        const videoPillBtn = Array.from(document.querySelectorAll('button')).find((b) => {
+          const txt = (b.textContent || '').trim();
+          return /\bVideo\b/i.test(txt) && (/(4s|6s|8s|10s|x[1-4])/i.test(txt) || txt.includes('·'));
+        });
+        if (videoPillBtn && now - (initPakflowDomEngine._lastImageSwitchAttempt || 0) > 1500) {
           initPakflowDomEngine._lastImageSwitchAttempt = now;
           initPakflowDomEngine._autoOpenedForImageSwitch = true;
-          if (document.body) document.body.setAttribute('data-pakflow-boot-hide', 'true');
-          simulateClick(promptPillBtn);
-          try { promptPillBtn.click(); } catch (e) {}
+          simulateClick(videoPillBtn);
+          try { videoPillBtn.click(); } catch (e) {}
         }
       }
 
       isImageModeActive = true;
-      document.querySelectorAll('[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
+      document.querySelectorAll('button[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
+      document.querySelectorAll('a[data-fake-credits]').forEach((a) => a.removeAttribute('data-fake-credits'));
       return;
     }
 
@@ -3100,26 +2898,27 @@ loadSavedProjectsFromDevice();
     // Detect Image Mode vs Video Mode on normal (Video + Image) accounts
     const imgTabSelected = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]')).find(
       (b) =>
-        (b.getAttribute('aria-selected') === 'true' ||
-          b.getAttribute('aria-pressed') === 'true' ||
-          b.getAttribute('data-state') === 'active' ||
-          b.classList.contains('active')) &&
+        (b.getAttribute('aria-selected') === 'true' || b.getAttribute('aria-pressed') === 'true' || b.classList.contains('active')) &&
         getButtonCleanLabel(b).toLowerCase() === 'image'
     );
-    const nanoMenuTrigger = Array.from(document.querySelectorAll('button, [role="combobox"]')).find(
-      (b) => b.textContent && b.textContent.length < 70 && b.textContent.includes('Nano')
+    const nanoMenuTrigger = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(
+      (b) => b.textContent && b.textContent.includes('Nano')
     );
-    const imagePillActive = promptPillBtn && /\bImage\b/i.test(promptPillBtn.textContent || '');
+    const imagePillActive = Array.from(document.querySelectorAll('button')).find((b) => {
+      const txt = (b.textContent || '').trim();
+      return /\bImage\b/i.test(txt) && txt.includes('·');
+    });
     isImageModeActive = !!(imgTabSelected || nanoMenuTrigger || imagePillActive);
 
     if (isImageModeActive) {
       setupState = 6;
-      if (document.body && document.body.getAttribute('data-pakflow-boot-hide') === 'true') {
-        document.body.removeAttribute('data-pakflow-boot-hide');
-      }
-      document.querySelectorAll('[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
+      document.querySelectorAll('button[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
+      document.querySelectorAll('a[data-fake-credits]').forEach((a) => a.removeAttribute('data-fake-credits'));
       // Hide credit cost line in Image mode since Image generation is 0 cost
-      syncCreditCostInDom(true);
+      const creditMenuLinkImg = document.querySelector('a[href*="g1_ai_credit_menu"]');
+      if (creditMenuLinkImg && creditMenuLinkImg.parentElement) {
+        creditMenuLinkImg.parentElement.style.setProperty('display', 'none', 'important');
+      }
       const subBtn = Array.from(document.querySelectorAll('button')).find(
         (b) => b.textContent && b.textContent.includes('arrow_forward')
       );
@@ -3127,7 +2926,11 @@ loadSavedProjectsFromDevice();
       return;
     }
 
-    let modelMenuBtn = findModelDropdownButton();
+    const modelMenuBtn = Array.from(document.querySelectorAll('button[aria-haspopup="menu"], button[aria-haspopup="listbox"], button[role="combobox"]')).find(
+      (b) =>
+        b.textContent &&
+        (b.textContent.includes('Veo') || b.textContent.includes('Omni') || b.textContent.includes('Lower Priority'))
+    );
     const submitBtn = Array.from(document.querySelectorAll('button')).find(
       (b) => b.textContent && b.textContent.includes('arrow_forward')
     );
@@ -3136,74 +2939,11 @@ loadSavedProjectsFromDevice();
       submitBtn.removeAttribute('data-hide-submit');
     }
 
-    if (!fakeModelName) {
+    if (!fakeModelName || isHiddenNewModelText(fakeModelName)) {
       fakeModelName = 'Veo 3.1 - Lite';
     }
 
-    // If the bottom pill shows x2/x3/x4 after setup finished, trigger a quick silent setup pass to switch to x1 + [Lower Priority]
-    if (pillShowsNonX1 && setupState >= 6 && now - (initPakflowDomEngine._lastSetupCompletedAt || 0) > 2500) {
-      setupState = 0;
-      setupStartTime = 0;
-    }
-
-    // Automatic silent project setup: open settings popover -> click x1 -> open model dropdown -> select [Lower Priority] -> close popover
-    if (setupState < 6 && promptPillBtn) {
-      if (!setupStartTime) setupStartTime = now;
-      if (now - setupStartTime > 1200) {
-        setupState = 6;
-        initPakflowDomEngine._lastSetupCompletedAt = now;
-        if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
-        closeOpenModelDropdownMenu();
-      } else if (setupState === 0) {
-        if (document.body) document.body.setAttribute('data-pakflow-boot-hide', 'true');
-        if (!modelMenuBtn) {
-          simulateClick(promptPillBtn);
-          try { promptPillBtn.click(); } catch (e) {}
-        }
-        setupState = 1;
-        lastActionTime = now;
-      } else if (setupState === 1 && now - lastActionTime >= 60) {
-        if (x1Btn) {
-          simulateClick(x1Btn);
-          try { x1Btn.click(); } catch (e) {}
-        }
-        modelMenuBtn = findModelDropdownButton();
-        if (modelMenuBtn) {
-          if ((modelMenuBtn.textContent || '').includes('Lower Priority')) {
-            setupState = 3;
-            lastActionTime = now;
-          } else {
-            simulateClick(modelMenuBtn);
-            try { modelMenuBtn.click(); } catch (e) {}
-            setupState = 2;
-            lastActionTime = now;
-          }
-        } else if (now - setupStartTime > 500) {
-          setupState = 3;
-          lastActionTime = now;
-        }
-      } else if (setupState === 2 && now - lastActionTime >= 60) {
-        const menuItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
-        if (menuItems.length > 0) {
-          triggerLowerPrioritySelection(menuItems);
-          setupState = 3;
-          lastActionTime = now;
-        } else if (now - lastActionTime > 350) {
-          setupState = 3;
-          lastActionTime = now;
-        }
-      } else if (setupState === 3 && now - lastActionTime >= 60) {
-        if (findModelDropdownButton() && promptPillBtn) {
-          simulateClick(promptPillBtn);
-          try { promptPillBtn.click(); } catch (e) {}
-        }
-        if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
-        setupState = 6;
-        initPakflowDomEngine._lastSetupCompletedAt = now;
-      }
-    }
-
-    // Spoof modelMenuBtn with fakeModelName, hide [Lower Priority] menu items, and spoof credits line
+    // Spoof modelMenuBtn with fakeModelName, hide [Lower Priority] & Omni 1.2 Flash menu items, and spoof credits link
     if (modelMenuBtn) {
       try {
         const btnRect = modelMenuBtn.getBoundingClientRect();
@@ -3217,14 +2957,12 @@ loadSavedProjectsFromDevice();
     }
 
     document.querySelectorAll('[role="menuitem"], [role="option"]').forEach((mi) => {
-      const rawMi = mi.textContent || '';
-      const txt = cleanText(rawMi);
-      if (isHiddenNewModelText(rawMi) || txt.includes('Lower Priority')) {
+      const txt = cleanText(mi.textContent);
+      if (txt.includes('Lower Priority') || isHiddenNewModelText(txt)) {
         mi.setAttribute('data-hide-lp', 'true');
         mi.removeAttribute('data-fake-active');
         mi.removeAttribute('data-fake-inactive');
       } else {
-        mi.removeAttribute('data-hide-lp');
         const matchedName = matchKnownModelName(txt);
         if (matchedName && matchedName === fakeModelName) {
           mi.setAttribute('data-fake-active', 'true');
@@ -3239,9 +2977,17 @@ loadSavedProjectsFromDevice();
       }
     });
 
-    syncCreditCostInDom(false);
+    const creditMenuLink = document.querySelector('a[href*="g1_ai_credit_menu"]');
+    if (creditMenuLink && creditMap[fakeModelName]) {
+      if (creditMenuLink.parentElement) {
+        creditMenuLink.parentElement.style.removeProperty('display');
+      }
+      if (creditMenuLink.getAttribute('data-fake-credits') !== creditMap[fakeModelName]) {
+        creditMenuLink.setAttribute('data-fake-credits', creditMap[fakeModelName]);
+      }
+    }
 
-    if (setupState >= 6 && document.body && document.body.getAttribute('data-pakflow-boot-hide') === 'true') {
+    if (document.body && document.body.getAttribute('data-pakflow-boot-hide') === 'true') {
       document.body.removeAttribute('data-pakflow-boot-hide');
     }
   }, 50);
@@ -3454,11 +3200,10 @@ function submitGoogleNext(kind, input) {
     return false;
   }
 
-  const rootSel = kind === 'password' ? '#passwordNext' : (kind === 'totp' ? '#totpNext' : '#identifierNext');
+  const rootSel = kind === 'password' ? '#passwordNext' : '#identifierNext';
   // Prefer real Next button — never form.submit()
   let next =
     document.querySelector(rootSel + ' button') ||
-    document.querySelector(rootSel + ' [role="button"]') ||
     document.querySelector(rootSel);
 
   // Fallback: visible button whose label is exactly Next (ignore "Forgot email?")
@@ -3957,15 +3702,6 @@ function runGoogleAutoLogin() {
     return;
   }
 
-  // Auto-click exact 'Try again' button on Google login interstitial error pages
-  const tryAgainBtn = buttonByLabel(/^try again$/i);
-  if (tryAgainBtn && isElementVisible(tryAgainBtn)) {
-    const taBucket = Math.floor(now / 2500);
-    autoLoginState.submittedKeys.delete('try-again:' + pathname + ':' + (taBucket - 1));
-    clickOnce('try-again:' + pathname + ':' + taBucket, tryAgainBtn);
-    return;
-  }
-
   // ---- 2FA: prefer Authenticator app TOTP ----
   const pageText = ((document.body && document.body.innerText) || '').slice(0, 4500);
   const onChallengeChooser =
@@ -3980,14 +3716,12 @@ function runGoogleAutoLogin() {
       /\/challenge\/sk(?:otp)?(?:\/|$)/i.test(pathname)
     );
 
-  const totpSelector =
+  const totpInput = document.querySelector(
     'input[name="totpPin"], input#totpPin, input[id*="totp" i], ' +
     'input[type="tel"][autocomplete="one-time-code"], ' +
     'input[aria-label*="Enter code" i], input[aria-label*="Enter the code" i], ' +
-    'input[aria-label*="verification code" i]';
-  const totpInput =
-    Array.from(document.querySelectorAll(totpSelector)).find(isElementVisible) ||
-    document.querySelector(totpSelector);
+    'input[aria-label*="verification code" i]'
+  );
   // Do NOT treat the g.co/sc "Enter security code" box as TOTP
   const totpReady =
     totpInput &&
@@ -4062,29 +3796,6 @@ function runGoogleAutoLogin() {
   // Also runs on accounts.youtube.com/SetSID where the Authenticator UI is painted
   // without /challenge/totp in the URL.
   if (totpReady) {
-    const hasTotpError =
-      /wrong code|incorrect code|couldn't verify|could not verify|invalid code|enter a valid code/i.test(pageText) ||
-      totpInput.getAttribute('aria-invalid') === 'true';
-    if (hasTotpError && autoLoginState.otpFilled && now - (autoLoginState._lastTotpErrAt || 0) > 4000) {
-      autoLoginState._lastTotpErrAt = now;
-      autoLoginState._totpErrCount = (autoLoginState._totpErrCount || 0) + 1;
-      credentials._otp = '';
-      autoLoginState.otpFilled = false;
-      autoLoginState.otpRequested = false;
-      autoLoginState.submittedKeys.delete(`otp:${pathname}:fill`);
-      autoLoginState.submittedKeys.delete(`otp:${pathname}:next`);
-      try { fillInputValue(totpInput, ''); } catch (e) {}
-      console.warn('[Flow Preload] Wrong/expired TOTP code detected — requesting fresh code');
-      try { ipcRenderer.sendToHost('flow:totp-retry-needed', { path: pathname, href: location.href, count: autoLoginState._totpErrCount }); } catch (e) {}
-      try { ipcRenderer.sendToHost('request-otp', { forceRefresh: true }); } catch (e) {}
-      if (autoLoginState._totpErrCount >= 3) {
-        autoLoginState._totpErrCount = 0;
-        setTimeout(() => {
-          try { location.reload(); } catch (e) {}
-        }, 1800);
-      }
-      return;
-    }
     if (!credentials._otp) {
       if (!autoLoginState.otpRequested || now - autoLoginState.lastActionTime > 5000) {
         autoLoginState.otpRequested = true;
@@ -4095,68 +3806,35 @@ function runGoogleAutoLogin() {
       return;
     }
     const fillKey = `otp:${pathname}:fill`;
+    const nextKey = `otp:${pathname}:next`;
     const alreadyFilled =
       (totpInput.value || '').replace(/\s+/g, '') === String(credentials._otp).replace(/\s+/g, '');
     if (!autoLoginState.submittedKeys.has(fillKey) || !alreadyFilled) {
       fillInputValue(totpInput, String(credentials._otp));
       autoLoginState.submittedKeys.add(fillKey);
       autoLoginState.otpFilled = true;
-      autoLoginState._otpFilledAt = now;
       autoLoginState.lastActionTime = now;
-      console.log('[Flow Preload] TOTP filled — scheduling Next submit');
+      console.log('[Flow Preload] TOTP filled — waiting for Google to complete session (no Next yet)');
     }
-
-    const triggerTotpNext = () => {
-      if (DEBUG_FILL_ONLY) return;
-      if (!totpInput.isConnected) return;
-      const val = (totpInput.value || '').replace(/\s+/g, '');
-      if (val.length < 6) return;
-      const stillTotp =
-        /\/challenge\/totp/i.test(location.pathname || '') ||
-        /\/SetSID/i.test(location.pathname || '') ||
-        !!(document.querySelector('input[name="totpPin"], input#totpPin'));
-      if (!stillTotp || isGoogleProcessing()) return;
-      const tNow = Date.now();
-      if (tNow - (window.__flowLastTotpSubmitAt || 0) < 2400) return;
-      window.__flowLastTotpSubmitAt = tNow;
-      autoLoginState.lastActionTime = tNow;
-      const next =
-        document.querySelector('#totpNext button') ||
-        document.querySelector('#totpNext [role="button"]') ||
-        document.querySelector('#idvPreregisteredPhoneNext button') ||
-        buttonByLabel(/^next$/i) ||
-        document.querySelector('#totpNext');
-      console.log('[Flow Preload] Submitting TOTP Next');
-      if (next && isElementVisible(next)) {
-        try {
-          next.removeAttribute('disabled');
-          next.setAttribute('aria-disabled', 'false');
-        } catch (e) {}
-        hardClick(next);
-        try {
-          const r = next.getBoundingClientRect();
-          const x = r.left + r.width / 2;
-          const y = r.top + r.height / 2;
-          if (x > 2 && y > 2) {
-            ipcRenderer.sendToHost('cdp-click', { x, y, kind: 'totp-next' });
-          }
-        } catch (e) {}
-      } else {
-        try {
-          totpInput.focus();
-          const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-          totpInput.dispatchEvent(new KeyboardEvent('keydown', opts));
-          totpInput.dispatchEvent(new KeyboardEvent('keypress', opts));
-          totpInput.dispatchEvent(new KeyboardEvent('keyup', opts));
-          if (totpInput.form) totpInput.form.requestSubmit();
-        } catch (e) {}
-      }
-    };
-
-    if (now - (autoLoginState._otpFilledAt || now) >= 550) {
-      triggerTotpNext();
-    } else {
-      setTimeout(triggerTotpNext, 600);
+    // Do not click Next immediately — Google finishes the session after the code settles.
+    // Soft fallback only if still on TOTP after a long wait.
+    if (!DEBUG_FILL_ONLY && !autoLoginState.submittedKeys.has(nextKey)) {
+      autoLoginState.submittedKeys.add(nextKey);
+      setTimeout(() => {
+        if (!totpInput.isConnected) return;
+        const val = (totpInput.value || '').replace(/\s+/g, '');
+        if (!val) return;
+        const stillTotp =
+          /\/challenge\/totp/i.test(location.pathname || '') ||
+          !!(document.querySelector('input[name="totpPin"], input#totpPin'));
+        if (!stillTotp) return;
+        console.log('[Flow Preload] TOTP still showing after wait — soft Next fallback');
+        submitGoogleNext('totp', totpInput);
+        const next =
+          document.querySelector('#totpNext button, #totpNext, #idvPreregisteredPhoneNext button') ||
+          buttonByLabel(/^next$/i);
+        if (next && isElementVisible(next)) hardClick(next);
+      }, 8000);
     }
     return;
   }
@@ -5081,15 +4759,8 @@ function applyCredentialsFromHost(creds) {
   if (!creds.email) return;
   const prevEmail = (credentials.email || '').toLowerCase();
   const nextEmail = String(creds.email || '').toLowerCase();
-  const savedOtp = credentials._otp || '';
-  const onMidChallenge = /\/challenge\/(totp|selection|pwd|sk|iap|dp|ootp)|\/SetSID/i.test(location.pathname || '');
-  const forceReset = !!creds.forceReset || (!onMidChallenge && prevEmail && nextEmail && prevEmail !== nextEmail);
-  credentials = {
-    ...credentials,
-    ...creds,
-    _otp: creds.forceReset ? '' : savedOtp,
-    imageOnly: creds.imageOnly !== undefined ? !!creds.imageOnly : !!credentials.imageOnly
-  };
+  const forceReset = !!creds.forceReset || (prevEmail && nextEmail && prevEmail !== nextEmail);
+  credentials = { ...credentials, ...creds, imageOnly: creds.imageOnly !== undefined ? !!creds.imageOnly : !!credentials.imageOnly };
   console.log('[Flow Preload] Credentials applied for:', credentials.email, forceReset ? '(reset)' : '');
   const onFlow =
     (location.hostname || '').includes('flow.google.com') ||
@@ -5101,7 +4772,7 @@ function applyCredentialsFromHost(creds) {
     setTimeout(() => runGoogleAutoLogin(), 200);
     return;
   }
-  if ((forceReset || !prevEmail) && (!onMidChallenge || creds.forceReset)) {
+  if (forceReset || !prevEmail) {
     resetAutoLoginState();
     credentials._otp = '';
   }
@@ -5118,15 +4789,11 @@ try {
 ipcRenderer.on('apply-otp', (event, data) => {
   const otp = data && (data.otp || data.value || data.code);
   if (!otp) return;
-  const nextOtp = String(otp);
-  const changed = credentials._otp !== nextOtp;
-  credentials._otp = nextOtp;
+  credentials._otp = String(otp);
   autoLoginState.otpRequested = true;
-  if (changed) {
-    autoLoginState.submittedKeys.delete(`otp:${location.pathname}:fill`);
-  }
+  autoLoginState.submittedKeys.delete(`otp:${location.pathname}:fill`);
   console.log('[Flow Preload] TOTP received from host');
-  setTimeout(() => runGoogleAutoLogin(), 150);
+  setTimeout(() => runGoogleAutoLogin(), 250);
 });
 
 // Request credentials from host immediately
@@ -5139,10 +4806,10 @@ function driveGoogle2faClicks() {
   if (!host.includes('accounts.google.com') && !host.includes('accounts.youtube.com')) return;
   const path = location.pathname || '';
   const now = Date.now();
-  // SetSID / totp UI — request OTP if not yet received; Next click is owned by runGoogleAutoLogin
+  // SetSID / totp UI — request OTP; Next click is owned by runGoogleAutoLogin
   const totpEl = document.querySelector('input[name="totpPin"], input#totpPin, input[autocomplete="one-time-code"]');
   if (/\/challenge\/totp/i.test(path) || /\/SetSID/i.test(path) || totpEl) {
-    if (!credentials._otp && now - (driveGoogle2faClicks._otpAt || 0) > 2500) {
+    if (now - (driveGoogle2faClicks._otpAt || 0) > 2000) {
       driveGoogle2faClicks._otpAt = now;
       try { ipcRenderer.sendToHost('request-otp'); } catch (e) {}
     }

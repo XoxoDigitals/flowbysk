@@ -257,7 +257,6 @@ public partial class MainWindow : Window
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
 
-        ApplyWhaleUserAgent(core);
         core.WebMessageReceived += Flow_WebMessageReceived;
 
         core.SetVirtualHostNameToFolderMapping(

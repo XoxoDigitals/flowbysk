@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Copies www → www-packed and obfuscates every .js file.
  * Source www/ stays readable for development.
  *
@@ -14,25 +14,16 @@ const outWww = path.join(root, 'www-packed');
 
 const HEAVY_OPTS = {
   compact: true,
-  controlFlowFlattening: false,
+  controlFlowFlattening: true,
+  controlFlowFlatteningThreshold: 0.5,
   deadCodeInjection: false,
   debugProtection: false,
   disableConsoleOutput: false,
   identifierNamesGenerator: 'hexadecimal',
-  numbersToExpressions: false,
   renameGlobals: false,
   selfDefending: false,
-  simplify: true,
-  splitStrings: false,
   stringArray: true,
-  stringArrayCallsTransform: false,
   stringArrayEncoding: ['base64'],
-  stringArrayIndexShift: true,
-  stringArrayRotate: true,
-  stringArrayShuffle: true,
-  stringArrayWrappersCount: 1,
-  stringArrayWrappersChainedCalls: false,
-  stringArrayWrappersType: 'variable',
   stringArrayThreshold: 0.75,
   transformObjectKeys: false,
   unicodeEscapeSequence: false,
@@ -49,18 +40,15 @@ const LIGHT_OPTS = {
   identifierNamesGenerator: 'hexadecimal',
   renameGlobals: false,
   selfDefending: false,
-  simplify: true,
   stringArray: true,
   stringArrayEncoding: ['base64'],
-  stringArrayRotate: true,
-  stringArrayShuffle: true,
-  stringArrayThreshold: 0.75,
+  stringArrayThreshold: 0.5,
   transformObjectKeys: false,
   unicodeEscapeSequence: false,
   target: 'browser',
 };
 
-const LIGHT_BYTES = 600 * 1024; // 600 KB — all core scripts (flow-inject, app-shell, zextts) use HEAVY_OPTS
+const LIGHT_BYTES = 200 * 1024; // 200 KB
 const SKIP_BYTES = 2 * 1024 * 1024; // 2 MB — already opaque minified; re-obfuscating OOMs / breaks
 
 function rimraf(dir) {
@@ -96,9 +84,10 @@ function obfuscateFile(rel) {
     console.warn('[obfuscate] skip missing', rel);
     return;
   }
-  const normRel = rel.replace(/\\/g, '/');
-  if (normRel.startsWith('extensions/veo-auto/assets/')) {
-    console.log(`[obfuscate] SKIP pre-minified Vite chunk ${rel}`);
+  // Keep WebCrypto ECDH helper readable — heavy string-array passes have broken subtle APIs before.
+  const relNorm = rel.replace(/\\/g, '/').toLowerCase();
+  if (relNorm === 'scripts/cred-channel.js' || relNorm.endsWith('/scripts/cred-channel.js')) {
+    console.log(`[obfuscate] SKIP crypto helper ${rel}`);
     return;
   }
   const code = fs.readFileSync(full, 'utf8');
@@ -107,9 +96,8 @@ function obfuscateFile(rel) {
     console.log(`[obfuscate] SKIP huge (already minified) ${rel}  ${before} bytes`);
     return;
   }
-  const useLight = before >= LIGHT_BYTES || normRel.endsWith('veo-content-bundle.js');
-  const opts = useLight ? LIGHT_OPTS : HEAVY_OPTS;
-  const mode = useLight ? 'light' : 'heavy';
+  const opts = before >= LIGHT_BYTES ? LIGHT_OPTS : HEAVY_OPTS;
+  const mode = before >= LIGHT_BYTES ? 'light' : 'heavy';
   const result = JavaScriptObfuscator.obfuscate(code, opts);
   const out = result.getObfuscatedCode();
   fs.writeFileSync(full, out, 'utf8');
@@ -124,8 +112,6 @@ function main() {
   }
   rimraf(outWww);
   copyDir(srcWww, outWww);
-  // Remove unused legacy extension folder from packed output
-  rimraf(path.join(outWww, 'extensions', 'veo-shio-auto-login'));
   const files = listJsFiles(outWww).sort();
   console.log(`[obfuscate] ${files.length} JS files`);
   for (const rel of files) obfuscateFile(rel);
