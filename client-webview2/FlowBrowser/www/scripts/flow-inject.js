@@ -1227,22 +1227,29 @@ function getButtonCleanLabel(btn) {
   }
 }
 
+function realCdpClick(el) {
+  if (!el) return false;
+  try {
+    if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded();
+    else if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  } catch (e) {}
+  try {
+    const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    if (r && r.width > 0 && r.height > 0) {
+      const x = Math.round(r.left + r.width * (0.35 + Math.random() * 0.3));
+      const y = Math.round(r.top + r.height * (0.35 + Math.random() * 0.3));
+      if (x > 0 && y > 0) {
+        ipcRenderer.sendToHost('cdp-click', { x, y });
+        return true;
+      }
+    }
+  } catch (e) {}
+  return false;
+}
+
 function simulateClick(el) {
   if (!el) return;
-  try { el.focus(); } catch (e) {}
-  const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-  const cx = rect ? rect.left + rect.width / 2 : 0;
-  const cy = rect ? rect.top + rect.height / 2 : 0;
-  const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1 };
-  ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((type) => {
-    try {
-      if (type.startsWith('pointer') && typeof PointerEvent !== 'undefined') {
-        el.dispatchEvent(new PointerEvent(type, { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
-      } else {
-        el.dispatchEvent(new MouseEvent(type, opts));
-      }
-    } catch (e) {}
-  });
+  if (realCdpClick(el)) return;
 }
 
 function purgeSignoutElements() {
@@ -1985,8 +1992,9 @@ loadSavedProjectsFromDevice();
         "button[data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path),[role='combobox'][data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path){color:transparent!important}" +
         "button[data-fake-model]::after,[role='combobox'][data-fake-model]::after{content:attr(data-fake-model)!important;position:absolute!important;left:var(--fake-model-left,14px)!important;top:50%!important;transform:translateY(-50%)!important;color:#fff!important;font-family:'Google Sans Text','Google Sans',sans-serif!important;font-size:13px!important;font-weight:500!important;pointer-events:none!important;white-space:nowrap!important}" +
         "button[data-fake-model] i,button[data-fake-model] .google-symbols,button[data-fake-model] mat-icon,button[data-fake-model] svg,[role='combobox'][data-fake-model] i,[role='combobox'][data-fake-model] .google-symbols,[role='combobox'][data-fake-model] mat-icon,[role='combobox'][data-fake-model] svg{color:#fff!important;visibility:visible!important}" +
-        "flow-menu-item[data-hide-lp='true'],[role='menuitem'][data-hide-lp='true'],[role='option'][data-hide-lp='true']{display:none!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
-        "flow-menu-item:has([data-hide-lp='true']){display:none!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
+        "html:not([data-lp-clickable='1']) flow-menu-item[data-hide-lp='true'],html:not([data-lp-clickable='1']) [role='menuitem'][data-hide-lp='true'],html:not([data-lp-clickable='1']) [role='option'][data-hide-lp='true']{display:none!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
+        "html:not([data-lp-clickable='1']) flow-menu-item:has([data-hide-lp='true']){display:none!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
+        "html[data-lp-clickable='1'] flow-menu-item[data-hide-lp='true'],html[data-lp-clickable='1'] [role='menuitem'][data-hide-lp='true'],html[data-lp-clickable='1'] [role='option'][data-hide-lp='true']{opacity:0.01!important;pointer-events:auto!important}" +
         "flow-menu-item[data-fake-active='true'] button,[role='menuitem'][data-fake-active='true'],[role='option'][data-fake-active='true']{background-color:rgba(255,255,255,.12)!important;border-radius:12px!important}" +
         "flow-menu-item[data-fake-inactive='true'] button,[role='menuitem'][data-fake-inactive='true'],[role='option'][data-fake-inactive='true']{background-color:transparent!important}" +
         "[data-pakflow-autosetup-hide='true']{opacity:0!important;pointer-events:none!important;transition:none!important}" +
@@ -2229,41 +2237,41 @@ loadSavedProjectsFromDevice();
     setTimeout(() => {
       const openMenu = document.querySelector('.cdk-overlay-container [role="menu"], [role="menu"], [role="listbox"]');
       if (!openMenu) return;
-      const escInit = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true };
-      try { openMenu.dispatchEvent(new KeyboardEvent('keydown', escInit)); } catch (e) {}
-      try { document.dispatchEvent(new KeyboardEvent('keydown', escInit)); } catch (e) {}
-      try { document.dispatchEvent(new KeyboardEvent('keyup', escInit)); } catch (e) {}
-      setTimeout(() => {
-        const stillOpen = document.querySelector('.cdk-overlay-container [role="menu"], [role="menu"], [role="listbox"]');
-        if (stillOpen) {
-          const expandedTrigger = document.querySelector('button[aria-expanded="true"], [role="combobox"][aria-expanded="true"]');
-          if (expandedTrigger) {
-            try { expandedTrigger.click(); } catch (e) {}
-          }
-        }
-      }, 35);
-    }, 35);
+      const backdrop = document.querySelector('.cdk-overlay-backdrop');
+      if (backdrop) {
+        realCdpClick(backdrop);
+        return;
+      }
+      const expandedTrigger = document.querySelector('button[aria-expanded="true"], [role="combobox"][aria-expanded="true"]');
+      if (expandedTrigger) {
+        realCdpClick(expandedTrigger);
+      }
+    }, 55);
   }
 
   function triggerLowerPrioritySelection(allMenuItems) {
+    const modelMenuBtn = findModelDropdownButton();
+    const currentBtnTxt = cleanText(modelMenuBtn ? modelMenuBtn.textContent : '');
+    if (currentBtnTxt.includes('Lower Priority')) {
+      closeOpenModelDropdownMenu();
+      return true;
+    }
     const { target } = findBestBackendModelItem(allMenuItems);
     if (target) {
       const clickEl = (target.querySelector && target.querySelector('button')) || target;
-      const wasHidden = target.getAttribute('data-hide-lp') === 'true';
-      if (wasHidden) target.removeAttribute('data-hide-lp');
+      document.documentElement.setAttribute('data-lp-clickable', '1');
       target.__pakflowInternalClick = true;
       clickEl.__pakflowInternalClick = true;
-      try { clickEl.click(); } catch (err) {
-        simulateClick(clickEl);
-      }
-      if (wasHidden) target.setAttribute('data-hide-lp', 'true');
       setTimeout(() => {
-        try {
-          delete target.__pakflowInternalClick;
-          delete clickEl.__pakflowInternalClick;
-        } catch (err) {}
-      }, 250);
-      closeOpenModelDropdownMenu();
+        realCdpClick(clickEl);
+        setTimeout(() => {
+          document.documentElement.removeAttribute('data-lp-clickable');
+          try {
+            delete target.__pakflowInternalClick;
+            delete clickEl.__pakflowInternalClick;
+          } catch (err) {}
+        }, 350);
+      }, 45);
       return true;
     }
     closeOpenModelDropdownMenu();
@@ -2297,7 +2305,7 @@ loadSavedProjectsFromDevice();
         for (const mi of allMenuItems) {
           if ((mi.textContent || '').includes('1080p')) {
             const clickEl = (mi.querySelector && mi.querySelector('button')) || mi;
-            try { clickEl.click(); } catch (err) { simulateClick(clickEl); }
+            realCdpClick(clickEl);
             break;
           }
         }
@@ -2321,7 +2329,6 @@ loadSavedProjectsFromDevice();
         const best = findBestBackendModelItem(allMenuItems);
         if (!best.target || best.target === menuItem || best.target.contains(menuItem) || menuItem.contains(best.target)) {
           // Allow native click on Veo 3.1 - Lite to select it & close the dropdown naturally
-          closeOpenModelDropdownMenu();
           return;
         }
         e.preventDefault();
@@ -2393,15 +2400,7 @@ loadSavedProjectsFromDevice();
 
   function fireToggleExitClick(target) {
     if (!target) return;
-    try {
-      target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
-      target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-      target.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true }));
-      target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-      target.click();
-    } catch (e) {
-      try { target.click(); } catch (_) {}
-    }
+    realCdpClick(target);
   }
 
   function ensureExitAgentModeAndHideToggle() {
@@ -2576,7 +2575,7 @@ loadSavedProjectsFromDevice();
       const signInLink = document.querySelector('a[href*="accounts.google.com/ServiceLogin"], a.gb_Ta, a[aria-label*="Sign in" i]');
       if (signInLink && !initPakflowDomEngine._geminiSignInClicked) {
         initPakflowDomEngine._geminiSignInClicked = true;
-        try { signInLink.click(); } catch (e) {}
+        realCdpClick(signInLink);
       }
       return;
     }
@@ -2909,7 +2908,7 @@ loadSavedProjectsFromDevice();
     if (x1Btn && (nonX1Selected || pillShowsNonX1) && !anyMenuOpen) {
       if (now - (initPakflowDomEngine._lastX1ClickAt || 0) > 800) {
         initPakflowDomEngine._lastX1ClickAt = now;
-        try { x1Btn.click(); } catch (e) { simulateClick(x1Btn); }
+        realCdpClick(x1Btn);
       }
     }
 
@@ -2970,15 +2969,13 @@ loadSavedProjectsFromDevice();
         const imgSelected = isToggleBtnActive(imgTabBtn);
         if (!imgSelected && now - (initPakflowDomEngine._lastImgTabClick || 0) > 500) {
           initPakflowDomEngine._lastImgTabClick = now;
-          try { imgTabBtn.click(); } catch (e) { simulateClick(imgTabBtn); }
+          realCdpClick(imgTabBtn);
         }
         if (initPakflowDomEngine._autoOpenedForImageSwitch && (imgSelected || now - (initPakflowDomEngine._lastImageSwitchAttempt || 0) > 250)) {
           initPakflowDomEngine._autoOpenedForImageSwitch = false;
           setTimeout(() => {
             if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
-            try {
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
-            } catch (e) {}
+            if (promptPillBtn) realCdpClick(promptPillBtn);
           }, 120);
         }
       } else {
@@ -2990,7 +2987,7 @@ loadSavedProjectsFromDevice();
           initPakflowDomEngine._lastImageSwitchAttempt = now;
           initPakflowDomEngine._autoOpenedForImageSwitch = true;
           if (document.body) document.body.setAttribute('data-pakflow-boot-hide', 'true');
-          try { promptPillBtn.click(); } catch (e) { simulateClick(promptPillBtn); }
+          realCdpClick(promptPillBtn);
         }
       }
 
@@ -3041,26 +3038,14 @@ loadSavedProjectsFromDevice();
       submitBtn.removeAttribute('data-hide-submit');
     }
 
+    try {
+      const savedFake = sessionStorage.getItem('__pakflow_fake_model');
+      if (savedFake && creditMap[savedFake]) {
+        fakeModelName = savedFake;
+      }
+    } catch (e) {}
     if (!fakeModelName) {
       fakeModelName = 'Veo 3.1 - Lite';
-    }
-
-    // Passive settings-popover model sync: if the user opens <flow-prompt-box-settings> and the backend model button still says Omni/Abra (not Lower Priority), silently switch it once
-    const settingsPanelEl = document.querySelector('flow-prompt-box-settings');
-    if (settingsPanelEl && modelMenuBtn && !anyMenuOpen && !settingsPanelEl.__pakflowModelSynced) {
-      settingsPanelEl.__pakflowModelSynced = true;
-      const rawModelBtnTxt = (modelMenuBtn.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!/Lower Priority/i.test(rawModelBtnTxt) && /Omni|Abra/i.test(rawModelBtnTxt)) {
-        try {
-          modelMenuBtn.click();
-          setTimeout(() => {
-            const menuItems = document.querySelectorAll('.cdk-overlay-container flow-menu-item, .cdk-overlay-container [role="menuitem"], flow-menu-item, [role="menuitem"], [role="option"]');
-            if (menuItems.length > 0) {
-              triggerLowerPrioritySelection(menuItems);
-            }
-          }, 80);
-        } catch (e) {}
-      }
     }
 
     // Spoof modelMenuBtn with fakeModelName, hide [Lower Priority] & Omni 1.2 menu items, and spoof credits line

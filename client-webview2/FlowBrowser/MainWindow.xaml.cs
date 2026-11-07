@@ -159,16 +159,9 @@ public partial class MainWindow : Window
             });
 
             const string bgFlags = "--disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding";
-#if DEBUG
-            var flowOpts = new CoreWebView2EnvironmentOptions(
-                additionalBrowserArguments: "--remote-debugging-port=9223 " + bgFlags);
-            var shellOpts = new CoreWebView2EnvironmentOptions(
-                additionalBrowserArguments: "--remote-debugging-port=9222 " + bgFlags);
-#else
-            // Release: NEVER expose CDP — users were dumping cookies via ports 9222/9223
-            var flowOpts = new CoreWebView2EnvironmentOptions(additionalBrowserArguments: bgFlags);
+            const string chromeUaArg = "--user-agent=\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\"";
             var shellOpts = new CoreWebView2EnvironmentOptions(additionalBrowserArguments: bgFlags);
-#endif
+            var flowOpts = new CoreWebView2EnvironmentOptions(additionalBrowserArguments: chromeUaArg);
             var shellEnvTask = CoreWebView2Environment.CreateAsync(
                 browserExecutableFolder: null,
                 userDataFolder: _shellUserData,
@@ -257,7 +250,7 @@ public partial class MainWindow : Window
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
 
-        // Use native WebView2 Chromium/Edge UA + Client Hints so main frame and cross-origin subframes stay 100% consistent
+        ApplyChromeUserAgent(core);
         core.WebMessageReceived += Flow_WebMessageReceived;
 
         core.SetVirtualHostNameToFolderMapping(
@@ -389,7 +382,7 @@ public partial class MainWindow : Window
                 var imgFlag = _flowCredImageOnly ? "true" : "false";
                 var srvStr = JsString(_activeFlowServerId);
                 _ = FlowView.CoreWebView2.ExecuteScriptAsync(
-                    $"try {{ document.documentElement.style.opacity = '1'; if (window.__flowSetImageOnlyMode) window.__flowSetImageOnlyMode({imgFlag}, {srvStr}); }} catch(e) {{}}");
+                    $"try {{ if (window.__flowSetImageOnlyMode) window.__flowSetImageOnlyMode({imgFlag}, {srvStr}); }} catch(e) {{}}");
             }
             if (_toolTransitionCoverActive && IsFlowWorkspaceUrl(url) && !IsGoogleAuthRelatedUrl(url) && !IsAboutBlank(url))
             {
@@ -512,46 +505,34 @@ public partial class MainWindow : Window
         await core.AddScriptToExecuteOnDocumentCreatedAsync(_flowInject);
     }
 
-    void ApplyWhaleUserAgent(CoreWebView2 core)
+    void ApplyChromeUserAgent(CoreWebView2 core)
     {
         try
         {
-            var rawUa = core.Settings.UserAgent ?? "";
-            var cleaned = System.Text.RegularExpressions.Regex.Replace(rawUa, @"\s*\bEdg(?:e|A|iOS)?/[\d.]+\b", "").Trim();
-            if (string.IsNullOrWhiteSpace(cleaned))
-                cleaned = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
-            if (!cleaned.Contains("Whale/", StringComparison.OrdinalIgnoreCase))
-                cleaned += " Whale/4.0.0.0";
+            const string chromeUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+            if (!string.Equals(core.Settings.UserAgent, chromeUa, StringComparison.Ordinal))
+                core.Settings.UserAgent = chromeUa;
 
-            if (!string.Equals(core.Settings.UserAgent, cleaned, StringComparison.Ordinal))
-                core.Settings.UserAgent = cleaned;
-
-            var chromeFull = "134.0.0.0";
-            var chromeMajor = "134";
-            var m = System.Text.RegularExpressions.Regex.Match(cleaned, @"Chrome/(([\d]+)[\d.]*)");
-            if (m.Success)
-            {
-                chromeFull = m.Groups[1].Value;
-                chromeMajor = m.Groups[2].Value;
-            }
+            const string chromeFull = "131.0.6778.205";
+            const string chromeMajor = "131";
 
             var cdpPayload = JsonSerializer.Serialize(new
             {
-                userAgent = cleaned,
+                userAgent = chromeUa,
                 platform = "Win32",
                 userAgentMetadata = new
                 {
                     brands = new object[]
                     {
-                        new { brand = "Not:A-Brand", version = "99" },
+                        new { brand = "Google Chrome", version = chromeMajor },
                         new { brand = "Chromium", version = chromeMajor },
-                        new { brand = "Whale", version = "4" }
+                        new { brand = "Not_A Brand", version = "24" }
                     },
                     fullVersionList = new object[]
                     {
-                        new { brand = "Not:A-Brand", version = "99.0.0.0" },
+                        new { brand = "Google Chrome", version = chromeFull },
                         new { brand = "Chromium", version = chromeFull },
-                        new { brand = "Whale", version = "4.0.0.0" }
+                        new { brand = "Not_A Brand", version = "24.0.0.0" }
                     },
                     fullVersion = chromeFull,
                     platform = "Windows",
@@ -567,7 +548,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            Debug.WriteLine("[WhaleUA] error: " + ex.Message);
+            Debug.WriteLine("[ChromeUA] error: " + ex.Message);
         }
     }
 
@@ -1312,10 +1293,6 @@ public partial class MainWindow : Window
         {
             SetAuthCoverCopy(title, sub);
             _toolTransitionCoverActive = true;
-            if (_flowReady && FlowView.CoreWebView2 != null)
-            {
-                _ = FlowView.CoreWebView2.ExecuteScriptAsync("try { document.documentElement.style.opacity = '0'; } catch(e) {}");
-            }
             if (_toolTransitionTimer != null)
             {
                 _toolTransitionTimer.Stop();
@@ -1329,8 +1306,6 @@ public partial class MainWindow : Window
                 if (_toolTransitionCoverActive)
                 {
                     _toolTransitionCoverActive = false;
-                    if (_flowReady && FlowView.CoreWebView2 != null)
-                        _ = FlowView.CoreWebView2.ExecuteScriptAsync("try { document.documentElement.style.opacity = '1'; } catch(e) {}");
                     ApplyAuthOverlayState();
                 }
             };
@@ -1347,8 +1322,6 @@ public partial class MainWindow : Window
             _toolTransitionTimer?.Stop();
             _toolTransitionTimer = null;
             _toolTransitionCoverActive = false;
-            if (_flowReady && FlowView.CoreWebView2 != null)
-                _ = FlowView.CoreWebView2.ExecuteScriptAsync("try { document.documentElement.style.opacity = '1'; } catch(e) {}");
             ApplyAuthOverlayState();
         });
     }
@@ -2091,10 +2064,14 @@ public partial class MainWindow : Window
         {
             if (FlowView.CoreWebView2 == null) return;
             if (x <= 0 || y <= 0) return;
-            var pressed = $"{{\"type\":\"mousePressed\",\"x\":{(int)Math.Round(x)},\"y\":{(int)Math.Round(y)},\"button\":\"left\",\"clickCount\":1}}";
-            var released = $"{{\"type\":\"mouseReleased\",\"x\":{(int)Math.Round(x)},\"y\":{(int)Math.Round(y)},\"button\":\"left\",\"clickCount\":1}}";
+            await VeoSmoothMouseMoveAsync(x, y);
+            await Task.Delay(_veoRng.Next(25, 65));
+            int rx = (int)Math.Round(x);
+            int ry = (int)Math.Round(y);
+            var pressed = $"{{\"type\":\"mousePressed\",\"x\":{rx},\"y\":{ry},\"button\":\"left\",\"buttons\":1,\"clickCount\":1,\"modifiers\":0}}";
+            var released = $"{{\"type\":\"mouseReleased\",\"x\":{rx},\"y\":{ry},\"button\":\"left\",\"buttons\":0,\"clickCount\":1,\"modifiers\":0}}";
             await FlowView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", pressed);
-            await Task.Delay(40);
+            await Task.Delay(_veoRng.Next(40, 85));
             await FlowView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", released);
             Debug.WriteLine($"[CdpClick] {x},{y}");
         }
