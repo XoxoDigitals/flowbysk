@@ -565,6 +565,12 @@ public partial class MainWindow : Window
         {
             if (_shellMode == "full")
             {
+                if (_bulkPanelOpen)
+                {
+                    _bulkPanelOpen = false;
+                    PostToShell(new { type = "bulk-panel-state", open = false });
+                }
+                try { if (_vpnPopupWindow != null && _vpnPopupWindow.IsVisible) _vpnPopupWindow.Hide(); } catch { /* ignore */ }
                 // WebView2 uses native HWNDs — ZIndex cannot cover Flow. Hide it while overlays show.
                 FlowView.Visibility = Visibility.Collapsed;
                 BulkView.Visibility = Visibility.Collapsed;
@@ -1271,6 +1277,10 @@ public partial class MainWindow : Window
 
     void StartToolTransitionCover(string? targetUrl)
     {
+        if (!string.IsNullOrWhiteSpace(targetUrl) && !IsGoogleFlowAppUrl(targetUrl) && !IsGoogleAuthRelatedUrl(targetUrl))
+        {
+            CloseBulkPanelIfOpen();
+        }
         var u = (targetUrl ?? "").ToLowerInvariant();
         string title = "Opening Workspace…";
         string sub = "Preparing your workspace environment…";

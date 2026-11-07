@@ -1,7 +1,7 @@
 /**
  * Device fingerprint + v11 Cryptographic Binary & Certificate Attestation
  * Verifies that requests originate from an untampered, Authenticode/Keystore-signed
- * Flow Browser v11 Windows EXE (v8.0.14+) or Android APK (v2.6.0+).
+ * Flow Browser v11 Windows EXE (v8.0.15+) or Android APK (v2.6.0+).
  */
 const crypto = require('crypto');
 
@@ -104,11 +104,11 @@ function requireAppDeviceAttestation(req) {
   const isWindows = /^windows-exe$/i.test(platform);
   const isAndroid = /^android$/i.test(platform);
 
-  if (isWindows && compareSemver(versionRaw, '8.0.14') < 0) {
+  if (isWindows && compareSemver(versionRaw, '8.0.15') < 0) {
     return {
       ok: false,
       code: 'FORCE_UPDATE',
-      error: 'Please download the latest Flow Browser (v8.0.14+).',
+      error: 'Please download the latest Flow Browser (v8.0.15+).',
       deviceId,
       client,
     };

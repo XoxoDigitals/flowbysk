@@ -646,7 +646,7 @@ class FlowBrowserApp {
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
       let deviceId = null;
-      let flowClient = 'windows-exe/8.0.14';
+      let flowClient = 'windows-exe/8.0.15';
       let binHash = '';
       let attestTs = 0;
       let attestNonce = '';
@@ -1273,6 +1273,7 @@ class FlowBrowserApp {
     this.btnOpenWorkspaceHub?.classList.add('active');
     if (this.btnToggleVeoAuto) {
       this.btnToggleVeoAuto.style.display = 'none';
+      this.btnToggleVeoAuto.classList.remove('active');
     }
     const urlBar = document.getElementById('debug-url-bar');
     if (urlBar) urlBar.classList.add('hidden');
@@ -1290,6 +1291,7 @@ class FlowBrowserApp {
     const isFlowTool = this.runningToolId === 'google-flow' || String(this.runningToolId || '').startsWith('flow-image-srv-');
     if (this.btnToggleVeoAuto) {
       this.btnToggleVeoAuto.style.display = isFlowTool ? '' : 'none';
+      if (!isFlowTool) this.btnToggleVeoAuto.classList.remove('active');
     }
     const urlBar = document.getElementById('debug-url-bar');
     if (urlBar) {

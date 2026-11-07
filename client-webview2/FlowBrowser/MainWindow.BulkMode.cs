@@ -41,7 +41,54 @@ public partial class MainWindow
     readonly Random _veoRng = new();
     static readonly HttpClient _veoHttp = new() { Timeout = TimeSpan.FromSeconds(90) };
 
-    double RightBulkMargin => (_bulkPanelOpen && _shellMode != "full") ? BulkPanelWidth : 0;
+    static bool IsGoogleFlowAppUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        try
+        {
+            var host = new Uri(url).Host.ToLowerInvariant();
+            return host == "flow.google.com"
+                   || host.EndsWith(".flow.google.com")
+                   || host == "labs.google"
+                   || host.EndsWith(".labs.google");
+        }
+        catch
+        {
+            var u = url.ToLowerInvariant();
+            return u.Contains("flow.google.com") || u.Contains("labs.google");
+        }
+    }
+
+    bool IsCurrentPageGoogleFlow
+    {
+        get
+        {
+            var src = FlowView.CoreWebView2?.Source;
+            if (IsGoogleFlowAppUrl(src)) return true;
+            if ((string.IsNullOrWhiteSpace(src) || IsAboutBlank(src)) && IsGoogleFlowAppUrl(_flowCredTarget))
+                return true;
+            return false;
+        }
+    }
+
+    double RightBulkMargin => (_bulkPanelOpen && _shellMode != "full" && IsCurrentPageGoogleFlow) ? BulkPanelWidth : 0;
+
+    void CloseBulkPanelIfOpen()
+    {
+        if (!_bulkPanelOpen) return;
+        _bulkPanelOpen = false;
+        Dispatcher.Invoke(() =>
+        {
+            BulkView.Visibility = Visibility.Collapsed;
+            if (_shellMode != "full")
+            {
+                FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
+            }
+            SyncOverlayMargins();
+            SyncAuthCoverBounds();
+            PostToShell(new { type = "bulk-panel-state", open = false });
+        });
+    }
 
     void LoadVeoContentBundle()
     {
@@ -146,7 +193,7 @@ public partial class MainWindow
         try
         {
             var curUrl = flowCore.Source ?? "";
-            if (IsFlowWorkspaceUrl(curUrl))
+            if (IsGoogleFlowAppUrl(curUrl))
             {
                 await flowCore.ExecuteScriptAsync(_veoContentBundle);
                 await flowCore.ExecuteScriptAsync("try { if (typeof window.__veoStartModules === 'function') window.__veoStartModules(); } catch(e) {}");
@@ -157,9 +204,15 @@ public partial class MainWindow
 
     void SyncBulkLayout()
     {
-        if (_shellMode == "full")
+        if (_shellMode == "full" || !IsCurrentPageGoogleFlow)
         {
             BulkView.Visibility = Visibility.Collapsed;
+            if (_shellMode != "full")
+            {
+                FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
+            }
+            SyncOverlayMargins();
+            SyncAuthCoverBounds();
             return;
         }
 
@@ -493,7 +546,11 @@ public partial class MainWindow
 
     void NotifyBulkFlowUrl(string? url)
     {
-        if ((_bulkPanelOpen || _workflowReady) && FlowView.CoreWebView2 != null && !string.IsNullOrWhiteSpace(url) && IsFlowWorkspaceUrl(url))
+        if (!string.IsNullOrWhiteSpace(url) && !IsAboutBlank(url) && !IsGoogleFlowAppUrl(url) && !IsGoogleAuthRelatedUrl(url))
+        {
+            CloseBulkPanelIfOpen();
+        }
+        if ((_bulkPanelOpen || _workflowReady) && FlowView.CoreWebView2 != null && !string.IsNullOrWhiteSpace(url) && IsGoogleFlowAppUrl(url))
         {
             _ = EnsureVeoContentBundleOnFlowAsync();
         }
