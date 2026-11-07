@@ -3678,6 +3678,7 @@ function runGoogleAutoLogin() {
   if (hostname.includes('gemini.google.com') || hostname.includes('bard.google.com')) {
     removeAutoLoginOverlay();
     removeCaptchaBanner();
+    if (document.readyState !== 'complete') return;
     const geminiSignIn = document.querySelector('a[href*="accounts.google.com/ServiceLogin"], a[aria-label*="Sign in" i]');
     if (geminiSignIn && isVisible(geminiSignIn) && !autoLoginState.geminiSignInClicked) {
       autoLoginState.geminiSignInClicked = true;
@@ -3685,6 +3686,8 @@ function runGoogleAutoLogin() {
       simulateClick(geminiSignIn);
       return;
     }
+    if (!autoLoginState.workspaceReadyAt) autoLoginState.workspaceReadyAt = now;
+    if (now - autoLoginState.workspaceReadyAt < 700) return;
     autoLoginState.done = true;
     notifyAuthHost('auth:auto-login', { overlay: false, captcha: false, done: true });
     return;
@@ -3694,12 +3697,14 @@ function runGoogleAutoLogin() {
     removeAutoLoginOverlay();
     removeCaptchaBanner();
     const isAboutOrLanding = /^\/(about|landing)/i.test(pathname) || /\/fx\/.*\/tools\/flow\/about/i.test(pathname);
-    const isWorkspace = !isAboutOrLanding && !!(
+    const isWorkspace = !isAboutOrLanding && document.readyState === 'complete' && !!(
       document.querySelector('flow-app, flow-app-root, flow-projects-page, [data-testid*="project"]') ||
       (document.querySelector('header, flow-app-header, [role="banner"]') &&
         document.querySelector('[role="main"], [role="tablist"], textarea, [contenteditable="true"]'))
     );
-    if (isWorkspace || autoLoginState.done) {
+    if (isWorkspace || (autoLoginState.done && document.readyState === 'complete')) {
+      if (!autoLoginState.workspaceReadyAt) autoLoginState.workspaceReadyAt = now;
+      if (now - autoLoginState.workspaceReadyAt < 700) return;
       autoLoginState.done = true;
       notifyAuthHost('auth:auto-login', { overlay: false, captcha: false, done: true });
       return;
@@ -3725,7 +3730,7 @@ function runGoogleAutoLogin() {
   if (!hostname.includes('accounts.google.com') && !hostname.includes('accounts.youtube.com')) return;
 
   // Final Google handoff — CheckCookie / LoginDone often stalls under our overlay.
-  // Jump to continue= (Flow) once cookies are set.
+  // Jump to continue= (Flow) once cookies are set, keeping the overlay active until Flow loads!
   if (/CheckCookie|LoginDoneHtml|chtml=LoginDone/i.test(location.href + pathname)) {
     if (!autoLoginState.submittedKeys.has('checkcookie-continue')) {
       autoLoginState.submittedKeys.add('checkcookie-continue');
@@ -3735,12 +3740,12 @@ function runGoogleAutoLogin() {
         if (cont && /^https:\/\//i.test(cont)) dest = cont;
       } catch (e) {}
       console.log('[Flow Preload] CheckCookie/LoginDone →', dest);
-      notifyAuthHost('auth:auto-login', { overlay: false, captcha: false, done: true });
+      notifyAuthHost('auth:auto-login', { overlay: true, captcha: false, done: false });
       setTimeout(() => {
         try { location.replace(dest); } catch (e) {
           try { location.href = dest; } catch (e2) {}
         }
-      }, 500);
+      }, 450);
     }
     return;
   }

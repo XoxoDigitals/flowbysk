@@ -438,10 +438,10 @@ class FlowBrowserApp {
       try { if (this.webview.getURL) u = this.webview.getURL(); } catch (e) {}
       console.log('[Webview] did-finish-load, URL:', u);
       this.updateDebugUrl(u);
-      // Keep shell overlay while Google auto-login / captcha chrome is active
+      // Keep shell & native overlay until the workspace page DOM has fully rendered
       const onGoogle = /accounts\.google\.com|accounts\.youtube\.com/i.test(String(u || ''));
       if (u && u !== 'about:blank' && !onGoogle && !this._captchaActive) {
-        this.hideLoadingOverlay();
+        this.scheduleWorkspaceOverlayRelease(u);
       }
       this.sendCredentialsToWebview();
       this.tryGoogleAutoFill(u);
@@ -1266,6 +1266,14 @@ class FlowBrowserApp {
 
   showWorkspaceHub() {
     if (!this.workspaceHubScreen) return;
+    this._hubNavGen = (this._hubNavGen || 0) + 1;
+    if (this._navTimer) { clearTimeout(this._navTimer); this._navTimer = null; }
+    if (this._checkCookieNavTimer) { clearTimeout(this._checkCookieNavTimer); this._checkCookieNavTimer = null; }
+    if (this._freshLoginTimer) { clearTimeout(this._freshLoginTimer); this._freshLoginTimer = null; }
+    if (this._credTimer1) { clearTimeout(this._credTimer1); this._credTimer1 = null; }
+    if (this._credTimer2) { clearTimeout(this._credTimer2); this._credTimer2 = null; }
+    if (this._credTimer3) { clearTimeout(this._credTimer3); this._credTimer3 = null; }
+    this.cancelWorkspaceOverlayRelease();
     this.hideLoadingOverlay();
     this.hideGoogleAuthBanner();
     this.postAuthOverlay?.({ show: false, captcha: false, done: true });
@@ -1284,7 +1292,7 @@ class FlowBrowserApp {
     this.checkAssignedAccountStillExists?.().catch(() => {});
   }
 
-  hideWorkspaceHub() {
+  hideWorkspaceHub(keepTransitionCover = false) {
     if (!this.workspaceHubScreen) return;
     this.workspaceHubScreen.classList.add('hidden');
     this.btnOpenWorkspaceHub?.classList.remove('active');
@@ -1300,14 +1308,16 @@ class FlowBrowserApp {
       urlBar.style.display = isTts ? 'none' : '';
     }
     this.syncToolbarBadgesForMode();
-    try {
-      const live = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || '');
-      if (!/accounts\.google\.com|accounts\.youtube\.com/i.test(String(live || ''))) {
-        this.hideLoadingOverlay();
-        this.hideGoogleAuthBanner();
-        this.postAuthOverlay?.({ show: false, captcha: false, done: true });
-      }
-    } catch (e) {}
+    if (!keepTransitionCover) {
+      try {
+        const live = this.webview?.getURL ? this.webview.getURL() : (this.webview?.src || '');
+        if (!/accounts\.google\.com|accounts\.youtube\.com/i.test(String(live || ''))) {
+          this.hideLoadingOverlay();
+          this.hideGoogleAuthBanner();
+          this.postAuthOverlay?.({ show: false, captcha: false, done: true });
+        }
+      } catch (e) {}
+    }
     this.syncShellModeFromUi();
   }
 
@@ -1357,7 +1367,7 @@ class FlowBrowserApp {
     } catch (e) {}
 
     if (prevRunning === tool.id && this.isUrlMatchingTool(liveUrl, tool) && !this._pendingFreshLogin) {
-      this.hideWorkspaceHub();
+      this.hideWorkspaceHub(false);
       this.hideLoadingOverlay();
       this.hideGoogleAuthBanner();
       this.postAuthOverlay({ show: false, captcha: false, done: true });
@@ -1373,7 +1383,7 @@ class FlowBrowserApp {
       }));
     } catch (e) {}
 
-    this.hideWorkspaceHub();
+    this.hideWorkspaceHub(true);
 
     if (tool.imageOnlyServer && tool.serverId) {
       await this.launchServerWorkspace(tool.serverId, !!this._pendingFreshLogin, tool.url);
@@ -1392,7 +1402,6 @@ class FlowBrowserApp {
     if (tool.usesGoogleAccount) {
       if (!this._pendingFreshLogin) {
         this.hideGoogleAuthBanner();
-        this.postAuthOverlay({ show: false, captcha: false, done: true });
       }
       if (this.activeServer?.id) {
         await this.launchServerWorkspace(this.activeServer.id, !!this._pendingFreshLogin, tool.url);
@@ -1848,10 +1857,7 @@ class FlowBrowserApp {
       if (data && data.success) {
         const previousServerId = this.activeServer?.id || '';
         const serverChanged = !!(previousServerId && previousServerId !== data.server.id);
-        const isImgServer = !!(
-          this.isImageOnlyServer(data.server) ||
-          String(this.runningToolId || '').startsWith('flow-image-srv-')
-        );
+        const isImgServer = !!this.isImageOnlyServer(data.server);
         this.activeServer = sanitizeServerForStorage({
           ...data.server,
           imageOnly: isImgServer
@@ -1884,6 +1890,11 @@ class FlowBrowserApp {
         this._lastOtpCode = '';
         this._lastOtpFetchedAt = 0;
         this._credAttemptId = null;
+        this._finishAttemptId = null;
+        if (this._finishTimer) {
+          clearTimeout(this._finishTimer);
+          this._finishTimer = null;
+        }
         this._googleEmailMem = '';
         this._googlePasswordMem = '';
         this._googleCredServerId = data.server.id;
@@ -1914,18 +1925,39 @@ class FlowBrowserApp {
         if (cookieRestored && !resetGoogle) {
           this._pendingFreshLogin = false;
           this.hideGoogleAuthBanner();
-          this.postAuthOverlay({ show: false, captcha: false, done: true });
           await this.sendCredentialsToWebview(false);
           console.log('[AppShell] Restored isolated session for', data.server.name, '->', targetUrl);
           this.loadTargetInWebview(targetUrl, true);
-          if (this.googleLockRemainingMs() <= 0 || serverChanged) {
-            this.reportGoogleFinish('success', { forceLock: true }).catch(() => {});
-          }
         } else {
           this._pendingFreshLogin = false;
           this._freshLoginStarted = true;
           await this.sendCredentialsToWebview(true);
-          await this.resolveGoogleEmailForFill();
+          const email = await this.resolveGoogleEmailForFill();
+          if (!email) {
+            if (!isImgServer) {
+              const altSrv = this.getStandardServers(this.currentServers).find(
+                (s) => s && s.id && s.id !== data.server.id && this.googleLockRemainingMs(s.id) <= 0
+              );
+              if (altSrv) {
+                console.warn('[AppShell] Primary server locked/unavailable, switching to unlocked server:', altSrv.name);
+                this._switchingServerInFlight = false;
+                return await this.launchServerWorkspace(altSrv.id, resetGoogle, targetOverrideUrl);
+              }
+            }
+            console.warn('[AppShell] Cannot start Google login without credentials for server:', data.server.name);
+            this.hideGoogleAuthBanner();
+            this.hideLoadingOverlay();
+            this.postAuthOverlay({ show: false, captcha: false, done: true });
+            const lockMs = this.googleLockRemainingMs(data.server.id);
+            this.notify(
+              lockMs > 0
+                ? this.googleLockMessage({ serverId: data.server.id, retryAfterSeconds: Math.ceil(lockMs / 1000) })
+                : 'Unable to load Google credentials for this server right now. Please try another server.',
+              true
+            );
+            this.showWorkspaceHub();
+            return;
+          }
           const loginUrl =
             'https://accounts.google.com/ServiceLogin?hl=en&continue=' +
             encodeURIComponent(targetUrl);
@@ -1938,7 +1970,9 @@ class FlowBrowserApp {
           isLock ? this.googleLockMessage(data) : (data && data.error) || 'Failed to switch server node',
           true
         );
+        this.hideGoogleAuthBanner();
         this.hideLoadingOverlay();
+        this.postAuthOverlay({ show: false, captcha: false, done: true });
         // Never leave the workspace blank: reopen the account we are already on.
         if (this.serverSelect && this.activeServer?.id) {
           this.serverSelect.value = this.activeServer.id;
@@ -1951,7 +1985,9 @@ class FlowBrowserApp {
     } catch (err) {
       console.error('Server switch error:', err);
       this.notify('Error communicating with server: ' + err.message, true);
+      this.hideGoogleAuthBanner();
       this.hideLoadingOverlay();
+      this.postAuthOverlay({ show: false, captcha: false, done: true });
     } finally {
       this._switchingServerInFlight = false;
     }
@@ -1963,7 +1999,7 @@ class FlowBrowserApp {
    */
   /**
    * Google CheckCookie / LoginDoneHtml often stalls under the auth cover.
-   * Finish handoff by navigating to continue= (Flow) and clearing the overlay.
+   * Finish handoff by navigating to continue= (Flow) while keeping the cover up until Flow loads.
    */
   maybeFinishGoogleCheckCookie(url) {
     const href = String(url || '');
@@ -1982,11 +2018,13 @@ class FlowBrowserApp {
     this._freshLoginStarted = true;
     this._allowFlowAfterCheckCookie = true;
     this.hideGoogleAuthBanner();
-    this.hideLoadingOverlay();
-    this.postAuthOverlay({ show: false, done: true });
-    setTimeout(() => {
-      this.loadTargetInWebview(dest);
-    }, 400);
+    this.showLoadingOverlay('Opening Workspace...', 'Finishing Google sign-in...');
+    this.postAuthOverlay({ show: true, captcha: false, done: false });
+    if (this._checkCookieNavTimer) clearTimeout(this._checkCookieNavTimer);
+    this._checkCookieNavTimer = setTimeout(() => {
+      this._checkCookieNavTimer = null;
+      this.loadTargetInWebview(dest, true);
+    }, 350);
   }
 
   maybeStartFreshLoginAfterFlow(url) {
@@ -2164,6 +2202,11 @@ class FlowBrowserApp {
     if (!url || url.includes('demo-flow') || url.startsWith('file:')) {
       url = this._activeToolTargetUrl || 'https://flow.google.com/';
     }
+    // Never allow background timers to yank the user out of the Workspace Hub
+    if (!forceNavigate && this.workspaceHubScreen && !this.workspaceHubScreen.classList.contains('hidden')) {
+      console.warn('[AppShell] skip background navigate while Workspace Hub is open:', url);
+      return;
+    }
     // Never yank the tab to Flow while Google TOTP / sign-in is still open —
     // EXCEPT CheckCookie/LoginDone or an explicit user tool switch from the Workspace Hub (forceNavigate).
     if (!forceNavigate) {
@@ -2188,15 +2231,10 @@ class FlowBrowserApp {
       }
       url = this._activeToolTargetUrl || this.activeServer?.targetUrl || 'https://flow.google.com/';
     }
-    // Never force chrome while the Flow Creator login screen is open (clips UI + traps overlay)
-    const loginVisible = this.loginScreen && !this.loginScreen.classList.contains('hidden');
-    if (loginVisible) {
-      window.electronAPI.setShellMode?.('full');
-    } else {
-      window.electronAPI.setShellMode?.('chrome');
-    }
+    this.syncShellModeFromUi();
     const isBuiltInStudio = /app\.flowbrowser\.localhost|flowbrowser\.local/i.test(String(url || ''));
     if (!isBuiltInStudio) {
+      this.cancelWorkspaceOverlayRelease();
       this.showLoadingOverlay('Opening Workspace...', '');
     } else {
       this.hideLoadingOverlay();
@@ -2234,14 +2272,10 @@ class FlowBrowserApp {
     if (this._overlayTimeout) clearTimeout(this._overlayTimeout);
     this._overlayTimeout = setTimeout(() => {
       this.hideLoadingOverlay();
-    }, 6000);
+    }, 12000);
   }
 
   onWebviewDomReady() {
-    if (this._overlayTimeout) {
-      clearTimeout(this._overlayTimeout);
-      this._overlayTimeout = null;
-    }
     // Send masking rules to the webview (keep profile icon visible)
     if (this.settings) {
       this.webview.send('apply-masking-rules', {
@@ -2256,12 +2290,15 @@ class FlowBrowserApp {
     this.syncCreditsToWebview();
     this.syncSavedProjectsToWebview();
     // OTP-only backup — never re-fill email/password (that caused the password loop)
-    this.tryGoogleAutoFill(this.webview.src);
+    const liveUrl = String((this.webview?.getURL ? this.webview.getURL() : this.webview?.src) || '');
+    this.tryGoogleAutoFill(liveUrl);
 
-    // Hide full overlay after short grace period to allow DOM mutations to finish cleanly
-    setTimeout(() => {
-      this.hideLoadingOverlay();
-    }, 400);
+    // Only auto-dismiss immediately for local built-in studio; Flow/Gemini wait for scheduleWorkspaceOverlayRelease
+    if (/app\.flowbrowser\.localhost|flowbrowser\.local/i.test(liveUrl)) {
+      setTimeout(() => {
+        this.hideLoadingOverlay();
+      }, 250);
+    }
   }
 
   async sendCredentialsToWebview(forceReset = false) {
@@ -2554,13 +2591,11 @@ class FlowBrowserApp {
     if (href.includes('flow.google.com') || href.includes('labs.google') || href.includes('gemini.google.com') || href.includes('bard.google.com')) {
       this.hideGoogleAuthBanner();
       this._totpFilling = false;
-      // Do not end overlay immediately during Flow?Google bounce (fresh login).
-      // Always force-finish within 10s once we are on the Flow workspace.
+      // Do not end overlay immediately during Flow/Google bounce or while the workspace is still painting.
+      // Always force-finish within 12s once we are on the Flow workspace, and release smoothly once rendered.
       this.scheduleFlowOverlayMaxDone();
       if (!this._pendingFreshLogin) {
-        this.postAuthOverlay({ show: false, done: true });
-        this.hideLoadingOverlay();
-        this.cancelFlowOverlayMaxDone();
+        this.scheduleWorkspaceOverlayRelease(href);
       }
       this._pwdCredPushed = false;
       return;
@@ -2778,14 +2813,15 @@ class FlowBrowserApp {
   applyLockFromUser(user) {
     if (!user) return;
     if (user.googleServerLocks && typeof user.googleServerLocks === 'object') {
-      this.noteGoogleLock(user, user.activeServerId || (this.activeServer && this.activeServer.id) || '');
+      this.noteGoogleLock(
+        {
+          googleServerLocks: user.googleServerLocks,
+          serverTime: user.serverTime
+        },
+        ''
+      );
       return;
     }
-    if (user.googleSessionRetryAfterSeconds === undefined) return;
-    this.noteGoogleLock(
-      { retryAfterSeconds: user.googleSessionRetryAfterSeconds },
-      user.activeServerId || (this.activeServer && this.activeServer.id) || ''
-    );
   }
 
   googleLockMessage(data) {
@@ -2822,9 +2858,15 @@ class FlowBrowserApp {
    * cancelled/failed closes the attempt so admin never sees it stuck "in progress").
    */
   async reportGoogleFinish(outcome, opts = {}) {
-    const attemptId = this._finishAttemptId || (opts.forceLock ? 'restored-session' : null);
+    const attemptId = opts.attemptId || this._finishAttemptId || null;
     if (!attemptId || !this.config?.authToken || !this.config?.serverUrl) return;
-    this._finishAttemptId = null;
+    if (this._finishAttemptId === attemptId) {
+      this._finishAttemptId = null;
+    }
+    const targetServerId = String(opts.serverId || this.activeServer?.id || '').trim();
+    // Image-only servers should never trigger a 60m Google session lock
+    const isImgSrv = targetServerId && this.isImageOnlyServer({ id: targetServerId });
+    const effectiveOutcome = isImgSrv && outcome === 'success' ? 'cancelled' : outcome;
     try {
       const res = await fetch(`${this.config.serverUrl}${CLIENT_API}/extension-finish`, {
         method: 'POST',
@@ -2833,10 +2875,14 @@ class FlowBrowserApp {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.config.authToken}`
         },
-        body: JSON.stringify({ attemptId, outcome, serverId: this.activeServer?.id || null })
+        body: JSON.stringify({
+          attemptId,
+          outcome: effectiveOutcome,
+          serverId: targetServerId || null
+        })
       });
       const data = await res.json().catch(() => ({}));
-      if (outcome === 'success' && data && data.user) this.applyLockFromUser(data.user);
+      if (effectiveOutcome === 'success' && data && data.user) this.applyLockFromUser(data.user);
     } catch (e) {}
   }
 
@@ -2857,11 +2903,15 @@ class FlowBrowserApp {
     // Require the page to STAY on Flow: short settle when the OTP was already used,
     // long settle otherwise (Google may still redirect to the 2FA challenge).
     const settleMs = this._credUsedStages?.has('otp') ? 2500 : 8000;
+    const finishAttemptId = this._finishAttemptId;
+    const finishServerId = String(this.activeServer?.id || '');
     this._finishTimer = setTimeout(() => {
       this._finishTimer = null;
-      const cur = String(this.webview?.src || '');
+      if (!finishAttemptId || this._finishAttemptId !== finishAttemptId) return;
+      if (finishServerId && String(this.activeServer?.id || '') !== finishServerId) return;
+      const cur = String((this.webview?.getURL ? this.webview.getURL() : this.webview?.src) || '');
       if (onGoogleAuth(cur) || !onFlow(cur)) return;
-      this.reportGoogleFinish('success');
+      this.reportGoogleFinish('success', { attemptId: finishAttemptId, serverId: finishServerId });
     }, settleMs);
   }
 
@@ -2887,12 +2937,12 @@ class FlowBrowserApp {
       if (Number.isFinite(stMs)) await window.FlowCredChannel.setServerTime?.(stMs);
     }
     if (data && data.code === 'GOOGLE_SESSION_LOCKED') {
-      this.noteGoogleLock(data);
+      this.noteGoogleLock(data, curSrvId);
       if (!this._lockNotifyAt || Date.now() - this._lockNotifyAt > 30000) {
         this._lockNotifyAt = Date.now();
         this.notify(this.googleLockMessage(data), true);
       }
-      this._credFailUntil = Date.now() + Math.max(this.googleLockRemainingMs(), 1000);
+      this._credFailUntil = Date.now() + Math.max(this.googleLockRemainingMs(curSrvId), 1000);
       throw new Error(this.googleLockMessage(data));
     }
     if (!data?.attemptId) throw new Error((data && data.error) || 'extension-start failed');
@@ -2904,8 +2954,6 @@ class FlowBrowserApp {
 
   async fetchGoogleCredential(stage, _retriedClock = false, _retriedAttempt = false) {
     if (!this.config?.authToken || !this.config?.serverUrl) return '';
-    // 60 min Google lock: do not hit extension-start/step until it ends (no retry spam).
-    if (this.googleLockRemainingMs() > 0 && !this._credAttemptId) return '';
     try {
       // Same stage already sealed in this attempt ? do not spam extension-start (except otp retry).
       if (stage !== 'otp' && this._credUsedStages?.has(stage)) {
@@ -3347,7 +3395,7 @@ class FlowBrowserApp {
     this._totpFilling = false;
   }
 
-  /** Max 10s sticky overlay after landing on Flow workspace post-login. */
+  /** Max 12s sticky overlay after landing on Flow workspace post-login. */
   scheduleFlowOverlayMaxDone() {
     if (this._flowOverlayMaxTimer) return;
     this._flowOverlayMaxTimer = setTimeout(() => {
@@ -3358,14 +3406,110 @@ class FlowBrowserApp {
       this.hideGoogleAuthBanner();
       this.hideLoadingOverlay();
       this.postAuthOverlay({ show: false, done: true });
-      console.log('[AppShell] Flow page held 10s ? forcing overlay done');
-    }, 10000);
+      console.log('[AppShell] Flow page held 12s -> forcing overlay done');
+    }, 12000);
   }
 
   cancelFlowOverlayMaxDone() {
     if (!this._flowOverlayMaxTimer) return;
     clearTimeout(this._flowOverlayMaxTimer);
     this._flowOverlayMaxTimer = null;
+  }
+
+  cancelWorkspaceOverlayRelease() {
+    this._workspaceReleaseGen = (this._workspaceReleaseGen || 0) + 1;
+    if (this._workspaceReleaseTimer) {
+      clearTimeout(this._workspaceReleaseTimer);
+      this._workspaceReleaseTimer = null;
+    }
+  }
+
+  /**
+   * Keep the loading/auth cover active until the destination workspace page
+   * (Flow / Labs / Gemini) has finished loading, mounted its UI, and painted,
+   * preventing any flash of the previous Google login page during redirect.
+   */
+  scheduleWorkspaceOverlayRelease(url) {
+    const href = String(url || '');
+    if (/accounts\.google\.com|accounts\.youtube\.com|gds\.google\.com/i.test(href)) {
+      return;
+    }
+    if (/app\.flowbrowser\.localhost|flowbrowser\.local/i.test(href)) {
+      this.cancelWorkspaceOverlayRelease();
+      this.hideLoadingOverlay();
+      this.postAuthOverlay({ show: false, captcha: false, done: true });
+      return;
+    }
+    const isWorkspace = /flow\.google\.com|labs\.google|gemini\.google\.com|bard\.google\.com/i.test(href);
+    if (!isWorkspace) {
+      this.hideLoadingOverlay();
+      return;
+    }
+    if (this._pendingFreshLogin) return;
+
+    this.cancelWorkspaceOverlayRelease();
+    const gen = this._workspaceReleaseGen;
+
+    const pollReady = async (attempt = 0) => {
+      if (this._workspaceReleaseGen !== gen) return;
+      const live = String((this.webview?.getURL ? this.webview.getURL() : this.webview?.src) || '');
+      if (/accounts\.google\.com|accounts\.youtube\.com|gds\.google\.com/i.test(live)) {
+        return;
+      }
+      if (!/flow\.google\.com|labs\.google|gemini\.google\.com|bard\.google\.com/i.test(live)) {
+        return;
+      }
+      let pageReady = false;
+      try {
+        if (this.webview && typeof this.webview.executeJavaScript === 'function') {
+          pageReady = await this.webview.executeJavaScript(`(() => {
+            try {
+              const host = (location.hostname || '').toLowerCase();
+              const path = (location.pathname || '');
+              if (host.includes('accounts.google') || host.includes('accounts.youtube')) return false;
+              if (document.readyState !== 'complete') return false;
+              const body = document.body;
+              if (!body) return false;
+              if (host === 'flow.google.com' && (path === '/' || path === '')) {
+                const txt = (body.innerText || '').trim();
+                if (txt.length < 24 && !document.querySelector('canvas, video, textarea, [role="main"], main, nav')) {
+                  return false;
+                }
+              }
+              const hasUi = !!(
+                document.querySelector('main, [role="main"], nav, header, textarea, canvas, video, button, [contenteditable="true"], chat-app, bard-sidenav-container, flow-app') ||
+                (body.children && body.children.length > 1 && (body.innerText || '').trim().length > 20)
+              );
+              return hasUi;
+            } catch (e) {
+              return false;
+            }
+          })()`);
+        } else {
+          pageReady = attempt >= 3;
+        }
+      } catch (e) {
+        pageReady = attempt >= 6;
+      }
+
+      if (this._workspaceReleaseGen !== gen) return;
+
+      if (pageReady || attempt >= 16) {
+        this._workspaceReleaseTimer = setTimeout(() => {
+          if (this._workspaceReleaseGen !== gen) return;
+          const cur = String((this.webview?.getURL ? this.webview.getURL() : this.webview?.src) || '');
+          if (/accounts\.google\.com|accounts\.youtube\.com|gds\.google\.com/i.test(cur)) return;
+          this.hideGoogleAuthBanner();
+          this.hideLoadingOverlay();
+          this.postAuthOverlay({ show: false, captcha: false, done: true });
+          this.cancelFlowOverlayMaxDone();
+        }, 650);
+      } else {
+        this._workspaceReleaseTimer = setTimeout(() => pollReady(attempt + 1), 280);
+      }
+    };
+
+    this._workspaceReleaseTimer = setTimeout(() => pollReady(0), 220);
   }
 
   /** Drive native WPF/Android auth cover (WebView2 page overlays cannot mask Google login). */

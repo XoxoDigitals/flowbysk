@@ -645,7 +645,6 @@ router.post('/extension-start', ...requireSignedAppUser, async (req, res) => {
         'No Google account is assigned. Ask the administrator to configure a server with Google credentials.',
     });
   }
-  if (!(await assertNotGoogleSessionLocked(user, res, activeServer.id))) return;
   const channelId = String(req.body?.channelId || '').trim();
   const channel = credChannel.getChannel(channelId, user.id, req);
   if (!channel) {
@@ -677,22 +676,6 @@ router.post('/extension-step', ...requireSignedAppUser, async (req, res) => {
   const { attemptId, stage, channelId, ts, mac } = req.body || {};
   const user = req.user;
   const activeServer = await resolveActiveServer(user);
-  const targetSrvId = activeServer ? activeServer.id : user.activeServerId;
-  const lockState = googleLockState(user, targetSrvId);
-  if (lockState.locked) {
-    const srvAttemptInfo =
-      targetSrvId && user.lastGoogleAttemptsByServer && user.lastGoogleAttemptsByServer[targetSrvId]
-        ? user.lastGoogleAttemptsByServer[targetSrvId]
-        : null;
-    const expectedAttemptId = (srvAttemptInfo && srvAttemptInfo.attemptId) || user.lastGoogleAttemptId || '';
-    const lastAtIso = (srvAttemptInfo && srvAttemptInfo.at) || user.lastGoogleLoginAt || '';
-    const sameAttempt = !!attemptId && String(attemptId) === String(expectedAttemptId);
-    const lastMs = lastAtIso ? new Date(lastAtIso).getTime() : 0;
-    const withinGrace = lastMs > 0 && Date.now() - lastMs < 10 * 60 * 1000;
-    if (!(sameAttempt && withinGrace)) {
-      return res.status(429).json(googleLockResponse(lockState));
-    }
-  }
   const stageKey = String(stage || '');
   if (!allowExtensionStep(user.id, stageKey)) {
     return res.status(429).json({ success: false, error: 'Too many credential requests. Try again shortly.' });
@@ -784,9 +767,20 @@ router.post('/extension-finish', ...requireSignedAppUser, async (req, res) => {
     serverName: targetServer ? targetServer.name : null,
   };
 
-  if (normalizedOutcome === 'success' && targetSrvId) {
-    const nowIso = new Date().toISOString();
-    const lockedUntil = new Date(Date.now() + GOOGLE_SESSION_LOCK_MS).toISOString();
+  const isRestoredSession = String(attemptId || '') === 'restored-session';
+  const isImageOnlyTarget = !!(targetServer && targetServer.imageOnly);
+  if (normalizedOutcome === 'success' && targetSrvId && !isRestoredSession && !isImageOnlyTarget) {
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const existingIso =
+      req.user.googleServerLocks && typeof req.user.googleServerLocks === 'object'
+        ? req.user.googleServerLocks[targetSrvId]
+        : null;
+    const existingMs = existingIso ? new Date(existingIso).getTime() : 0;
+    const lockedUntil =
+      Number.isFinite(existingMs) && existingMs > nowMs
+        ? new Date(existingMs).toISOString()
+        : new Date(nowMs + GOOGLE_SESSION_LOCK_MS).toISOString();
     const nextServerLocks = {
       ...(req.user.googleServerLocks && typeof req.user.googleServerLocks === 'object'
         ? req.user.googleServerLocks

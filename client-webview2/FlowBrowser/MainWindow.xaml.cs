@@ -43,6 +43,8 @@ public partial class MainWindow : Window
     TextBlock? _authCoverTitleText;
     TextBlock? _authCoverSubText;
     bool _toolTransitionCoverActive;
+    bool _flowNavigationInProgress;
+    int _workspaceLoadGen;
     bool _flowCredImageOnly;
     string _activeFlowServerId = "";
     readonly Dictionary<string, List<SavedCookieDto>> _flowServerCookies = new(StringComparer.OrdinalIgnoreCase);
@@ -348,7 +350,9 @@ public partial class MainWindow : Window
                 return;
             }
 
-            UpdateAuthOverlayFromUrl(uri);
+            _flowNavigationInProgress = !IsAboutBlank(uri);
+            _workspaceLoadGen++;
+            UpdateAuthOverlayFromUrl(uri, isCompleted: false);
             PostToShell(new
             {
                 type = "flow-event",
@@ -366,8 +370,30 @@ public partial class MainWindow : Window
                 if (status == CoreWebView2WebErrorStatus.OperationCanceled ||
                     status == CoreWebView2WebErrorStatus.ConnectionAborted)
                 {
+                    var cancelGen = _workspaceLoadGen;
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(650);
+                        await Dispatcher.InvokeAsync(() =>
+                        {
+                            if (cancelGen != _workspaceLoadGen) return;
+                            var curSrc = FlowView.CoreWebView2?.Source ?? "";
+                            if (IsFlowWorkspaceUrl(curSrc) && !IsGoogleAuthRelatedUrl(curSrc) && !IsAboutBlank(curSrc))
+                            {
+                                _ = VerifyAndCompleteWorkspaceLoadAsync(curSrc, ++_workspaceLoadGen);
+                            }
+                        });
+                    });
                     return;
                 }
+                _flowNavigationInProgress = false;
+                _toolTransitionTimer?.Stop();
+                _toolTransitionTimer = null;
+                _toolTransitionCoverActive = false;
+                _authLoginActive = false;
+                _onGoogleAuth = false;
+                _captchaActive = false;
+                ApplyAuthOverlayState();
                 PostToShell(new
                 {
                     type = "flow-event",
@@ -378,7 +404,7 @@ public partial class MainWindow : Window
                 });
                 return;
             }
-            UpdateAuthOverlayFromUrl(url);
+            UpdateAuthOverlayFromUrl(url, isCompleted: true);
             NotifyBulkFlowUrl(url);
             PostToShell(new { type = "flow-event", @event = "did-navigate", url });
             PostToShell(new { type = "flow-event", @event = "did-finish-load", url });
@@ -390,9 +416,13 @@ public partial class MainWindow : Window
                 _ = FlowView.CoreWebView2.ExecuteScriptAsync(
                     $"try {{ if (window.__flowSetImageOnlyMode) window.__flowSetImageOnlyMode({imgFlag}, {srvStr}); }} catch(e) {{}}");
             }
-            if (_toolTransitionCoverActive && IsFlowWorkspaceUrl(url) && !IsGoogleAuthRelatedUrl(url) && !IsAboutBlank(url))
+            if (IsFlowWorkspaceUrl(url) && !IsGoogleAuthRelatedUrl(url) && !IsAboutBlank(url))
             {
-                _ = CompleteToolTransitionCoverAsync();
+                _ = VerifyAndCompleteWorkspaceLoadAsync(url, ++_workspaceLoadGen);
+            }
+            else
+            {
+                _flowNavigationInProgress = false;
             }
             if (!string.IsNullOrWhiteSpace(_activeFlowServerId))
             {
@@ -404,7 +434,7 @@ public partial class MainWindow : Window
         core.HistoryChanged += (_, _) =>
         {
             var url = core.Source ?? "";
-            UpdateAuthOverlayFromUrl(url);
+            UpdateAuthOverlayFromUrl(url, isCompleted: false);
             NotifyBulkFlowUrl(url);
             PostToShell(new { type = "flow-event", @event = "did-navigate-in-page", url });
             PostToShell(new { type = "flow-event", @event = "page-title-updated", url });
@@ -414,6 +444,12 @@ public partial class MainWindow : Window
                 var srvStr = JsString(_activeFlowServerId);
                 _ = FlowView.CoreWebView2.ExecuteScriptAsync(
                     $"try {{ if (window.__flowSetImageOnlyMode) window.__flowSetImageOnlyMode({imgFlag}, {srvStr}); }} catch(e) {{}}");
+            }
+            if (!_flowNavigationInProgress &&
+                (_toolTransitionCoverActive || _authLoginActive || _onGoogleAuth) &&
+                IsFlowWorkspaceUrl(url) && !IsGoogleAuthRelatedUrl(url) && !IsAboutBlank(url))
+            {
+                _ = VerifyAndCompleteWorkspaceLoadAsync(url, ++_workspaceLoadGen);
             }
             if (!string.IsNullOrWhiteSpace(_activeFlowServerId))
             {
@@ -571,6 +607,10 @@ public partial class MainWindow : Window
                     PostToShell(new { type = "bulk-panel-state", open = false });
                 }
                 try { if (_vpnPopupWindow != null && _vpnPopupWindow.IsVisible) _vpnPopupWindow.Hide(); } catch { /* ignore */ }
+                _toolTransitionTimer?.Stop();
+                _toolTransitionTimer = null;
+                _toolTransitionCoverActive = false;
+                _flowNavigationInProgress = false;
                 // WebView2 uses native HWNDs — ZIndex cannot cover Flow. Hide it while overlays show.
                 FlowView.Visibility = Visibility.Collapsed;
                 BulkView.Visibility = Visibility.Collapsed;
@@ -580,6 +620,8 @@ public partial class MainWindow : Window
                 Panel.SetZIndex(ShellView, 10);
                 Panel.SetZIndex(FlowView, 1);
                 SyncOverlayMargins();
+                StopAuthCoverPinTimer();
+                HideAuthCoverWindow();
                 ApplyAuthOverlayState(); // hides cover while full; sticky flags kept for chrome return
             }
             else
@@ -765,7 +807,7 @@ public partial class MainWindow : Window
         }
     }
 
-    void UpdateAuthOverlayFromUrl(string? url)
+    void UpdateAuthOverlayFromUrl(string? url, bool isCompleted = false)
     {
         // Logout / about:blank cleanup must not start the sticky cover by itself
         if (IsGoogleLogoutUrl(url) || IsAboutBlank(url))
@@ -792,7 +834,7 @@ public partial class MainWindow : Window
 
         if (IsGoogleAuthRelatedUrl(url) && !IsGoogleLogoutUrl(url))
         {
-            // CheckCookie / LoginDone = auth finished; do not keep sticky cover forever.
+            // CheckCookie / LoginDone = auth finished; hand off to Flow while keeping cover up until Flow renders.
             if (IsGoogleLoginDoneUrl(url))
             {
                 _ = FinishCheckCookieHandoffAsync(url);
@@ -818,10 +860,23 @@ public partial class MainWindow : Window
 
         if (IsFlowWorkspaceUrl(url))
         {
-            CancelFlowOverlayMaxClear();
-            _authLoginActive = false;
-            _onGoogleAuth = false;
             _captchaActive = false;
+            // Keep cover UP during NavigationStarting / redirects and until VerifyAndCompleteWorkspaceLoadAsync
+            // confirms the Flow / Gemini workspace DOM has fully loaded and rendered over the Google login screen!
+            if (_authLoginActive || _onGoogleAuth || _toolTransitionCoverActive)
+            {
+                var u = (url ?? "").ToLowerInvariant();
+                if (u.Contains("gemini.google.com") || u.Contains("bard.google.com"))
+                    SetAuthCoverCopy("Opening Google Gemini…", "Loading Gemini Pro workspace…");
+                else if (u.Contains("zextts"))
+                    SetAuthCoverCopy("Opening TTS Studio…", "Initializing AI Voice & Podcast Studio…");
+                else
+                    SetAuthCoverCopy("Opening Google Flow…", "Loading Google Flow Studio…");
+                ScheduleFlowOverlayMaxClear();
+                ApplyAuthOverlayState();
+                return;
+            }
+            CancelFlowOverlayMaxClear();
             ApplyAuthOverlayState();
             return;
         }
@@ -890,12 +945,14 @@ public partial class MainWindow : Window
         catch { /* keep dest */ }
 
         Debug.WriteLine("[AuthOverlay] CheckCookie/LoginDone → " + dest);
-        CancelFlowOverlayMaxClear();
+        // Keep the cover active across the CheckCookie -> Flow redirect so the Google page never flashes!
         _captchaActive = false;
-        _onGoogleAuth = false;
-        _authLoginActive = false;
+        _onGoogleAuth = true;
+        _authLoginActive = true;
+        _flowNavigationInProgress = true;
+        SetAuthCoverCopy("Opening Google Flow…", "Finalizing Google workspace sign-in…");
         ApplyAuthOverlayState();
-        await Task.Delay(400);
+        await Task.Delay(300);
         await NavigateFlowSafeAsync(dest);
     }
 
@@ -992,9 +1049,12 @@ public partial class MainWindow : Window
         {
             CancelFlowOverlayMaxClear();
             var cur = FlowView.CoreWebView2?.Source ?? "";
-            if (!IsFlowWorkspaceUrl(cur) || IsGoogleAuthRelatedUrl(cur)) return;
-            if (!_authLoginActive && !_onGoogleAuth) return;
+            if (IsGoogleAuthRelatedUrl(cur)) return;
             Debug.WriteLine("[AuthOverlay] Flow page held 10s — forcing overlay done");
+            _toolTransitionTimer?.Stop();
+            _toolTransitionTimer = null;
+            _toolTransitionCoverActive = false;
+            _flowNavigationInProgress = false;
             _captchaActive = false;
             _onGoogleAuth = false;
             _authLoginActive = false;
@@ -1014,6 +1074,19 @@ public partial class MainWindow : Window
     {
         if (done || (!show && !captcha))
         {
+            if (_shellMode == "full")
+            {
+                CancelFlowOverlayMaxClear();
+                _toolTransitionTimer?.Stop();
+                _toolTransitionTimer = null;
+                _toolTransitionCoverActive = false;
+                _flowNavigationInProgress = false;
+                _captchaActive = false;
+                _onGoogleAuth = false;
+                _authLoginActive = false;
+                ApplyAuthOverlayState();
+                return;
+            }
             // Ignore premature done while still on Google auth (reload / inject race)
             var cur = FlowView.CoreWebView2?.Source ?? "";
             if (IsGoogleAuthRelatedUrl(cur))
@@ -1031,7 +1104,19 @@ public partial class MainWindow : Window
                 ApplyAuthOverlayState();
                 return;
             }
+            // If we are still navigating or waiting for the Flow workspace DOM to finish rendering,
+            // keep the cover up until VerifyAndCompleteWorkspaceLoadAsync completes!
+            if (_flowNavigationInProgress && IsFlowWorkspaceUrl(cur))
+            {
+                ScheduleFlowOverlayMaxClear();
+                ApplyAuthOverlayState();
+                return;
+            }
             CancelFlowOverlayMaxClear();
+            _toolTransitionTimer?.Stop();
+            _toolTransitionTimer = null;
+            _toolTransitionCoverActive = false;
+            _flowNavigationInProgress = false;
             _captchaActive = false;
             _onGoogleAuth = false;
             _authLoginActive = false;
@@ -1106,6 +1191,10 @@ public partial class MainWindow : Window
                     SyncAuthCoverBounds();
                     PinAuthCoverAboveWebView();
                 }
+                else
+                {
+                    HideAuthCoverWindow();
+                }
                 return;
             }
             _authUiMode = want;
@@ -1141,7 +1230,11 @@ public partial class MainWindow : Window
         _authCoverPinTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };
         _authCoverPinTimer.Tick += (_, _) =>
         {
-            if (_authUiMode != AuthUiCover) return;
+            if (_shellMode == "full" || _authUiMode != AuthUiCover)
+            {
+                HideAuthCoverWindow();
+                return;
+            }
             SyncAuthCoverBounds();
             PinAuthCoverAboveWebView();
         };
@@ -1157,6 +1250,11 @@ public partial class MainWindow : Window
 
     void PinAuthCoverAboveWebView()
     {
+        if (_shellMode == "full")
+        {
+            HideAuthCoverWindow();
+            return;
+        }
         if (_authCoverWindow == null || !_authCoverWindow.IsVisible) return;
         try
         {
@@ -1249,6 +1347,11 @@ public partial class MainWindow : Window
 
     void ShowAuthCoverWindow()
     {
+        if (_shellMode == "full")
+        {
+            HideAuthCoverWindow();
+            return;
+        }
         EnsureAuthCoverWindow();
         if (_authCoverWindow == null) return;
         if (!_authCoverWindow.IsVisible)
@@ -1309,65 +1412,181 @@ public partial class MainWindow : Window
         {
             SetAuthCoverCopy(title, sub);
             _toolTransitionCoverActive = true;
+            _flowNavigationInProgress = true;
             if (_toolTransitionTimer != null)
             {
                 _toolTransitionTimer.Stop();
                 _toolTransitionTimer = null;
             }
-            _toolTransitionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(4200) };
+            _toolTransitionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(9500) };
             _toolTransitionTimer.Tick += (_, _) =>
             {
                 _toolTransitionTimer?.Stop();
                 _toolTransitionTimer = null;
-                if (_toolTransitionCoverActive)
+                _toolTransitionCoverActive = false;
+                _flowNavigationInProgress = false;
+                var cur = FlowView.CoreWebView2?.Source ?? "";
+                if (!IsGoogleAuthRelatedUrl(cur))
                 {
-                    _toolTransitionCoverActive = false;
-                    ApplyAuthOverlayState();
+                    _authLoginActive = false;
+                    _onGoogleAuth = false;
+                    _captchaActive = false;
                 }
+                ApplyAuthOverlayState();
             };
             _toolTransitionTimer.Start();
             ApplyAuthOverlayState();
         });
     }
 
-    async Task CompleteToolTransitionCoverAsync()
+    /// <summary>
+    /// Waits until the destination Flow / Gemini / Studio page has finished loading its DOM
+    /// and painted its first real workspace frame before dismissing the native auth/transition cover.
+    /// Prevents revealing the Google login screen while the URL bar already shows flow.google.com.
+    /// </summary>
+    async Task VerifyAndCompleteWorkspaceLoadAsync(string url, int gen)
     {
-        await Task.Delay(320);
-        await Dispatcher.InvokeAsync(() =>
+        try
         {
-            _toolTransitionTimer?.Stop();
-            _toolTransitionTimer = null;
-            _toolTransitionCoverActive = false;
-            ApplyAuthOverlayState();
-        });
+            var lower = (url ?? "").ToLowerInvariant();
+            var isLocalStudio = lower.Contains("app.flowbrowser.localhost") ||
+                                lower.Contains("flowbrowser.local") ||
+                                lower.Contains("zextts");
+            if (isLocalStudio)
+            {
+                await Task.Delay(180);
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (gen != _workspaceLoadGen) return;
+                    _flowNavigationInProgress = false;
+                    _toolTransitionTimer?.Stop();
+                    _toolTransitionTimer = null;
+                    _toolTransitionCoverActive = false;
+                    _authLoginActive = false;
+                    _onGoogleAuth = false;
+                    _captchaActive = false;
+                    CancelFlowOverlayMaxClear();
+                    ApplyAuthOverlayState();
+                });
+                return;
+            }
+
+            // Poll up to ~5.6s for document.readyState === 'complete' and non-empty rendered workspace DOM
+            for (var attempt = 0; attempt < 28; attempt++)
+            {
+                if (gen != _workspaceLoadGen) return;
+
+                string liveUrl = "";
+                var canProbe = false;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (FlowView.CoreWebView2 != null)
+                    {
+                        liveUrl = FlowView.CoreWebView2.Source ?? "";
+                        canProbe = true;
+                    }
+                });
+
+                if (!canProbe || gen != _workspaceLoadGen) return;
+                if (IsGoogleAuthRelatedUrl(liveUrl) || IsAboutBlank(liveUrl) || !IsFlowWorkspaceUrl(liveUrl))
+                {
+                    return;
+                }
+
+                try
+                {
+                    var probeResult = await Dispatcher.InvokeAsync(async () =>
+                    {
+                        if (FlowView.CoreWebView2 == null) return "wait";
+                        const string probeJs = @"(() => {
+                          try {
+                            if (document.readyState !== 'complete') return 'loading';
+                            const h = (location.hostname || '').toLowerCase();
+                            const p = (location.pathname || '').toLowerCase();
+                            if (h.includes('accounts.google.com') || h.includes('accounts.youtube.com')) return 'auth';
+                            const body = document.body;
+                            if (!body) return 'no-body';
+                            const rect = body.getBoundingClientRect();
+                            if (rect.height < 80 || body.children.length === 0) return 'empty';
+                            if (h === 'flow.google.com' && (p === '/' || p === '') && (body.innerText || '').trim().length < 24 && !document.querySelector('flow-app, flow-app-root, [role=""main""], header, textarea, button')) {
+                              return 'redirect-stub';
+                            }
+                            if (h.includes('flow.google.com') || h.includes('labs.google')) {
+                              const hasUi = !!(
+                                document.querySelector('flow-app, flow-app-root, flow-projects-page, header, nav, [role=""main""], [role=""banner""], textarea, [contenteditable=""true""], button, a, canvas, svg') ||
+                                (body.innerText || '').trim().length > 30
+                              );
+                              return hasUi ? 'ready' : 'hydrating';
+                            }
+                            return 'ready';
+                          } catch (e) {
+                            return 'err';
+                          }
+                        })()";
+                        return await FlowView.CoreWebView2.ExecuteScriptAsync(probeJs);
+                    }).Task.Unwrap();
+
+                    if (probeResult != null && probeResult.Contains("ready", StringComparison.OrdinalIgnoreCase))
+                    {
+                        break;
+                    }
+                    if (probeResult != null && probeResult.Contains("auth", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return;
+                    }
+                }
+                catch
+                {
+                    /* script context transitioning during redirect */
+                }
+
+                await Task.Delay(200);
+            }
+
+            // Extra paint-settle delay so the dark Flow/Gemini UI has completely replaced the Google login framebuffer
+            await Task.Delay(650);
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (gen != _workspaceLoadGen) return;
+                var finalUrl = FlowView.CoreWebView2?.Source ?? "";
+                if (IsGoogleAuthRelatedUrl(finalUrl) || IsAboutBlank(finalUrl) || !IsFlowWorkspaceUrl(finalUrl))
+                    return;
+
+                _flowNavigationInProgress = false;
+                _toolTransitionTimer?.Stop();
+                _toolTransitionTimer = null;
+                _toolTransitionCoverActive = false;
+                _authLoginActive = false;
+                _onGoogleAuth = false;
+                _captchaActive = false;
+                CancelFlowOverlayMaxClear();
+                ApplyAuthOverlayState();
+                if (!string.IsNullOrWhiteSpace(_activeFlowServerId))
+                {
+                    _ = SaveCurrentFlowCookiesForServerAsync(_activeFlowServerId);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("VerifyAndCompleteWorkspaceLoad: " + ex.Message);
+        }
     }
 
     void SyncAuthCoverBounds()
     {
+        if (_shellMode == "full")
+        {
+            HideAuthCoverWindow();
+            return;
+        }
         if (_authCoverWindow == null || !_authCoverWindow.IsVisible) return;
         if (!IsVisible || WindowState == WindowState.Minimized) return;
 
         try
         {
-            if (FlowView.Visibility == Visibility.Visible && FlowView.ActualWidth >= 2 && FlowView.ActualHeight >= 2)
-            {
-                var topLeft = FlowView.PointToScreen(new Point(0, 0));
-                var source = PresentationSource.FromVisual(this);
-                if (source?.CompositionTarget != null)
-                {
-                    var dip = source.CompositionTarget.TransformFromDevice.Transform(topLeft);
-                    _authCoverWindow.Left = dip.X;
-                    _authCoverWindow.Top = dip.Y;
-                }
-                else
-                {
-                    _authCoverWindow.Left = topLeft.X;
-                    _authCoverWindow.Top = topLeft.Y;
-                }
-                _authCoverWindow.Width = Math.Max(2, FlowView.ActualWidth);
-                _authCoverWindow.Height = Math.Max(2, FlowView.ActualHeight);
-            }
-            else if (ActualWidth >= 2 && ActualHeight > _chromeHeight)
+            if (ActualWidth >= 2 && ActualHeight > _chromeHeight)
             {
                 var topLeft = PointToScreen(new Point(0, _chromeHeight));
                 var source = PresentationSource.FromVisual(this);
@@ -1393,7 +1612,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Collapsed WebView2 aborts navigations (black about:blank page). Always show Flow first.
+    /// Ensure FlowView is initialized before navigating. Never override _shellMode == "full" from C#
+    /// (ShellView owns _shellMode so the Workspace Hub and Login screen are never clipped).
     /// </summary>
     async Task EnsureFlowReadyToNavigateAsync()
     {
@@ -1402,15 +1622,8 @@ public partial class MainWindow : Window
 
         await Dispatcher.InvokeAsync(() =>
         {
-            if (_shellMode == "full")
+            if (_shellMode != "full")
             {
-                _shellMode = "chrome";
-                ShellView.Height = _chromeHeight;
-                ShellView.VerticalAlignment = VerticalAlignment.Top;
-                ShellView.Margin = new Thickness(0);
-                Panel.SetZIndex(ShellView, 10);
-                Panel.SetZIndex(FlowView, 1);
-                SyncBulkLayout();
                 ApplyAuthOverlayState();
                 FlowView.Visibility = Visibility.Visible;
                 SyncAuthCoverBounds();
@@ -1418,10 +1631,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                ApplyAuthOverlayState();
-                FlowView.Visibility = Visibility.Visible;
-                SyncAuthCoverBounds();
-                PinAuthCoverAboveWebView();
+                HideAuthCoverWindow();
             }
         });
         await Task.Delay(30);
@@ -1437,9 +1647,16 @@ public partial class MainWindow : Window
             await Dispatcher.InvokeAsync(() =>
             {
                 if (FlowView.CoreWebView2 == null) return;
-                FlowView.Visibility = Visibility.Visible;
-                SyncAuthCoverBounds();
-                PinAuthCoverAboveWebView();
+                if (_shellMode != "full")
+                {
+                    FlowView.Visibility = Visibility.Visible;
+                    SyncAuthCoverBounds();
+                    PinAuthCoverAboveWebView();
+                }
+                else
+                {
+                    HideAuthCoverWindow();
+                }
                 FlowView.CoreWebView2.Navigate(url);
             });
         }
@@ -2725,8 +2942,11 @@ public partial class MainWindow : Window
 
             _activeFlowServerId = nextId;
 
-            // 3. Switching servers (or current jar has no valid auth cookies): wipe ALL cookies so accounts never mix!
+            // 3. Switching servers (or current jar has no valid auth cookies): stop active page and wipe ALL cookies so accounts never mix!
+            try { FlowView.CoreWebView2.Stop(); } catch { /* ignore */ }
             FlowView.CoreWebView2.CookieManager.DeleteAllCookies();
+            await FlowView.CoreWebView2.CookieManager.GetCookiesAsync("");
+            await Task.Delay(50);
 
             // 4. If the target server has a valid isolated cookie jar saved, restore all of its cookies now
             if (!string.IsNullOrWhiteSpace(nextId) &&
@@ -2765,6 +2985,8 @@ public partial class MainWindow : Window
                         Debug.WriteLine("RestoreFlowCookie error: " + cookieEx.Message);
                     }
                 }
+                await FlowView.CoreWebView2.CookieManager.GetCookiesAsync("");
+                await Task.Delay(30);
                 return true;
             }
 

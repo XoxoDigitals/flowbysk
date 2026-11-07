@@ -124,7 +124,9 @@
     openDownloadedFile: (filePath) => invoke('openDownloadedFile', { filePath }),
     startFileDrag: (filePath) => invoke('startFileDrag', { filePath }),
     setShellMode: (mode) => {
-      post({ type: 'cmd', cmd: 'shellMode', mode: mode === 'full' ? 'full' : 'chrome' });
+      const normalized = mode === 'full' ? 'full' : 'chrome';
+      lastShellMode = normalized;
+      post({ type: 'cmd', cmd: 'shellMode', mode: normalized });
     },
     toggleBulkPanel: () => {
       post({ type: 'cmd', cmd: 'toggleBulkPanel' });
