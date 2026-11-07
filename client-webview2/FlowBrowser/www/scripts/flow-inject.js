@@ -1349,15 +1349,23 @@ function queueDeduction() {
 // Spoof Google Account Email -> flowcreator@gmail.com and Name -> Flow Creator
 function spoofAccountIdentityInDom() {
   try {
-    const emailRegex = /[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/g;
-    // 1. Spoof aria-label / title on header profile buttons
+    const emailTestRegex = /[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/;
+    const emailReplaceRegex = /[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/g;
+    // 1. Spoof aria-label / title on header profile buttons and avatar initial inside header button
     document.querySelectorAll('header button, header a, .header-user-button, [aria-label*="@"]').forEach((el) => {
       ['aria-label', 'title'].forEach((attr) => {
         const val = el.getAttribute(attr);
-        if (val && emailRegex.test(val) && !val.includes('flowcreator@gmail.com')) {
+        if (val && emailTestRegex.test(val) && !val.includes('flowcreator@gmail.com')) {
           el.setAttribute(attr, 'Google Account: Flow Creator (flowcreator@gmail.com)');
         }
       });
+      if (el.classList.contains('header-user-button') || /account/i.test(el.getAttribute('aria-label') || '')) {
+        el.querySelectorAll('div, span').forEach((av) => {
+          if (av.children.length === 0 && /^[A-Z]$/.test((av.textContent || '').trim())) {
+            if (av.textContent.trim() !== 'F') av.textContent = 'F';
+          }
+        });
+      }
     });
 
     // 2. Spoof visible email text nodes & adjacent display name in the account popup
@@ -1366,9 +1374,9 @@ function spoofAccountIdentityInDom() {
       if (el.children.length > 0) continue;
       const txt = (el.textContent || '').trim();
       if (!txt || txt.length > 120) continue;
-      if (emailRegex.test(txt)) {
+      if (emailTestRegex.test(txt)) {
         if (txt !== 'flowcreator@gmail.com') {
-          el.textContent = txt.replace(emailRegex, 'flowcreator@gmail.com');
+          el.textContent = txt.replace(emailReplaceRegex, 'flowcreator@gmail.com');
         }
         // Check sibling above email (account holder's display name, e.g. "Jitendar Kumawat")
         const prev = el.previousElementSibling;
@@ -1378,8 +1386,18 @@ function spoofAccountIdentityInDom() {
             prev.textContent = 'Flow Creator';
           }
         }
+        if (el.parentElement) {
+          Array.from(el.parentElement.children).forEach((sib) => {
+            if (sib !== el && sib.children.length === 0) {
+              const sTxt = (sib.textContent || '').trim();
+              if (sTxt && sTxt !== 'Flow Creator' && sTxt !== 'Google' && !sTxt.includes('@') && !sTxt.includes('Switch account')) {
+                sib.textContent = 'Flow Creator';
+              }
+            }
+          });
+        }
         // Also check parent container for single-letter avatar circle (e.g. "J")
-        const card = el.parentElement && el.parentElement.parentElement;
+        const card = el.closest('[aria-label="Account details"]') || (el.parentElement && el.parentElement.parentElement);
         if (card) {
           card.querySelectorAll('div, span').forEach((av) => {
             if (av.children.length === 0 && /^[A-Z]$/.test((av.textContent || '').trim())) {
@@ -1389,6 +1407,21 @@ function spoofAccountIdentityInDom() {
         }
       }
     }
+
+    // 3. Reveal Account details popup ONLY once its email/name have been spoofed to Flow Creator
+    document.querySelectorAll('[aria-label="Account details"]:not(button):not(.header-user-button):not(.account-switcher-placeholder)').forEach((popup) => {
+      if (popup.querySelector('.header-user-button')) return;
+      const rawText = popup.textContent || '';
+      const allEmails = rawText.match(emailReplaceRegex) || [];
+      const hasUnspoofedEmail = allEmails.some((em) => em.toLowerCase() !== 'flowcreator@gmail.com');
+      if (!hasUnspoofedEmail && rawText.includes('flowcreator@gmail.com')) {
+        if (popup.getAttribute('data-flow-spoofed') !== '1') {
+          popup.setAttribute('data-flow-spoofed', '1');
+        }
+      } else if (hasUnspoofedEmail) {
+        popup.removeAttribute('data-flow-spoofed');
+      }
+    });
   } catch (e) {}
 }
 
@@ -1481,6 +1514,8 @@ function ensureProfileIconVisible() {
 
       // Clicking the profile avatar icon (J) in top-right header
       if (isProfileAvatarClick(t, e.clientX, e.clientY)) {
+        spoofAccountIdentityInDom();
+        purgeSignoutElements();
         const currentlyOpen = document.documentElement?.getAttribute('data-flow-profile-popup-open') === '1';
         const popupEl = document.querySelector('[aria-label="Account details"]');
         const popupVisible = popupEl && popupEl.getBoundingClientRect().width > 10;
@@ -1488,6 +1523,20 @@ function ensureProfileIconVisible() {
           setPopupAllowed(false);
         } else {
           setPopupAllowed(true);
+          if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => {
+              spoofAccountIdentityInDom();
+              purgeSignoutElements();
+            });
+          }
+          setTimeout(() => {
+            spoofAccountIdentityInDom();
+            purgeSignoutElements();
+          }, 16);
+          setTimeout(() => {
+            spoofAccountIdentityInDom();
+            purgeSignoutElements();
+          }, 50);
         }
         return;
       }
@@ -2039,6 +2088,7 @@ loadSavedProjectsFromDevice();
         "model-response a,model-response a[href],message-content a,message-content a[href],user-query a,user-query a[href],.response-container a,.query-content a,.user-query-container a,.markdown a,chat-window a,source-footnote,inline-source-citation,sources-carousel,sources-carousel-inline,fact-check-evaluator,[data-test-id*='source'],button[aria-label*='source' i],button[aria-label*='Google Help' i]{pointer-events:none!important;cursor:text!important;text-decoration:none!important;}" +
         "header button,header a,header img,.header-user-button,.header-user-button *,flow-user-tier-chip,.tier-chip,[aria-label='ULTRA tier'],[aria-label*='Google Account' i],.account-switcher-placeholder{visibility:visible!important;opacity:1!important;pointer-events:auto!important}" +
         "html:not([data-flow-profile-popup-open='1']) [aria-label='Account details']:not(button):not(.header-user-button):not(.account-switcher-placeholder):not(:has(.header-user-button)){display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}" +
+        "[aria-label='Account details']:not(button):not(.header-user-button):not(.account-switcher-placeholder):not(:has(.header-user-button)):not([data-flow-spoofed='1']){visibility:hidden!important;opacity:0!important;pointer-events:none!important;}" +
         "#flow-my-projects-dock{position:fixed!important;bottom:18px!important;right:22px!important;left:auto!important;z-index:2147483645!important;display:flex!important;align-items:center!important;gap:10px!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
         "#flow-my-projects-btn,#flow-save-current-project-btn{display:inline-flex!important;align-items:center!important;gap:8px!important;background:rgba(22,19,36,0.94)!important;border:1px solid rgba(139,92,246,0.45)!important;color:#f3f4f6!important;padding:8px 16px!important;border-radius:999px!important;font-size:13px!important;font-weight:600!important;cursor:pointer!important;box-shadow:0 8px 24px rgba(0,0,0,0.6)!important;transition:all .18s ease!important;}" +
         "#flow-my-projects-btn:hover,#flow-save-current-project-btn:hover{background:rgba(38,31,64,0.98)!important;border-color:rgba(167,139,250,0.8)!important;transform:translateY(-1px)!important;}" +
@@ -2070,8 +2120,13 @@ loadSavedProjectsFromDevice();
     let lastSignoutObsAt = 0;
     const signoutObserver = new MutationObserver(() => {
       if (!isProtectedWorkspaceHost()) return;
+      // Always spoof account identity immediately when Account details popup is mounted or updated
+      if (document.querySelector('[aria-label="Account details"]')) {
+        spoofAccountIdentityInDom();
+        purgeSignoutElements();
+      }
       const now = Date.now();
-      if (now - lastSignoutObsAt < 500) return;
+      if (now - lastSignoutObsAt < 250) return;
       lastSignoutObsAt = now;
       purgeSignoutElements();
       spoofAccountIdentityInDom();
@@ -2598,11 +2653,12 @@ loadSavedProjectsFromDevice();
       }
     }
 
+    spoofAccountIdentityInDom();
+
     const runHeavyDomPass = now - (initPakflowDomEngine._lastHeavyDomPass || 0) >= 600;
     if (runHeavyDomPass) {
       initPakflowDomEngine._lastHeavyDomPass = now;
       purgeSignoutElements();
-      spoofAccountIdentityInDom();
       ensureProfileIconVisible();
       updateMyProjectsUI();
       ensureExitAgentModeAndHideToggle();
@@ -2682,11 +2738,10 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      // Elevate "New project" button with #ct-blur-overlay on home page (on Image-Only accounts, also allow Tools tab & Create tool)
+      // Elevate "New project" button with #ct-blur-overlay on home page, and allow Tools tab & Create tool on all servers (Video + Image-Only)
       if (!initPakflowDomEngine._toolsTabListenerBound) {
         initPakflowDomEngine._toolsTabListenerBound = true;
         document.addEventListener('click', (ev) => {
-          if (!isImageOnlyAccount()) return;
           const tEl = ev.target && ev.target.closest ? ev.target.closest('button, [role="tab"], [role="button"], a, span') : null;
           if (!tEl) return;
           const raw = (tEl.textContent || '').trim().toLowerCase();
@@ -2702,12 +2757,12 @@ loadSavedProjectsFromDevice();
       const newProjBtn = Array.from(document.querySelectorAll('button')).find(
         (b) => b.textContent && b.textContent.includes('New project')
       );
-      const hasCreateToolBtnOnPage = isImageOnlyAccount() && Array.from(document.querySelectorAll('button, a, [role="button"]')).some((el) => {
+      const hasCreateToolBtnOnPage = Array.from(document.querySelectorAll('button, a, [role="button"]')).some((el) => {
         if (!isElementVisible(el)) return false;
         const txt = (el.textContent || '').trim().toLowerCase();
         return txt.includes('create tool');
       });
-      const toolsTabActive = isImageOnlyAccount() && (
+      const toolsTabActive = (
         Boolean(initPakflowDomEngine._toolsTabClicked) ||
         hasCreateToolBtnOnPage ||
         /tools|apps/i.test(window.location.pathname + window.location.search + window.location.hash) ||
@@ -2734,33 +2789,31 @@ loadSavedProjectsFromDevice();
         if (newProjBtn.getAttribute('data-elevate-btn') !== 'true') {
           newProjBtn.setAttribute('data-elevate-btn', 'true');
         }
-        if (isImageOnlyAccount()) {
-          document.querySelectorAll('button, [role="tab"], [role="button"], span').forEach((el) => {
-            const t = (el.textContent || '').trim().toLowerCase();
-            if (t === 'tools' || t === 'apps' || t === 'projects' || t.includes('create tool')) {
-              const btn = el.closest('button, [role="tab"], [role="button"]') || el.parentElement || el;
-              if (btn) {
-                if (btn.getAttribute('data-elevate-btn') !== 'true') {
-                  btn.setAttribute('data-elevate-btn', 'true');
-                }
-                btn.style.setProperty('position', 'relative', 'important');
-                btn.style.setProperty('z-index', '2147483641', 'important');
-                // Also elevate compact header/tablist ancestors so no parent stacking context traps Tools below #ct-blur-overlay
-                let anc = btn.parentElement;
-                for (let depth = 0; depth < 6 && anc && anc !== document.body; depth++) {
-                  const rect = anc.getBoundingClientRect ? anc.getBoundingClientRect() : null;
-                  if (rect && rect.height > 0 && rect.height < 140) {
-                    if (window.getComputedStyle(anc).position === 'static') {
-                      anc.style.setProperty('position', 'relative', 'important');
-                    }
-                    anc.style.setProperty('z-index', '2147483641', 'important');
+        document.querySelectorAll('button, [role="tab"], [role="button"], span').forEach((el) => {
+          const t = (el.textContent || '').trim().toLowerCase();
+          if (t === 'tools' || t === 'apps' || t === 'projects' || t.includes('create tool')) {
+            const btn = el.closest('button, [role="tab"], [role="button"]') || el.parentElement || el;
+            if (btn) {
+              if (btn.getAttribute('data-elevate-btn') !== 'true') {
+                btn.setAttribute('data-elevate-btn', 'true');
+              }
+              btn.style.setProperty('position', 'relative', 'important');
+              btn.style.setProperty('z-index', '2147483641', 'important');
+              // Also elevate compact header/tablist ancestors so no parent stacking context traps Tools below #ct-blur-overlay
+              let anc = btn.parentElement;
+              for (let depth = 0; depth < 6 && anc && anc !== document.body; depth++) {
+                const rect = anc.getBoundingClientRect ? anc.getBoundingClientRect() : null;
+                if (rect && rect.height > 0 && rect.height < 140) {
+                  if (window.getComputedStyle(anc).position === 'static') {
+                    anc.style.setProperty('position', 'relative', 'important');
                   }
-                  anc = anc.parentElement;
+                  anc.style.setProperty('z-index', '2147483641', 'important');
                 }
+                anc = anc.parentElement;
               }
             }
-          });
-        }
+          }
+        });
       } else {
         const overlay = document.getElementById('ct-blur-overlay');
         if (overlay) overlay.remove();
@@ -2776,53 +2829,37 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      // Hide Tools tab ONLY on standard video accounts (keep enabled on Image-Only accounts)
+      // Keep Tools / Apps tab enabled on all accounts (both Video and Image-Only servers)
       document.querySelectorAll('span').forEach((sp) => {
         const st = (sp.textContent || '').trim();
         if (st === 'Tools' || st === 'Apps') {
           const parent = sp.parentElement;
           const tabBtn = sp.closest('button, [role="tab"], [role="button"]');
           if (!parent) return;
-          if (isImageOnlyAccount()) {
-            [parent, tabBtn].forEach((node) => {
-              if (node && node.classList.contains('force-hide-radix')) {
-                node.classList.remove('force-hide-radix');
-                node.style.removeProperty('display');
-                node.style.removeProperty('pointer-events');
-              }
-            });
-          } else if (st === 'Tools' && !parent.classList.contains('force-hide-radix')) {
-            parent.classList.add('force-hide-radix');
-            parent.style.setProperty('display', 'none', 'important');
-            parent.style.setProperty('pointer-events', 'none', 'important');
-          }
+          [parent, tabBtn].forEach((node) => {
+            if (node && node.classList.contains('force-hide-radix')) {
+              node.classList.remove('force-hide-radix');
+              node.style.removeProperty('display');
+              node.style.removeProperty('pointer-events');
+            }
+          });
         }
       });
 
-      // Hide Extend (Veo / Omni), pen_magic Omni, Create tool (only on non-image accounts), and enable 4K Upscaled menuitem
+      // Hide Extend (Veo / Omni), pen_magic Omni, keep Create tool enabled on all servers, and enable 4K Upscaled menuitem
       document.querySelectorAll('button, a, [role="button"], [role="menuitem"]').forEach((el) => {
         if (!el.textContent) return;
         const t = el.textContent.trim();
         const tl = t.toLowerCase();
         if (tl.includes('create tool')) {
-          if (isImageOnlyAccount()) {
-            if (el.classList.contains('force-hide-radix')) {
-              el.classList.remove('force-hide-radix');
-              el.style.removeProperty('display');
-              el.style.removeProperty('pointer-events');
-              const prev = el.previousElementSibling;
-              if (prev && (prev.tagName === 'HR' || prev.getAttribute('role') === 'separator' || (prev.textContent || '').trim() === '')) {
-                prev.style.removeProperty('display');
-              }
+          if (el.classList.contains('force-hide-radix')) {
+            el.classList.remove('force-hide-radix');
+            el.style.removeProperty('display');
+            el.style.removeProperty('pointer-events');
+            const prev = el.previousElementSibling;
+            if (prev && (prev.tagName === 'HR' || prev.getAttribute('role') === 'separator' || (prev.textContent || '').trim() === '')) {
+              prev.style.removeProperty('display');
             }
-            return;
-          }
-          el.classList.add('force-hide-radix');
-          el.style.setProperty('display', 'none', 'important');
-          el.style.setProperty('pointer-events', 'none', 'important');
-          const prev = el.previousElementSibling;
-          if (prev && (prev.tagName === 'HR' || prev.getAttribute('role') === 'separator' || (prev.textContent || '').trim() === '')) {
-            prev.style.setProperty('display', 'none', 'important');
           }
           return;
         }
