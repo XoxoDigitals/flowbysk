@@ -988,7 +988,12 @@ body {
 .platform-android .window-controls,
 .platform-android .divider,
 .platform-android .zoom-controls,
-.platform-android .server-switcher-wrapper,
+.platform-android #btn-toggle-vpn,
+.platform-android #btn-toggle-veo-auto,
+.platform-android #veo-auto-drawer,
+.platform-android #veo-drawer-backdrop,
+.platform-android #extension-drawer,
+.platform-android [data-settings-action="veo-auto"],
 .platform-android #btn-toggle-downloads,
 .platform-android #btn-reload-webview,
 .platform-android #btn-clear-cookies,
@@ -1008,26 +1013,58 @@ body {
   display: none !important;
 }
 
-.platform-android .app-name {
-  display: none !important;
-}
-
 .platform-android .toolbar-container {
-  height: 40px;
-  min-height: 40px;
-  max-height: 40px;
-  flex-wrap: nowrap;
-  padding: 0 8px;
+  height: 48px !important;
+  min-height: 48px !important;
+  max-height: 48px !important;
+  flex-wrap: nowrap !important;
+  padding: 0 8px !important;
   gap: 6px;
   align-items: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.platform-android .toolbar-container::-webkit-scrollbar {
+  display: none;
 }
 
 .platform-android .toolbar-left {
   flex: 0 0 auto;
-  gap: 0;
+  gap: 6px;
   max-width: none;
   min-width: 0;
   justify-content: flex-start;
+}
+
+.platform-android .tb-hub-btn {
+  height: 32px !important;
+  min-height: 32px !important;
+  min-width: 0 !important;
+  padding: 0 10px !important;
+  font-size: 12px !important;
+  flex-shrink: 0;
+}
+
+.platform-android .server-switcher-wrapper {
+  height: 32px;
+  padding: 2px 6px;
+  gap: 4px;
+  margin-left: 0;
+  flex-shrink: 0;
+}
+
+.platform-android .server-select-dropdown {
+  max-width: 96px;
+  min-width: 52px;
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+.platform-android .btn-request-change {
+  font-size: 11px;
+  padding: 4px 7px;
 }
 
 .platform-android .app-logo {
@@ -1234,17 +1271,18 @@ html.login-active #android-settings-sheet,
     display: none !important;
   }
   .platform-android .toolbar-container {
-    height: auto;
-    min-height: 48px;
-    flex-wrap: wrap;
+    height: 48px !important;
+    min-height: 48px !important;
+    max-height: 48px !important;
+    flex-wrap: nowrap !important;
   }
   .auth-box {
     width: calc(100% - 24px);
     max-width: 420px;
   }
-  .platform-android .tb-btn {
-    min-width: 44px;
-    min-height: 44px;
+  .platform-android .tb-btn:not(.tb-hub-btn) {
+    min-width: 36px;
+    min-height: 36px;
   }
 }
 
@@ -2036,5 +2074,89 @@ html.login-active #android-settings-sheet,
   opacity: 0.75;
   cursor: not-allowed;
 }
+
+/* ---- Android Workspace Hub & Mobile Responsive Optimizations ---- */
+.platform-android .hub-left-rail {
+  display: none !important;
+}
+
+.platform-android .hub-content-area {
+  padding: 14px 14px 36px !important;
+  -webkit-overflow-scrolling: touch;
+}
+
+.platform-android .hub-card-btn {
+  min-height: 34px;
+  padding: 0 14px;
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .platform-android .pro-suite-pill,
+  .platform-android .app-name-stack {
+    display: none !important;
+  }
+
+  .platform-android .hub-breadcrumb-bar {
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+    font-size: 11px;
+  }
+
+  .platform-android .hub-breadcrumb-right {
+    font-size: 10px;
+  }
+
+  .platform-android .hub-hero-card {
+    margin-bottom: 18px;
+    border-radius: 14px;
+  }
+
+  .platform-android .hub-hero-top {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 18px 16px 16px;
+    gap: 14px;
+  }
+
+  .platform-android .hub-hero-orbital {
+    display: none !important;
+  }
+
+  .platform-android .hub-hero-title {
+    font-size: 24px;
+    margin-bottom: 6px;
+  }
+
+  .platform-android .hub-hero-desc {
+    font-size: 12.5px;
+    line-height: 1.45;
+    margin-bottom: 14px;
+  }
+
+  .platform-android .hub-hero-meta {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 12px 16px;
+  }
+
+  .platform-android .hub-tools-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .platform-android .hub-tool-card {
+    padding: 16px 16px 14px;
+    gap: 12px;
+  }
+
+  .platform-android .hub-card-btn {
+    min-height: 36px;
+    padding: 0 15px;
+    font-size: 12.5px;
+  }
+}
+
 
 

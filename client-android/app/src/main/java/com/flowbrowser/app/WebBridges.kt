@@ -15,17 +15,18 @@ class FlowBridge(private val activity: MainActivity) {
         activity.onFlowMessage(json)
     }
 
-    /** Chunked blob/data downloads from Flow WebView → gallery. */
+    /**
+     * Chunked blob/data downloads from Flow WebView → gallery / Downloads.
+     * IMPORTANT: downloadBegin, downloadChunk, and downloadEnd MUST all run synchronously
+     * on the JavaBridge thread so chunks never arrive before downloadBegin creates the entry!
+     */
     @JavascriptInterface
     fun downloadBegin(id: String, filename: String, mime: String, total: Int) {
-        activity.runOnUiThread {
-            activity.onBlobDownloadBegin(id, filename, mime, total)
-        }
+        activity.onBlobDownloadBegin(id, filename, mime, total)
     }
 
     @JavascriptInterface
     fun downloadChunk(id: String, base64Chunk: String) {
-        // Off main thread — may be large
         activity.onBlobDownloadChunk(id, base64Chunk)
     }
 
@@ -35,7 +36,12 @@ class FlowBridge(private val activity: MainActivity) {
     }
 
     @JavascriptInterface
+    fun downloadFail(id: String, filename: String, error: String) {
+        activity.onBlobDownloadFail(id, filename, error)
+    }
+
+    @JavascriptInterface
     fun downloadFail(id: String, error: String) {
-        activity.onBlobDownloadFail(id, error)
+        activity.onBlobDownloadFail(id, "", error)
     }
 }

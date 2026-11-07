@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
 import android.view.MotionEvent
@@ -23,6 +24,7 @@ import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -52,6 +54,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -69,7 +72,7 @@ class MainActivity : AppCompatActivity() {
         private const val AUTH_UI_COVER = 1
         private const val AUTH_UI_CAPTCHA = 2
         /** Auth cover ON — masks Google automation; lifts for real captcha. */
-        private const val DISABLE_AUTH_COVER = true
+        private const val DISABLE_AUTH_COVER = false
         /** Autoclick Next / 2FA enabled (production). */
         private const val DISABLE_GOOGLE_AUTO_NEXT = false
         /** Force Flow workspace to lay out at this CSS width (then scale to fit). */
@@ -238,7 +241,8 @@ class MainActivity : AppCompatActivity() {
           host.indexOf('accounts.') < 0) {
         clearInterval(window.__flowDismissNagsIv);
         window.__flowDismissNagsIv = null;
-        try { location.replace('https://flow.google.com/'); } catch (e) { location.href = 'https://flow.google.com/'; }
+        var target = (window.__flowCredTarget || (window.__flowHostCreds && window.__flowHostCreds.targetUrl) || 'https://flow.google.com/');
+        try { location.replace(target); } catch (e) { location.href = target; }
         return;
       }
       if (n >= 30) {
@@ -262,6 +266,7 @@ class MainActivity : AppCompatActivity() {
     private var lastFlowScalePct: Int = -1
     private lateinit var config: AppConfig
     private lateinit var wwwServer: WwwServer
+    private val zexTtsService by lazy { ZexTtsService(this) }
 
     private val scope = CoroutineScope(Dispatchers.Main + Job())
     private var shellMode = "full"
@@ -271,6 +276,11 @@ class MainActivity : AppCompatActivity() {
     private var flowCredEmail: String? = null
     private var flowCredPassword: String? = null
     private var flowCredTarget: String? = null
+    private var flowCredImageOnly: Boolean = false
+    private var activeFlowServerId: String = ""
+    private var activeCookieServerId: String = ""
+    private val serverCookieSnapshots = ConcurrentHashMap<String, Map<String, List<String>>>()
+    private val workspaceReadyGeneration = AtomicInteger(0)
     private val autofillGeneration = AtomicInteger(0)
     private var lastAutofillKickMs = 0L
     private var lastTotpDetectMs = 0L
@@ -295,18 +305,23 @@ class MainActivity : AppCompatActivity() {
     private var flowChromeFull = "131.0.6778.135"
     private var flowUaDesktop = true
     private var googleSecureRecoveries = 0
-    /** Google Flow "upload from device" — WebView file input callback. */
+    /** Google Flow / Gemini / ZexTTS "upload from device" — WebView file input callback. */
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var pendingGalleryMultiple = false
     private var pendingGalleryImage = true
     private var pendingGalleryVideo = true
+    private var pendingFileAcceptTypes: List<String> = emptyList()
+    private var pendingUseUniversalFilePicker: Boolean = false
+    private val uploadSeq = AtomicInteger(0)
     private val pendingBlobDownloads = ConcurrentHashMap<String, PendingBlobDownload>()
 
     private data class PendingBlobDownload(
         val filename: String,
         val mime: String,
         val temp: File,
-        val out: BufferedOutputStream
+        val out: BufferedOutputStream,
+        val totalBytes: Long = 0L,
+        var receivedBytes: Long = 0L
     )
 
     private val fileChooserLauncher =
@@ -356,6 +371,11 @@ class MainActivity : AppCompatActivity() {
         flowPane = findViewById(R.id.flowPane)
         authCover = findViewById(R.id.authCover)
         captchaBanner = findViewById(R.id.captchaBanner)
+        try {
+            val fqbId = resources.getIdentifier("floatingQuickBar", "id", packageName)
+            if (fqbId != 0) findViewById<View?>(fqbId)?.visibility = View.GONE
+        } catch (_: Exception) {
+        }
         chromeHeightPx = (DEFAULT_CHROME_HEIGHT_DP * resources.displayMetrics.density).roundToInt()
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
@@ -424,7 +444,8 @@ class MainActivity : AppCompatActivity() {
         val s = shellView.settings
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
-        s.allowFileAccess = false
+        s.allowFileAccess = true
+        s.allowContentAccess = true
         s.mediaPlaybackRequiresUserGesture = false
         s.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         s.cacheMode = WebSettings.LOAD_DEFAULT
@@ -433,7 +454,15 @@ class MainActivity : AppCompatActivity() {
 
         shellView.setBackgroundColor(Color.TRANSPARENT)
         shellView.addJavascriptInterface(ShellBridge(this), "ShellHost")
-        shellView.webChromeClient = WebChromeClient()
+        shellView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                return handleWebViewFileChooser(webView, filePathCallback, fileChooserParams)
+            }
+        }
         shellView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 injectPolyfill(shellView, "ShellHost")
@@ -441,6 +470,13 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 injectPolyfill(shellView, "ShellHost")
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): WebResourceResponse? {
+                return interceptLocalAppAsset(request) ?: super.shouldInterceptRequest(view, request)
             }
         }
 
@@ -459,7 +495,8 @@ class MainActivity : AppCompatActivity() {
         val s = flowView.settings
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
-        s.allowFileAccess = false
+        s.allowFileAccess = true
+        s.allowContentAccess = true
         s.mediaPlaybackRequiresUserGesture = false
         s.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         s.cacheMode = WebSettings.LOAD_DEFAULT
@@ -492,33 +529,7 @@ class MainActivity : AppCompatActivity() {
                 filePathCallback: ValueCallback<Array<Uri>>?,
                 fileChooserParams: FileChooserParams?
             ): Boolean {
-                this@MainActivity.filePathCallback?.onReceiveValue(null)
-                this@MainActivity.filePathCallback = filePathCallback
-                return try {
-                    val accept = fileChooserParams?.acceptTypes
-                        ?.flatMap { it.split(',', ' ').map { t -> t.trim() } }
-                        ?.filter { it.isNotBlank() }
-                        ?: emptyList()
-                    // Flow often sends ".png,.jpg,.mp4" — treat extensions as media too
-                    pendingGalleryImage = accept.isEmpty() || accept.any { isImageAccept(it) }
-                    pendingGalleryVideo = accept.isEmpty() || accept.any { isVideoAccept(it) }
-                    if (!pendingGalleryImage && !pendingGalleryVideo) {
-                        // Unknown accept — still open gallery (Flow upload is always media)
-                        pendingGalleryImage = true
-                        pendingGalleryVideo = true
-                    }
-                    pendingGalleryMultiple =
-                        fileChooserParams?.mode == FileChooserParams.MODE_OPEN_MULTIPLE
-
-                    ensureMediaAccessThenOpenGallery()
-                    true
-                } catch (e: Exception) {
-                    Log.e(TAG, "File chooser failed", e)
-                    this@MainActivity.filePathCallback = null
-                    filePathCallback?.onReceiveValue(null)
-                    Toast.makeText(this@MainActivity, "Could not open gallery", Toast.LENGTH_SHORT).show()
-                    false
-                }
+                return handleWebViewFileChooser(webView, filePathCallback, fileChooserParams)
             }
         }
         flowView.webViewClient = object : WebViewClient() {
@@ -533,6 +544,7 @@ class MainActivity : AppCompatActivity() {
                 // Never inject bridge/automation into Google auth — triggers secure-browser blocks
                 if (!isGoogleAuthRelatedUrl(u) && !isGoogleRecaptchaChallengeUrl(u)) {
                     injectPolyfill(flowView, "FlowHost")
+                    pushImageOnlyModeToFlow()
                 }
                 postFlowUrl(u, "did-start-loading")
                 updateAuthOverlayFromUrl(u)
@@ -543,12 +555,16 @@ class MainActivity : AppCompatActivity() {
                 val u = flowView.url ?: url ?: view?.url ?: ""
                 if (!isGoogleAuthRelatedUrl(u) && !isGoogleRecaptchaChallengeUrl(u)) {
                     injectPolyfill(flowView, "FlowHost")
+                    pushImageOnlyModeToFlow()
                 }
                 applyFlowViewport(u)
                 postFlowUrl(u, "did-navigate")
                 postFlowUrl(u, "did-finish-load")
                 postFlowUrl(u, "dom-ready")
                 updateAuthOverlayFromUrl(u)
+                if (isFlowWorkspaceUrl(u) && !isGoogleAuthRelatedUrl(u)) {
+                    verifyAndCompleteWorkspaceLoad(u, workspaceReadyGeneration.incrementAndGet())
+                }
                 ensureCaptchaProbeTimer()
                 probeGoogleCaptcha()
                 tryHostGoogleAutofill(u)
@@ -565,10 +581,17 @@ class MainActivity : AppCompatActivity() {
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 val u = (url ?: flowView.url ?: "").trim()
                 if (u.isEmpty()) return
+                if (!isGoogleAuthRelatedUrl(u) && !isGoogleRecaptchaChallengeUrl(u)) {
+                    pushImageOnlyModeToFlow()
+                }
+                applyFlowViewport(u)
                 // Always push live URL to shell; throttle heavy autofill so SPA ticks
                 // cannot re-submit password while OTP is mounting.
                 postFlowUrl(u, "did-navigate-in-page")
                 updateAuthOverlayFromUrl(u)
+                if (isFlowWorkspaceUrl(u) && !isGoogleAuthRelatedUrl(u)) {
+                    verifyAndCompleteWorkspaceLoad(u, workspaceReadyGeneration.incrementAndGet())
+                }
                 ensureCaptchaProbeTimer()
                 probeGoogleCaptcha()
                 if (u != lastHistoryUrl) {
@@ -618,7 +641,8 @@ class MainActivity : AppCompatActivity() {
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?
-            ): android.webkit.WebResourceResponse? {
+            ): WebResourceResponse? {
+                interceptLocalAppAsset(request)?.let { return it }
                 val uri = request?.url?.toString() ?: return null
                 val u = uri.lowercase()
                 val looksGen =
@@ -647,44 +671,131 @@ class MainActivity : AppCompatActivity() {
             handleDownload(url, userAgent, contentDisposition, mimeType, contentLength)
         })
 
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-            // Only Flow workspace — never run inject/polyfill on accounts.google.com
-            val flowOrigins = setOf(
-                "https://flow.google.com",
-                "https://*.flow.google.com",
-                "https://labs.google",
-                "https://*.labs.google"
-            )
-            WebViewCompat.addDocumentStartJavaScript(
-                flowView,
-                BridgePolyfill.script("FlowHost"),
-                flowOrigins
-            )
-            WebViewCompat.addDocumentStartJavaScript(flowView, FLOW_VIEWPORT_JS, flowOrigins)
-            if (flowInjectScript.isNotBlank()) {
-                WebViewCompat.addDocumentStartJavaScript(flowView, flowInjectScript, flowOrigins)
+        setupFlowLoadListeners()
+    }
+
+    private fun setupFlowLoadListeners() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
+        // Register FlowHost bridge polyfill & blob download hook across all FlowView origins
+        WebViewCompat.addDocumentStartJavaScript(
+            flowView,
+            BridgePolyfill.script("FlowHost"),
+            setOf("*")
+        )
+        // Lock viewport to 538px CSS width ONLY on Flow / labs.google
+        val flowOnlyOrigins = setOf(
+            "https://flow.google.com",
+            "https://*.flow.google.com",
+            "https://labs.google",
+            "https://*.labs.google"
+        )
+        WebViewCompat.addDocumentStartJavaScript(flowView, FLOW_VIEWPORT_JS, flowOnlyOrigins)
+        // Run flow-inject.js on Flow, labs.google, and Gemini
+        val flowAndGeminiOrigins = setOf(
+            "https://flow.google.com",
+            "https://*.flow.google.com",
+            "https://labs.google",
+            "https://*.labs.google",
+            "https://gemini.google.com",
+            "https://*.gemini.google.com"
+        )
+        if (flowInjectScript.isNotBlank()) {
+            WebViewCompat.addDocumentStartJavaScript(flowView, flowInjectScript, flowAndGeminiOrigins)
+        }
+        // Recovery / home-address / selfie interstitial — dismiss-only (accounts + gds)
+        val nagOrigins = setOf(
+            "https://gds.google.com",
+            "https://*.gds.google.com",
+            "https://accounts.google.com",
+            "https://*.accounts.google.com",
+            "https://accounts.youtube.com"
+        )
+        WebViewCompat.addDocumentStartJavaScript(flowView, GOOGLE_DISMISS_NAGS_JS, nagOrigins)
+    }
+
+    /** Intercept https://app.flowbrowser.localhost/... and https://flowbrowser.local/... from assets/www/. */
+    private fun interceptLocalAppAsset(request: WebResourceRequest?): WebResourceResponse? {
+        val uri = request?.url ?: return null
+        val host = (uri.host ?: "").lowercase()
+        if (host != "app.flowbrowser.localhost" && host != "flowbrowser.local") return null
+        var relPath = (uri.path ?: "/").trimStart('/')
+        if (relPath.isEmpty()) relPath = "ui/app-shell.html"
+        return try {
+            val stream = assets.open("www/$relPath")
+            val mime = when {
+                relPath.endsWith(".html", true) -> "text/html"
+                relPath.endsWith(".js", true) || relPath.endsWith(".mjs", true) -> "application/javascript"
+                relPath.endsWith(".css", true) -> "text/css"
+                relPath.endsWith(".json", true) -> "application/json"
+                relPath.endsWith(".svg", true) -> "image/svg+xml"
+                relPath.endsWith(".png", true) -> "image/png"
+                relPath.endsWith(".jpg", true) || relPath.endsWith(".jpeg", true) -> "image/jpeg"
+                relPath.endsWith(".webp", true) -> "image/webp"
+                relPath.endsWith(".woff2", true) -> "font/woff2"
+                relPath.endsWith(".woff", true) -> "font/woff"
+                relPath.endsWith(".ttf", true) -> "font/ttf"
+                relPath.endsWith(".mp3", true) -> "audio/mpeg"
+                relPath.endsWith(".wav", true) -> "audio/wav"
+                else -> "application/octet-stream"
             }
-            // Recovery / home-address / selfie interstitial — dismiss-only (accounts + gds)
-            val nagOrigins = setOf(
-                "https://gds.google.com",
-                "https://*.gds.google.com",
-                "https://accounts.google.com",
-                "https://*.accounts.google.com",
-                "https://accounts.youtube.com"
+            WebResourceResponse(
+                mime,
+                "UTF-8",
+                200,
+                "OK",
+                mapOf(
+                    "Access-Control-Allow-Origin" to "*",
+                    "Access-Control-Allow-Methods" to "GET, HEAD, OPTIONS",
+                    "Access-Control-Allow-Headers" to "*",
+                    "Cache-Control" to "no-store"
+                ),
+                stream
             )
-            WebViewCompat.addDocumentStartJavaScript(flowView, GOOGLE_DISMISS_NAGS_JS, nagOrigins)
+        } catch (e: Exception) {
+            Log.w(TAG, "Local asset not found: www/$relPath (${e.message})")
+            null
         }
     }
 
-    /** Flow workspace only — lock CSS layout width to 538px and scale to fill the WebView. */
+    /** Flow workspace only — lock CSS layout width to 538px and scale to fill the WebView; reset scale on Gemini & ZexTTS. */
     private fun applyFlowViewport(url: String) {
         val u = url.lowercase()
-        if (!u.contains("flow.google.com") && !u.contains("labs.google")) return
-        flowView.evaluateJavascript(FLOW_VIEWPORT_JS, null)
-        applyFlowLayoutScale()
+        if (u.contains("flow.google.com") || u.contains("labs.google")) {
+            flowView.evaluateJavascript(FLOW_VIEWPORT_JS, null)
+            applyFlowLayoutScale()
+        } else if (
+            u.contains("gemini.google.com") ||
+                u.contains("bard.google.com") ||
+                u.contains("aistudio.google.com") ||
+                u.contains("app.flowbrowser.localhost") ||
+                u.contains("flowbrowser.local") ||
+                u.contains("127.0.0.1")
+        ) {
+            if (lastFlowScalePct != 0) {
+                lastFlowScalePct = 0
+                flowView.setInitialScale(0)
+            }
+        }
     }
 
     private fun applyFlowLayoutScale() {
+        val u = (flowView.url ?: "").lowercase()
+        if (!u.contains("flow.google.com") && !u.contains("labs.google")) {
+            if (
+                u.contains("gemini.google.com") ||
+                    u.contains("bard.google.com") ||
+                    u.contains("aistudio.google.com") ||
+                    u.contains("app.flowbrowser.localhost") ||
+                    u.contains("flowbrowser.local") ||
+                    u.contains("127.0.0.1")
+            ) {
+                if (lastFlowScalePct != 0) {
+                    lastFlowScalePct = 0
+                    flowView.setInitialScale(0)
+                }
+            }
+            return
+        }
         val physical = flowView.width
         if (physical <= 0) return
         val pct = ((physical.toDouble() / FLOW_LAYOUT_WIDTH_CSS) * 100.0)
@@ -762,8 +873,10 @@ class MainActivity : AppCompatActivity() {
     private fun loadFlowUrl(url: String) {
         flowHeaderLoadActive = true
         try {
-            // Strip WebView APK id on the initial navigation into Google / Flow
-            flowView.loadUrl(url, FLOW_EXTRA_HEADERS)
+            val resolvedUrl = url.trim()
+            applyFlowViewport(resolvedUrl)
+            // Strip WebView APK id on the initial navigation into Google / Flow / Gemini
+            flowView.loadUrl(resolvedUrl, FLOW_EXTRA_HEADERS)
         } finally {
             flowView.postDelayed({ flowHeaderLoadActive = false }, 400)
         }
@@ -853,7 +966,8 @@ class MainActivity : AppCompatActivity() {
             Log.w(TAG, "Google secure-browser block — switching UA desktop=$nextDesktop (try #$googleSecureRecoveries)")
             applyFlowBrowserIdentity(flowView.settings, preferDesktop = nextDesktop)
             CookieManager.getInstance().flush()
-            val continueUrl = Uri.encode("https://flow.google.com/")
+            val target = flowCredTarget?.ifBlank { null } ?: "https://flow.google.com/"
+            val continueUrl = Uri.encode(target)
             // Fresh sign-in entry that often works after UA change
             loadFlowUrl(
                 "https://accounts.google.com/v3/signin/identifier?hl=en&continue=$continueUrl&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
@@ -971,14 +1085,64 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             try {
                 val root = JSONObject(json)
-                if (root.optString("type") != "toHost") return@runOnUiThread
+                val msgType = root.optString("type")
+                if (msgType == "zextts-invoke") {
+                    val id = root.opt("id")?.toString() ?: "0"
+                    val cmd = root.optString("cmd")
+                    val payload = root.optJSONObject("payload")
+                    zexTtsService.handleInvoke(
+                        id = id,
+                        cmd = cmd,
+                        payload = payload,
+                        sendToFlow = { rawJson -> postRawToFlow(rawJson) },
+                        onFileSaved = { savedPath, _ ->
+                            val name = File(savedPath).name
+                            runOnUiThread {
+                                notifyDownloadCompleted(name, savedPath)
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Saved audio: $name",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    )
+                    return@runOnUiThread
+                }
+                if (msgType != "toHost") return@runOnUiThread
                 val channel = root.optString("channel")
                 val data = root.opt("data")
 
-                if (channel.equals("cdp-click", true) && data is JSONObject) {
+                if (channel.equals("request-credentials", true)) {
+                    pushCredentialsToFlow()
+                    pushImageOnlyModeToFlow()
+                } else if (channel.equals("cdp-click", true) && data is JSONObject) {
                     val x = data.optDouble("x", 0.0)
                     val y = data.optDouble("y", 0.0)
                     dispatchFlowClick(x, y)
+                } else if (channel.equals("auth:captcha", true) && data is JSONObject) {
+                    val active = data.optBoolean("active", false)
+                    if (active) {
+                        if (!totpAutoActive || isGoogleRecaptchaChallengeUrl(flowView.url)) {
+                            captchaActive = true
+                            authLoginActive = true
+                            onGoogleAuth = true
+                            applyAuthOverlayState()
+                        }
+                    } else if (captchaActive) {
+                        captchaActive = false
+                        applyAuthOverlayState()
+                        tryHostGoogleAutofill(flowView.url)
+                    }
+                } else if (channel.equals("auth:auto-login", true) && data is JSONObject) {
+                    val st = data.optString("status")
+                    if (st == "starting" || st == "filling-email" || st == "filling-password" ||
+                        st == "selecting-2fa" || st == "waiting-otp"
+                    ) {
+                        authLoginActive = true
+                        onGoogleAuth = true
+                        applyAuthOverlayState()
+                    }
                 }
 
                 val args = JSONArray()
@@ -994,6 +1158,32 @@ class MainActivity : AppCompatActivity() {
                 Log.e(TAG, "Flow message parse failed", e)
             }
         }
+    }
+
+    private fun pushCredentialsToFlow() {
+        val email = flowCredEmail
+        if (email.isNullOrBlank()) return
+        val payload = JSONObject()
+            .put("email", email)
+            .put("password", flowCredPassword ?: "")
+            .put("targetUrl", flowCredTarget ?: "https://flow.google.com/")
+            .put("imageOnly", flowCredImageOnly)
+            .put("serverId", activeFlowServerId)
+        postToFlow(
+            JSONObject()
+                .put("type", "toGuest")
+                .put("channel", "apply-credentials")
+                .put("data", payload)
+        )
+    }
+
+    private fun pushImageOnlyModeToFlow() {
+        val sidLit = JSONObject.quote(activeFlowServerId)
+        val targetLit = JSONObject.quote(flowCredTarget ?: "https://flow.google.com/")
+        flowView.evaluateJavascript(
+            "(function(){try{window.__flowCredTarget=$targetLit;if(typeof window.__flowSetImageOnlyMode==='function')window.__flowSetImageOnlyMode($flowCredImageOnly,$sidLit);}catch(e){}})();",
+            null
+        )
     }
 
     private fun handleShellCmd(root: JSONObject) {
@@ -1032,24 +1222,50 @@ class MainActivity : AppCompatActivity() {
             "sendToFlow" -> {
                 val channel = root.optString("channel")
                 val data = root.opt("data")
+                if (channel.equals("apply-credentials", true) && data is JSONObject) {
+                    val em = data.optString("email")
+                    val pw = data.optString("password")
+                    val tg = data.optString("targetUrl")
+                    if (em.isNotBlank()) flowCredEmail = em
+                    if (pw.isNotBlank()) flowCredPassword = pw
+                    if (tg.isNotBlank()) flowCredTarget = tg
+                    if (data.has("imageOnly")) flowCredImageOnly = data.optBoolean("imageOnly", false)
+                    val sid = data.optString("serverId")
+                    if (sid.isNotBlank()) activeFlowServerId = sid
+                    data.put("imageOnly", flowCredImageOnly)
+                    data.put("serverId", activeFlowServerId)
+                    pushImageOnlyModeToFlow()
+                    tryHostGoogleAutofill(flowView.url)
+                }
                 postToFlow(
                     JSONObject()
                         .put("type", "toGuest")
                         .put("channel", channel)
                         .put("data", data ?: JSONObject.NULL)
                 )
-                if (channel.equals("apply-credentials", true) && data is JSONObject) {
-                    flowCredEmail = data.optString("email").ifBlank { null }
-                    flowCredPassword = data.optString("password").ifBlank { null }
-                    flowCredTarget = data.optString("targetUrl").ifBlank { null }
-                    tryHostGoogleAutofill(flowView.url)
-                }
             }
             "setFlowCreds" -> {
-                flowCredEmail = root.optString("email").ifBlank { null }
-                flowCredPassword = root.optString("password").ifBlank { null }
-                flowCredTarget = root.optString("targetUrl").ifBlank { null }
+                val em = root.optString("email")
+                val pw = root.optString("password")
+                val tg = root.optString("targetUrl")
+                if (em.isNotBlank()) flowCredEmail = em
+                if (pw.isNotBlank()) flowCredPassword = pw
+                if (tg.isNotBlank()) flowCredTarget = tg
+                if (root.has("imageOnly")) flowCredImageOnly = root.optBoolean("imageOnly", false)
+                val sid = root.optString("serverId")
+                if (sid.isNotBlank()) activeFlowServerId = sid
+                pushCredentialsToFlow()
+                pushImageOnlyModeToFlow()
                 tryHostGoogleAutofill(flowView.url)
+            }
+            "openDownloadedFile" -> {
+                val path = root.optString("filePath").ifBlank { root.optString("savePath") }
+                val mime = root.optString("mimeType")
+                if (path.isNotBlank()) openDownloadedFile(path, mime)
+            }
+            "showInFolder" -> {
+                val path = root.optString("filePath").ifBlank { root.optString("savePath") }
+                openInFolder(path)
             }
             "cdpClick" -> {
                 // DEBUG: skip auto 2FA / Next clicks — user taps manually
@@ -1155,19 +1371,15 @@ class MainActivity : AppCompatActivity() {
                 JSONObject().put("success", true)
             }
             "showInFolder" -> {
-                val path = payload.optString("filePath")
-                if (path.isNotBlank()) {
-                    openInFolder(path)
-                } else {
-                    try {
-                        startActivity(Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS))
-                    } catch (_: Exception) {
-                        val downloads =
-                            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                        openInFolder(downloads.absolutePath)
-                    }
-                }
+                val path = payload.optString("filePath").ifBlank { payload.optString("savePath") }
+                openInFolder(path)
                 JSONObject().put("success", true)
+            }
+            "openDownloadedFile" -> {
+                val path = payload.optString("filePath").ifBlank { payload.optString("savePath") }
+                val mime = payload.optString("mimeType")
+                val ok = openDownloadedFile(path, mime)
+                JSONObject().put("success", ok)
             }
             "executeFlow" -> {
                 val code = payload.optString("code", "null")
@@ -1181,13 +1393,149 @@ class MainActivity : AppCompatActivity() {
                 JSONObject().put("success", true)
             }
             "switchFlowCookieProfile" -> {
-                JSONObject().put("success", true).put("restored", true)
+                switchFlowCookieProfileImpl(payload)
             }
             "getDeviceId" -> {
                 createClientAttestation()
             }
             else -> throw IllegalArgumentException("Unknown command: $cmd")
         }
+    }
+
+    private val cookieProfileUrls = listOf(
+        "https://.google.com",
+        "https://accounts.google.com",
+        "https://flow.google.com",
+        "https://labs.google",
+        "https://gemini.google.com",
+        "https://accounts.youtube.com"
+    )
+
+    private fun hasGoogleAuthSessionCookies(snapshot: Map<String, List<String>>?): Boolean {
+        if (snapshot.isNullOrEmpty()) return false
+        return snapshot.values.flatten().any { c ->
+            c.contains("SID=") || c.contains("__Secure-1PSID=") || c.contains("__Host-GAPS=")
+        }
+    }
+
+    private fun saveCookieSnapshotToPrefs(serverId: String, snapshot: Map<String, List<String>>) {
+        try {
+            val root = JSONObject()
+            for ((url, list) in snapshot) {
+                val arr = JSONArray()
+                list.forEach { arr.put(it) }
+                root.put(url, arr)
+            }
+            getSharedPreferences("flow_cookie_profiles", MODE_PRIVATE)
+                .edit()
+                .putString("srv_$serverId", root.toString())
+                .apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun loadCookieSnapshotFromPrefs(serverId: String): Map<String, List<String>>? {
+        return try {
+            val raw = getSharedPreferences("flow_cookie_profiles", MODE_PRIVATE)
+                .getString("srv_$serverId", null) ?: return null
+            val root = JSONObject(raw)
+            val map = mutableMapOf<String, List<String>>()
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val arr = root.optJSONArray(k) ?: continue
+                val list = mutableListOf<String>()
+                for (i in 0 until arr.length()) {
+                    val v = arr.optString(i)
+                    if (v.isNotBlank()) list.add(v)
+                }
+                if (list.isNotEmpty()) map[k] = list
+            }
+            map.ifEmpty { null }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun switchFlowCookieProfileImpl(payload: JSONObject): JSONObject {
+        val toServerId = payload.optString("toServerId", payload.optString("serverId", "")).trim()
+        val fromServerId = payload.optString("fromServerId", activeCookieServerId).trim()
+            .ifBlank { activeCookieServerId }
+        val cm = CookieManager.getInstance()
+
+        if (toServerId.isNotEmpty() && toServerId == activeCookieServerId) {
+            val liveAuth = cookieProfileUrls.any { u ->
+                val c = cm.getCookie(u) ?: ""
+                c.contains("SID=") || c.contains("__Secure-1PSID=")
+            }
+            if (liveAuth) {
+                return JSONObject().put("success", true).put("restored", true).put("sameServer", true)
+            }
+        }
+
+        // 1. Snapshot outgoing server's cookies if it has an active Google session
+        if (fromServerId.isNotEmpty()) {
+            val snap = mutableMapOf<String, List<String>>()
+            for (u in cookieProfileUrls) {
+                val raw = cm.getCookie(u) ?: continue
+                val parts = raw.split(";")
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() && it.contains("=") }
+                if (parts.isNotEmpty()) {
+                    snap[u] = parts
+                }
+            }
+            if (hasGoogleAuthSessionCookies(snap)) {
+                serverCookieSnapshots[fromServerId] = snap
+                saveCookieSnapshotToPrefs(fromServerId, snap)
+                Log.i(TAG, "Saved Google cookie snapshot for server=$fromServerId (${snap.size} origins)")
+            }
+        }
+
+        // 2. Clear all live cookies in WebView before switching to target server
+        kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
+            runOnUiThread {
+                try {
+                    cm.removeAllCookies {
+                        try { cm.flush() } catch (_: Exception) {}
+                        if (cont.isActive) cont.resume(Unit, null)
+                    }
+                } catch (_: Exception) {
+                    if (cont.isActive) cont.resume(Unit, null)
+                }
+            }
+        }
+
+        activeCookieServerId = toServerId
+        activeFlowServerId = toServerId
+
+        // 3. Restore target server's cookie snapshot if available
+        val targetSnap = if (toServerId.isNotEmpty()) {
+            serverCookieSnapshots[toServerId] ?: loadCookieSnapshotFromPrefs(toServerId)?.also {
+                serverCookieSnapshots[toServerId] = it
+            }
+        } else null
+
+        if (hasGoogleAuthSessionCookies(targetSnap) && targetSnap != null) {
+            for ((u, pairs) in targetSnap) {
+                val host = try { Uri.parse(u).host ?: ".google.com" } catch (_: Exception) { ".google.com" }
+                val domainAttr = if (host.startsWith(".")) host else if (host == "google.com") ".google.com" else host
+                for (pair in pairs) {
+                    val setCookieStr = if (domainAttr.startsWith(".")) {
+                        "$pair; Domain=$domainAttr; Path=/; Secure"
+                    } else {
+                        "$pair; Path=/; Secure"
+                    }
+                    cm.setCookie(u, setCookieStr)
+                }
+            }
+            try { cm.flush() } catch (_: Exception) {}
+            Log.i(TAG, "Restored Google cookie snapshot for server=$toServerId")
+            return JSONObject().put("success", true).put("restored", true)
+        }
+
+        Log.i(TAG, "No saved cookie snapshot for server=$toServerId — clean Google sign-in required")
+        return JSONObject().put("success", true).put("restored", false)
     }
 
     @Volatile
@@ -1542,10 +1890,11 @@ class MainActivity : AppCompatActivity() {
 
         if (isFlowWorkspaceUrl(url)) {
             if (authLoginActive || totpAutoActive) {
-                // Keep cover briefly (avoids flicker on Flow→Google bounce), then clear
+                // Keep cover up until verifyAndCompleteWorkspaceLoad confirms DOM ready + 650ms settle
                 onGoogleAuth = true
                 applyAuthOverlayState()
                 scheduleAuthCoverClearOnFlow()
+                verifyAndCompleteWorkspaceLoad(url ?: "", workspaceReadyGeneration.incrementAndGet())
                 return
             }
             onGoogleAuth = false
@@ -1843,6 +2192,64 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Hold the native auth cover on workspace URLs after Google login until
+     * document.readyState === 'complete' and workspace DOM is rendered + 650ms paint-settle delay,
+     * matching Windows v8.0.15 so the Google login screen never flashes!
+     */
+    private fun verifyAndCompleteWorkspaceLoad(url: String, gen: Int) {
+        if (!authLoginActive && !totpAutoActive && !onGoogleAuth) return
+        if (!isFlowWorkspaceUrl(url) || isGoogleAuthRelatedUrl(url)) return
+        scope.launch {
+            for (attempt in 0 until 28) {
+                if (gen != workspaceReadyGeneration.get()) return@launch
+                val cur = flowView.url ?: url
+                if (isGoogleAuthRelatedUrl(cur) || isGoogleRecaptchaChallengeUrl(cur)) {
+                    // Bounced back to Google auth — keep cover up
+                    authLoginActive = true
+                    onGoogleAuth = true
+                    applyAuthOverlayState()
+                    return@launch
+                }
+                if (!isFlowWorkspaceUrl(cur)) return@launch
+
+                val state = evaluateFlowAsync(
+                    """
+                    (function(){
+                      try {
+                        var rs = document.readyState || '';
+                        var b = document.body;
+                        var len = (b && b.innerHTML) ? b.innerHTML.length : 0;
+                        var h = (b && b.getBoundingClientRect) ? b.getBoundingClientRect().height : 0;
+                        return (rs === 'complete' && len > 120 && h > 20) ? 'ready' : 'loading';
+                      } catch (e) { return 'loading'; }
+                    })()
+                    """.trimIndent()
+                )?.toString() ?: "loading"
+
+                if (state.contains("ready")) {
+                    // 650ms paint-settle delay so WebView finishes compositing the workspace frame
+                    delay(650)
+                    if (gen != workspaceReadyGeneration.get()) return@launch
+                    val afterUrl = flowView.url ?: cur
+                    if (isFlowWorkspaceUrl(afterUrl) && !isGoogleAuthRelatedUrl(afterUrl)) {
+                        Log.i(TAG, "Workspace ready & settled ($afterUrl) — lifting auth cover")
+                        clearAuthCoverSession()
+                        postToShell(
+                            JSONObject()
+                                .put("type", "flow-event")
+                                .put("event", "ipc-message")
+                                .put("channel", "auth:auto-login")
+                                .put("args", JSONArray().put(JSONObject().put("status", "completed")))
+                        )
+                    }
+                    return@launch
+                }
+                delay(300)
+            }
+        }
+    }
+
     private fun isFlowWorkspaceUrl(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
         return try {
@@ -1850,10 +2257,24 @@ class MainActivity : AppCompatActivity() {
             host == "flow.google.com" ||
                 host.endsWith(".flow.google.com") ||
                 host == "labs.google" ||
-                host.endsWith(".labs.google")
+                host.endsWith(".labs.google") ||
+                host == "gemini.google.com" ||
+                host.endsWith(".gemini.google.com") ||
+                host == "bard.google.com" ||
+                host == "aistudio.google.com" ||
+                host == "app.flowbrowser.localhost" ||
+                host == "flowbrowser.local" ||
+                host == "127.0.0.1"
         } catch (_: Exception) {
             val u = url.lowercase()
-            u.contains("flow.google.com") || u.contains("labs.google")
+            u.contains("flow.google.com") ||
+                u.contains("labs.google") ||
+                u.contains("gemini.google.com") ||
+                u.contains("bard.google.com") ||
+                u.contains("aistudio.google.com") ||
+                u.contains("app.flowbrowser.localhost") ||
+                u.contains("flowbrowser.local") ||
+                u.contains("127.0.0.1")
         }
     }
 
@@ -1939,22 +2360,57 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun openInFolder(path: String) {
-        try {
-            val file = File(path)
-            val uri = if (file.isFile) {
-                FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+    private fun openDownloadedFile(pathOrUri: String, mimeHint: String = ""): Boolean {
+        if (pathOrUri.isBlank()) return false
+        return try {
+            val uri: Uri
+            val resolvedMime: String
+            if (pathOrUri.startsWith("content://", ignoreCase = true)) {
+                uri = Uri.parse(pathOrUri)
+                resolvedMime = mimeHint.ifBlank { contentResolver.getType(uri) ?: "*/*" }
             } else {
-                Uri.fromFile(file)
+                val cleaned = if (pathOrUri.startsWith("file://", ignoreCase = true)) {
+                    Uri.parse(pathOrUri).path ?: pathOrUri.removePrefix("file://")
+                } else {
+                    pathOrUri
+                }
+                val file = File(cleaned)
+                if (!file.exists()) {
+                    Toast.makeText(this, "File not found: ${file.name}", Toast.LENGTH_SHORT).show()
+                    return false
+                }
+                uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                resolvedMime = mimeHint.ifBlank {
+                    guessMimeFromName(file.name).let { if (it == "application/octet-stream") "*/*" else it }
+                }
             }
             val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "*/*")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                setDataAndType(uri, resolvedMime.ifBlank { "*/*" })
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            startActivity(Intent.createChooser(intent, "Open"))
+            startActivity(Intent.createChooser(intent, "Open file"))
+            true
         } catch (e: Exception) {
-            Log.w(TAG, "showInFolder failed: ${e.message}")
-            Toast.makeText(this, "Saved: $path", Toast.LENGTH_SHORT).show()
+            Log.w(TAG, "openDownloadedFile failed ($pathOrUri): ${e.message}")
+            try {
+                startActivity(Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS))
+                true
+            } catch (_: Exception) {
+                Toast.makeText(this, "Saved: $pathOrUri", Toast.LENGTH_SHORT).show()
+                false
+            }
+        }
+    }
+
+    private fun openInFolder(path: String) {
+        if (path.isNotBlank()) {
+            if (openDownloadedFile(path)) return
+        }
+        try {
+            startActivity(Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS))
+        } catch (e: Exception) {
+            Log.w(TAG, "openInFolder fallback: ${e.message}")
+            Toast.makeText(this, if (path.isNotBlank()) "Saved: $path" else "Check Downloads / Gallery", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1968,21 +2424,21 @@ class MainActivity : AppCompatActivity() {
         val guessed = URLUtil.guessFileName(url, contentDisposition, mimeType.ifBlank { null })
         val mime = mimeType.ifBlank { guessMimeFromName(guessed) }
         val filename = sanitizeDownloadFilename(guessed, mime)
-        postToShell(
-            JSONObject()
-                .put("type", "download")
-                .put("phase", "started")
-                .put(
-                    "data",
-                    JSONObject().put("filename", filename).put("totalBytes", contentLength)
-                )
-        )
         when {
             url.startsWith("blob:", ignoreCase = true) || url.startsWith("data:", ignoreCase = true) -> {
                 downloadBlobViaJs(url, filename, mime)
             }
             url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true) -> {
-                downloadHttpToGallery(url, userAgent, filename, mime)
+                postToShell(
+                    JSONObject()
+                        .put("type", "download")
+                        .put("phase", "started")
+                        .put(
+                            "data",
+                            JSONObject().put("filename", filename).put("totalBytes", contentLength)
+                        )
+                )
+                downloadHttpToGallery(url, userAgent, filename, mime, contentDisposition)
             }
             else -> {
                 Log.e(TAG, "Unsupported download URL: $url")
@@ -2004,41 +2460,54 @@ class MainActivity : AppCompatActivity() {
     var filename = $nameLit;
     var mimeHint = $mimeLit;
     var id = $idLit;
-    var res = await fetch(url);
-    var blob = await res.blob();
-    var mime = blob.type || mimeHint || 'application/octet-stream';
+    if (typeof window.__flowStreamBlobToHost === 'function') {
+      await window.__flowStreamBlobToHost(url, filename, mimeHint);
+      return;
+    }
+    var blob = (window.__flowBlobStore && window.__flowBlobStore.get(url)) || null;
+    if (!blob) {
+      var res = await fetch(url);
+      blob = await res.blob();
+    }
+    var mime = (blob && blob.type) || mimeHint || 'application/octet-stream';
     var name = filename;
     if (!name || /^download(\.bin)?$/i.test(name) || /\.bin$/i.test(name)) {
       var ext = 'bin';
-      if (/mp4|mpeg/i.test(mime)) ext = 'mp4';
+      if (/mp4|mpeg4/i.test(mime)) ext = 'mp4';
       else if (/webm/i.test(mime)) ext = 'webm';
       else if (/quicktime/i.test(mime)) ext = 'mov';
+      else if (/audio\/mpeg|mp3/i.test(mime)) ext = 'mp3';
+      else if (/audio\/wav|wave/i.test(mime)) ext = 'wav';
+      else if (/audio\/ogg/i.test(mime)) ext = 'ogg';
+      else if (/audio\/mp4|audio\/x-m4a/i.test(mime)) ext = 'm4a';
       else if (/png/i.test(mime)) ext = 'png';
       else if (/jpe?g/i.test(mime)) ext = 'jpg';
       else if (/webp/i.test(mime)) ext = 'webp';
       else if (/gif/i.test(mime)) ext = 'gif';
       else if (/^video\//i.test(mime)) ext = 'mp4';
       else if (/^image\//i.test(mime)) ext = 'png';
+      else if (/^audio\//i.test(mime)) ext = 'mp3';
       name = 'flow_' + Date.now() + '.' + ext;
     }
     var buf = await blob.arrayBuffer();
     var bytes = new Uint8Array(buf);
     if (!window.FlowHost || !window.FlowHost.downloadBegin) throw new Error('FlowHost missing');
     window.FlowHost.downloadBegin(id, name, mime, bytes.length);
-    var CHUNK = 240000;
-    var binary = '';
-    for (var i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-      if (binary.length >= CHUNK || i === bytes.length - 1) {
-        window.FlowHost.downloadChunk(id, btoa(binary));
-        binary = '';
+    var CHUNK = 196608;
+    for (var offset = 0; offset < bytes.length; offset += CHUNK) {
+      var slice = bytes.subarray(offset, Math.min(offset + CHUNK, bytes.length));
+      var binary = '';
+      var step = 8192;
+      for (var j = 0; j < slice.length; j += step) {
+        binary += String.fromCharCode.apply(null, slice.subarray(j, Math.min(j + step, slice.length)));
       }
+      window.FlowHost.downloadChunk(id, btoa(binary));
     }
     window.FlowHost.downloadEnd(id);
   } catch (e) {
     try {
       if (window.FlowHost && window.FlowHost.downloadFail) {
-        window.FlowHost.downloadFail($idLit, String(e && e.message || e));
+        window.FlowHost.downloadFail($idLit, $nameLit, String(e && e.message || e));
       }
     } catch (e2) {}
   }
@@ -2047,56 +2516,164 @@ class MainActivity : AppCompatActivity() {
         flowView.evaluateJavascript(script, null)
     }
 
-    private fun downloadHttpToGallery(url: String, userAgent: String, filename: String, mime: String) {
+    private fun parseContentDispositionFilename(cd: String?): String? {
+        if (cd.isNullOrBlank()) return null
+        try {
+            val utf8Match = Regex("""filename\*\s*=\s*UTF-8''([^;\r\n]+)""", RegexOption.IGNORE_CASE).find(cd)
+            if (utf8Match != null) {
+                val decoded = Uri.decode(utf8Match.groupValues[1].trim().trim('"', '\''))
+                if (decoded.isNotBlank()) return decoded
+            }
+            val quotedMatch = Regex("""filename\s*=\s*"([^"]+)"""", RegexOption.IGNORE_CASE).find(cd)
+            if (quotedMatch != null) {
+                val v = quotedMatch.groupValues[1].trim()
+                if (v.isNotBlank()) return v
+            }
+            val plainMatch = Regex("""filename\s*=\s*([^;\r\n]+)""", RegexOption.IGNORE_CASE).find(cd)
+            if (plainMatch != null) {
+                val v = plainMatch.groupValues[1].trim().trim('"', '\'')
+                if (v.isNotBlank()) return v
+            }
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
+    private fun downloadHttpToGallery(
+        url: String,
+        userAgent: String,
+        filename: String,
+        mime: String,
+        initialContentDisposition: String = ""
+    ) {
         val ua = userAgent.ifBlank { flowView.settings.userAgentString ?: "" }
         val referer = flowView.url ?: "https://flow.google.com/"
         scope.launch(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
             try {
-                val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                    instanceFollowRedirects = true
-                    connectTimeout = 30000
-                    readTimeout = 120000
-                    setRequestProperty("User-Agent", ua)
-                    val cookie = CookieManager.getInstance().getCookie(url)
-                        ?: CookieManager.getInstance().getCookie("https://flow.google.com")
-                    if (!cookie.isNullOrBlank()) setRequestProperty("Cookie", cookie)
-                    setRequestProperty("Referer", referer)
-                    setRequestProperty("Accept", "*/*")
+                var currentUrl = url
+                var redirects = 0
+                while (true) {
+                    val uObj = URL(currentUrl)
+                    conn = (uObj.openConnection() as HttpURLConnection).apply {
+                        instanceFollowRedirects = false
+                        connectTimeout = 30000
+                        readTimeout = 120000
+                        setRequestProperty("User-Agent", ua)
+                        val lowerUrl = currentUrl.lowercase()
+                        val isPresignedGcs = lowerUrl.contains("storage.googleapis.com") &&
+                            (lowerUrl.contains("x-goog-signature=") || lowerUrl.contains("signature="))
+                        if (!isPresignedGcs && !lowerUrl.contains("storage.googleapis.com")) {
+                            val cookie = CookieManager.getInstance().getCookie(currentUrl)
+                                ?: CookieManager.getInstance().getCookie("https://flow.google.com")
+                            if (!cookie.isNullOrBlank()) setRequestProperty("Cookie", cookie)
+                        }
+                        setRequestProperty("Referer", referer)
+                        setRequestProperty("Accept", "*/*")
+                    }
+                    val code = conn.responseCode
+                    if (code in listOf(301, 302, 303, 307, 308)) {
+                        val loc = conn.getHeaderField("Location")
+                        conn.disconnect()
+                        if (loc.isNullOrBlank() || redirects >= 8) {
+                            throw IllegalStateException("Too many redirects or empty Location (HTTP $code)")
+                        }
+                        currentUrl = URL(uObj, loc).toString()
+                        redirects++
+                        continue
+                    }
+                    if (code !in 200..299) throw IllegalStateException("HTTP $code")
+                    break
                 }
-                val code = conn.responseCode
-                if (code !in 200..299) throw IllegalStateException("HTTP $code")
-                val resolvedMime = conn.contentType?.substringBefore(';')?.trim().orEmpty()
+
+                val activeConn = conn ?: throw IllegalStateException("Connection failed")
+                val resolvedMime = activeConn.contentType?.substringBefore(';')?.trim().orEmpty()
                     .ifBlank { mime }
-                // Peek magic bytes so we don't save as .bin when server omits content-type
-                val bytes = conn.inputStream.use { it.readBytes() }
-                val sniffed = sniffMime(bytes) ?: resolvedMime
-                val finalName = sanitizeDownloadFilename(filename, sniffed)
-                val outUri = openGalleryOutput(finalName, sniffed)
-                    ?: throw IllegalStateException("MediaStore insert failed")
-                contentResolver.openOutputStream(outUri)?.use { out -> out.write(bytes) }
-                    ?: throw IllegalStateException("openOutputStream failed")
-                finalizeGalleryPending(outUri)
-                withContext(Dispatchers.Main) {
-                    notifyDownloadCompleted(finalName, outUri.toString())
-                    Toast.makeText(this@MainActivity, "Saved to gallery: $finalName", Toast.LENGTH_SHORT).show()
+                val cdHeader = activeConn.getHeaderField("Content-Disposition").orEmpty()
+                    .ifBlank { initialContentDisposition }
+                val cdName = parseContentDispositionFilename(cdHeader)
+                val baseFilename = if (!cdName.isNullOrBlank()) cdName else filename
+                val totalLength = if (Build.VERSION.SDK_INT >= 24) {
+                    activeConn.contentLengthLong
+                } else {
+                    activeConn.contentLength.toLong()
+                }
+
+                BufferedInputStream(activeConn.inputStream, 65536).use { bis ->
+                    bis.mark(64)
+                    val header = ByteArray(32)
+                    val headerRead = bis.read(header)
+                    bis.reset()
+                    val headerSlice = if (headerRead > 0) header.copyOf(headerRead) else ByteArray(0)
+                    val sniffed = sniffMime(headerSlice) ?: resolvedMime
+                    val finalName = sanitizeDownloadFilename(baseFilename, sniffed)
+                    val outUri = openGalleryOutput(finalName, sniffed)
+                        ?: throw IllegalStateException("MediaStore insert failed")
+
+                    var received = 0L
+                    var lastProgressEmit = 0L
+                    contentResolver.openOutputStream(outUri)?.use { rawOut ->
+                        BufferedOutputStream(rawOut, 65536).use { out ->
+                            val buf = ByteArray(65536)
+                            while (true) {
+                                val n = bis.read(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                                received += n
+                                val now = SystemClock.elapsedRealtime()
+                                if (now - lastProgressEmit >= 120L) {
+                                    lastProgressEmit = now
+                                    notifyDownloadProgress(finalName, received, totalLength)
+                                }
+                            }
+                            out.flush()
+                        }
+                    } ?: throw IllegalStateException("openOutputStream failed")
+
+                    finalizeGalleryPending(outUri)
+                    withContext(Dispatchers.Main) {
+                        notifyDownloadCompleted(finalName, outUri.toString())
+                        Toast.makeText(this@MainActivity, "Saved: $finalName", Toast.LENGTH_SHORT).show()
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "HTTP download failed", e)
                 withContext(Dispatchers.Main) { notifyDownloadFailed(filename) }
+            } finally {
+                try { conn?.disconnect() } catch (_: Exception) {}
             }
         }
     }
 
     fun onBlobDownloadBegin(id: String, filename: String, mime: String, total: Int) {
         try {
+            val cleanName = sanitizeDownloadFilename(filename, mime)
             val temp = File(cacheDir, "flow_dl_$id.bin")
             if (temp.exists()) temp.delete()
-            val out = BufferedOutputStream(FileOutputStream(temp))
-            pendingBlobDownloads[id] = PendingBlobDownload(filename, mime, temp, out)
-            Log.i(TAG, "Blob download begin $filename ($total bytes)")
+            val out = BufferedOutputStream(FileOutputStream(temp), 65536)
+            pendingBlobDownloads[id] = PendingBlobDownload(
+                filename = cleanName,
+                mime = mime,
+                temp = temp,
+                out = out,
+                totalBytes = total.toLong(),
+                receivedBytes = 0L
+            )
+            Log.i(TAG, "Blob download begin $cleanName ($total bytes)")
+            runOnUiThread {
+                postToShell(
+                    JSONObject()
+                        .put("type", "download")
+                        .put("phase", "started")
+                        .put(
+                            "data",
+                            JSONObject().put("filename", cleanName).put("totalBytes", total.toLong())
+                        )
+                )
+            }
         } catch (e: Exception) {
             Log.e(TAG, "downloadBegin failed", e)
-            notifyDownloadFailed(filename)
+            runOnUiThread { notifyDownloadFailed(filename) }
         }
     }
 
@@ -2105,6 +2682,8 @@ class MainActivity : AppCompatActivity() {
         try {
             val bytes = Base64.decode(base64Chunk, Base64.DEFAULT)
             pending.out.write(bytes)
+            pending.receivedBytes += bytes.size
+            notifyDownloadProgress(pending.filename, pending.receivedBytes, pending.totalBytes)
         } catch (e: Exception) {
             Log.e(TAG, "downloadChunk failed", e)
             cleanupBlobDownload(id, failed = true)
@@ -2127,7 +2706,7 @@ class MainActivity : AppCompatActivity() {
                 val outUri = openGalleryOutput(finalName, sniffed)
                     ?: throw IllegalStateException("MediaStore insert failed")
                 contentResolver.openOutputStream(outUri)?.use { out ->
-                    pending.temp.inputStream().use { it.copyTo(out) }
+                    pending.temp.inputStream().use { it.copyTo(out, 65536) }
                 } ?: throw IllegalStateException("openOutputStream failed")
                 finalizeGalleryPending(outUri)
                 pending.temp.delete()
@@ -2135,7 +2714,7 @@ class MainActivity : AppCompatActivity() {
                     notifyDownloadCompleted(finalName, outUri.toString())
                     Toast.makeText(
                         this@MainActivity,
-                        "Saved to gallery: $finalName",
+                        "Saved: $finalName",
                         Toast.LENGTH_SHORT
                     ).show()
                 }
@@ -2147,11 +2726,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    fun onBlobDownloadFail(id: String, error: String) {
-        Log.e(TAG, "Blob download fail $id: $error")
-        val name = pendingBlobDownloads[id]?.filename ?: "download"
-        cleanupBlobDownload(id, failed = true)
+    fun onBlobDownloadFail(id: String, filename: String, error: String) {
+        Log.e(TAG, "Blob download fail $id ($filename): $error")
+        val name = pendingBlobDownloads[id]?.filename ?: filename.ifBlank { "download" }
+        cleanupBlobDownload(id, failed = false)
         runOnUiThread { notifyDownloadFailed(name) }
+    }
+
+    fun onBlobDownloadFail(id: String, error: String) {
+        onBlobDownloadFail(id, "", error)
     }
 
     private fun cleanupBlobDownload(id: String, failed: Boolean) {
@@ -2164,12 +2747,12 @@ class MainActivity : AppCompatActivity() {
     private fun openGalleryOutput(filename: String, mimeRaw: String): Uri? {
         val mime = mimeRaw.ifBlank { guessMimeFromName(filename) }
         val isVideo = mime.startsWith("video/") || filename.matches(Regex(".*\\.(mp4|webm|mov|mkv)$", RegexOption.IGNORE_CASE))
-                val isImage = mime.startsWith("image/") || filename.matches(
-                    Regex(
-                        ".*\\.(png|jpe?g|jpe|webp|gif|heic|heif|hvic|bmp|tif{1,2}|avif|svg)$",
-                        RegexOption.IGNORE_CASE
-                    )
-                )
+        val isImage = mime.startsWith("image/") || filename.matches(
+            Regex(
+                ".*\\.(png|jpe?g|jpe|webp|gif|heic|heif|hvic|bmp|tif{1,2}|avif|svg)$",
+                RegexOption.IGNORE_CASE
+            )
+        )
         val collection = when {
             isVideo -> if (Build.VERSION.SDK_INT >= 29) {
                 MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
@@ -2225,6 +2808,11 @@ class MainActivity : AppCompatActivity() {
             n.endsWith(".mp4") -> "video/mp4"
             n.endsWith(".webm") -> "video/webm"
             n.endsWith(".mov") -> "video/quicktime"
+            n.endsWith(".mkv") -> "video/x-matroska"
+            n.endsWith(".mp3") -> "audio/mpeg"
+            n.endsWith(".wav") -> "audio/wav"
+            n.endsWith(".ogg") -> "audio/ogg"
+            n.endsWith(".m4a") -> "audio/mp4"
             n.endsWith(".png") -> "image/png"
             n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".jpe") -> "image/jpeg"
             n.endsWith(".webp") -> "image/webp"
@@ -2234,6 +2822,11 @@ class MainActivity : AppCompatActivity() {
             n.endsWith(".bmp") -> "image/bmp"
             n.endsWith(".tif") || n.endsWith(".tiff") -> "image/tiff"
             n.endsWith(".avif") -> "image/avif"
+            n.endsWith(".svg") -> "image/svg+xml"
+            n.endsWith(".pdf") -> "application/pdf"
+            n.endsWith(".txt") -> "text/plain"
+            n.endsWith(".csv") -> "text/csv"
+            n.endsWith(".json") -> "application/json"
             else -> "application/octet-stream"
         }
     }
@@ -2269,6 +2862,11 @@ class MainActivity : AppCompatActivity() {
             m == "video/mp4" || m == "video/mpeg" -> "mp4"
             m == "video/webm" -> "webm"
             m == "video/quicktime" -> "mov"
+            m == "video/x-matroska" -> "mkv"
+            m == "audio/mpeg" || m == "audio/mp3" -> "mp3"
+            m == "audio/wav" || m == "audio/x-wav" || m == "audio/wave" -> "wav"
+            m == "audio/ogg" || m == "application/ogg" -> "ogg"
+            m == "audio/mp4" || m == "audio/x-m4a" || m == "audio/m4a" -> "m4a"
             m == "image/png" -> "png"
             m == "image/jpeg" || m == "image/jpg" -> "jpg"
             m == "image/webp" -> "webp"
@@ -2278,8 +2876,14 @@ class MainActivity : AppCompatActivity() {
             m == "image/bmp" || m == "image/x-ms-bmp" -> "bmp"
             m == "image/tiff" -> "tiff"
             m == "image/avif" -> "avif"
+            m == "image/svg+xml" -> "svg"
+            m == "application/pdf" -> "pdf"
+            m == "text/plain" -> "txt"
+            m == "text/csv" -> "csv"
+            m == "application/json" -> "json"
             m.startsWith("video/") -> "mp4"
             m.startsWith("image/") -> "jpg"
+            m.startsWith("audio/") -> "mp3"
             else -> null
         }
     }
@@ -2299,18 +2903,48 @@ class MainActivity : AppCompatActivity() {
         if (header.size >= 6 &&
             header[0] == 'G'.code.toByte() && header[1] == 'I'.code.toByte() && header[2] == 'F'.code.toByte()
         ) return "image/gif"
-        // WEBP: RIFF....WEBP
+        // RIFF: WEBP or WAV
         if (header.size >= 12 &&
             header[0] == 'R'.code.toByte() && header[1] == 'I'.code.toByte() &&
-            header[8] == 'W'.code.toByte() && header[9] == 'E'.code.toByte()
-        ) return "image/webp"
-        // MP4 / MOV: ....ftyp
+            header[2] == 'F'.code.toByte() && header[3] == 'F'.code.toByte()
+        ) {
+            if (header[8] == 'W'.code.toByte() && header[9] == 'E'.code.toByte() &&
+                header[10] == 'B'.code.toByte() && header[11] == 'P'.code.toByte()
+            ) return "image/webp"
+            if (header[8] == 'W'.code.toByte() && header[9] == 'A'.code.toByte() &&
+                header[10] == 'V'.code.toByte() && header[11] == 'E'.code.toByte()
+            ) return "audio/wav"
+        }
+        // OGG: OggS
+        if (header.size >= 4 &&
+            header[0] == 'O'.code.toByte() && header[1] == 'g'.code.toByte() &&
+            header[2] == 'g'.code.toByte() && header[3] == 'S'.code.toByte()
+        ) return "audio/ogg"
+        // MP3: ID3 tag (49 44 33) or MPEG audio frame sync (FF FB, FF F3, FF F2)
+        if (header.size >= 3 &&
+            header[0] == 0x49.toByte() && header[1] == 0x44.toByte() && header[2] == 0x33.toByte()
+        ) return "audio/mpeg"
+        if (header.size >= 2 && header[0] == 0xFF.toByte() &&
+            (header[1] == 0xFB.toByte() || header[1] == 0xF3.toByte() || header[1] == 0xF2.toByte())
+        ) return "audio/mpeg"
+        // PDF: %PDF
+        if (header.size >= 4 &&
+            header[0] == '%'.code.toByte() && header[1] == 'P'.code.toByte() &&
+            header[2] == 'D'.code.toByte() && header[3] == 'F'.code.toByte()
+        ) return "application/pdf"
+        // ISO BMFF (MP4 / MOV / M4A / HEIC / AVIF): ....ftyp
         if (header.size >= 12 &&
             header[4] == 'f'.code.toByte() && header[5] == 't'.code.toByte() &&
             header[6] == 'y'.code.toByte() && header[7] == 'p'.code.toByte()
         ) {
-            val brand = String(header, 8, minOf(4, header.size - 8), Charsets.US_ASCII)
-            return if (brand.startsWith("qt")) "video/quicktime" else "video/mp4"
+            val brand = String(header, 8, minOf(4, header.size - 8), Charsets.US_ASCII).lowercase()
+            return when {
+                brand.startsWith("qt") -> "video/quicktime"
+                brand.startsWith("m4a") -> "audio/mp4"
+                brand.startsWith("heic") || brand.startsWith("heix") || brand.startsWith("mif1") -> "image/heic"
+                brand.startsWith("avif") || brand.startsWith("avis") -> "image/avif"
+                else -> "video/mp4"
+            }
         }
         // WebM / Matroska EBML
         if (header.size >= 4 &&
@@ -2320,20 +2954,103 @@ class MainActivity : AppCompatActivity() {
         return null
     }
 
-    /** Copy content:// gallery URIs into app cache so WebView can always read them. */
+    private fun queryDisplayName(uri: Uri): String? {
+        return try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) cursor.getString(idx)?.trim()?.ifBlank { null } else null
+                } else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Copy content:// URIs into app cache with unique sequence + preserved filename/extension for WebView upload. */
     private fun uriForWebViewUpload(uri: Uri): Uri {
         return try {
-            val mime = contentResolver.getType(uri) ?: "application/octet-stream"
-            val ext = extensionForMime(mime) ?: "bin"
-            val out = File(cacheDir, "upload_${System.currentTimeMillis()}.$ext")
+            val seq = uploadSeq.incrementAndGet()
+            val displayName = queryDisplayName(uri)
+            val resolverMime = contentResolver.getType(uri).orEmpty()
+            val guessedMime = if (!displayName.isNullOrBlank()) guessMimeFromName(displayName) else ""
+            val mime = resolverMime.ifBlank { guessedMime.ifBlank { "application/octet-stream" } }
+            val extFromDisplay = displayName?.substringAfterLast('.', "")?.lowercase()?.ifBlank { null }
+            val ext = extFromDisplay ?: extensionForMime(mime) ?: "bin"
+            val baseStem = displayName
+                ?.substringBeforeLast('.')
+                ?.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                ?.take(48)
+                ?.ifBlank { null }
+                ?: "upload"
+            val outDir = File(cacheDir, "webview_uploads").apply { mkdirs() }
+            val out = File(outDir, "${baseStem}_${System.currentTimeMillis()}_${seq}.$ext")
             contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(out).use { input.copyTo(it) }
+                FileOutputStream(out).use { input.copyTo(it, 65536) }
             } ?: return uri
             FileProvider.getUriForFile(this, "$packageName.fileprovider", out)
         } catch (e: Exception) {
             Log.w(TAG, "uriForWebViewUpload fallback: ${e.message}")
             uri
         }
+    }
+
+    private fun handleWebViewFileChooser(
+        webView: WebView?,
+        callback: ValueCallback<Array<Uri>>?,
+        fileChooserParams: WebChromeClient.FileChooserParams?
+    ): Boolean {
+        this.filePathCallback?.onReceiveValue(null)
+        this.filePathCallback = callback
+        return try {
+            val accept = fileChooserParams?.acceptTypes
+                ?.flatMap { it.split(',', ' ').map { t -> t.trim() } }
+                ?.filter { it.isNotBlank() }
+                ?: emptyList()
+            pendingFileAcceptTypes = accept
+            pendingGalleryMultiple =
+                fileChooserParams?.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+
+            val currentUrl = (webView?.url ?: flowView.url ?: "").lowercase()
+            val isGeminiOrZex = webView === shellView ||
+                currentUrl.contains("gemini.google.com") ||
+                currentUrl.contains("bard.google.com") ||
+                currentUrl.contains("aistudio.google.com") ||
+                currentUrl.contains("app.flowbrowser.localhost") ||
+                currentUrl.contains("flowbrowser.local") ||
+                currentUrl.contains("127.0.0.1")
+
+            val wantsAudioOrDocs = accept.any { isAudioOrDocAccept(it) }
+            val wantsImage = accept.isEmpty() || accept.any { isImageAccept(it) }
+            val wantsVideo = accept.isEmpty() || accept.any { isVideoAccept(it) }
+
+            pendingUseUniversalFilePicker = wantsAudioOrDocs ||
+                (isGeminiOrZex && (accept.isEmpty() || accept.any { it == "*/*" || it == "*" } || !wantsImage && !wantsVideo))
+
+            if (pendingUseUniversalFilePicker) {
+                openUniversalFilePicker()
+                return true
+            }
+
+            pendingGalleryImage = wantsImage || (!wantsImage && !wantsVideo)
+            pendingGalleryVideo = wantsVideo || (!wantsImage && !wantsVideo)
+            ensureMediaAccessThenOpenGallery()
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "File chooser failed", e)
+            this.filePathCallback = null
+            callback?.onReceiveValue(null)
+            Toast.makeText(this, "Could not open file picker", Toast.LENGTH_SHORT).show()
+            false
+        }
+    }
+
+    private fun isAudioOrDocAccept(token: String): Boolean {
+        val t = token.lowercase().trim().removePrefix(".")
+        return t.startsWith("audio/") || t.startsWith("application/") || t.startsWith("text/") ||
+            t in setOf("mp3", "wav", "ogg", "m4a", "flac", "aac", "opus", "pdf", "txt", "csv", "json", "doc", "docx") ||
+            t.endsWith(".mp3") || t.endsWith(".wav") || t.endsWith(".ogg") || t.endsWith(".m4a") ||
+            t.endsWith(".pdf") || t.endsWith(".txt") || t.endsWith(".csv") || t.endsWith(".json")
     }
 
     private fun isImageAccept(token: String): Boolean {
@@ -2379,8 +3096,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ensureMediaAccessThenOpenGallery() {
-        // System Photo Picker (API 33+) needs no permission — still request so ACTION_PICK
-        // gallery fallback and FileProvider copies work on all OEMs.
+        // System Photo Picker (API 33+) needs no permission — still request so fallback
+        // and FileProvider copies work on all OEMs.
         if (hasMediaAccess()) {
             openGalleryPickerNow()
             return
@@ -2388,8 +3105,71 @@ class MainActivity : AppCompatActivity() {
         mediaPermissionLauncher.launch(mediaPermissionsNeeded())
     }
 
+    private fun openUniversalFilePicker() {
+        try {
+            val resolvedMimes = pendingFileAcceptTypes
+                .mapNotNull { token ->
+                    val t = token.trim()
+                    when {
+                        t.contains("/") && t != "*/*" -> t
+                        t.startsWith(".") -> extensionToMime(t.removePrefix("."))
+                        else -> extensionToMime(t)
+                    }
+                }
+                .distinct()
+                .toTypedArray()
+
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = if (resolvedMimes.size == 1) resolvedMimes[0] else "*/*"
+                if (resolvedMimes.size > 1) {
+                    putExtra(Intent.EXTRA_MIME_TYPES, resolvedMimes)
+                }
+                if (pendingGalleryMultiple) {
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                }
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            }
+            fileChooserLauncher.launch(Intent.createChooser(intent, "Select file"))
+        } catch (e: Exception) {
+            Log.w(TAG, "ACTION_OPEN_DOCUMENT failed, falling back to ACTION_GET_CONTENT: ${e.message}")
+            openClassicGalleryPicker()
+        }
+    }
+
+    private fun extensionToMime(ext: String): String? {
+        return when (ext.lowercase()) {
+            "mp3" -> "audio/mpeg"
+            "wav" -> "audio/wav"
+            "ogg" -> "audio/ogg"
+            "m4a" -> "audio/mp4"
+            "mp4" -> "video/mp4"
+            "webm" -> "video/webm"
+            "mov" -> "video/quicktime"
+            "mkv" -> "video/x-matroska"
+            "png" -> "image/png"
+            "jpg", "jpeg", "jpe" -> "image/jpeg"
+            "webp" -> "image/webp"
+            "gif" -> "image/gif"
+            "heic", "hvic" -> "image/heic"
+            "heif" -> "image/heif"
+            "avif" -> "image/avif"
+            "bmp" -> "image/bmp"
+            "svg" -> "image/svg+xml"
+            "pdf" -> "application/pdf"
+            "txt" -> "text/plain"
+            "csv" -> "text/csv"
+            "json" -> "application/json"
+            else -> null
+        }
+    }
+
     private fun openGalleryPickerNow() {
         try {
+            if (pendingUseUniversalFilePicker) {
+                openUniversalFilePicker()
+                return
+            }
             val mediaType = when {
                 pendingGalleryImage && pendingGalleryVideo ->
                     ActivityResultContracts.PickVisualMedia.ImageAndVideo
@@ -2397,14 +3177,13 @@ class MainActivity : AppCompatActivity() {
                     ActivityResultContracts.PickVisualMedia.VideoOnly
                 else -> ActivityResultContracts.PickVisualMedia.ImageOnly
             }
-            // Prefer system Photo Picker (gallery UI) — never Documents/Files
+            // Prefer system Photo Picker (gallery UI) for Flow media uploads
             if (ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(this)) {
                 val req = androidx.activity.result.PickVisualMediaRequest(mediaType)
                 if (pendingGalleryMultiple) pickMultipleMediaLauncher.launch(req)
                 else pickMediaLauncher.launch(req)
                 return
             }
-            // Fallback: classic Gallery / Photos via ACTION_PICK (not Files)
             openClassicGalleryPicker()
         } catch (e: Exception) {
             Log.e(TAG, "openGalleryPickerNow failed, trying classic gallery", e)
@@ -2433,29 +3212,29 @@ class MainActivity : AppCompatActivity() {
             "image/tiff",
             "image/avif"
         )
-        val videoMimes = arrayOf("video/*", "video/mp4", "video/webm", "video/quicktime")
-        val intent = when {
-            pendingGalleryVideo && !pendingGalleryImage ->
-                Intent(Intent.ACTION_PICK, MediaStore.Video.Media.EXTERNAL_CONTENT_URI).apply {
+        val videoMimes = arrayOf("video/*", "video/mp4", "video/webm", "video/quicktime", "video/x-matroska")
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            when {
+                pendingGalleryVideo && !pendingGalleryImage -> {
                     type = "video/*"
                     putExtra(Intent.EXTRA_MIME_TYPES, videoMimes)
                 }
-            pendingGalleryImage && !pendingGalleryVideo ->
-                Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+                pendingGalleryImage && !pendingGalleryVideo -> {
                     type = "image/*"
                     putExtra(Intent.EXTRA_MIME_TYPES, imageMimes)
                 }
-            else -> Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
-                // Default: photos gallery (png/jpg/jpeg/heic/…) + allow video too
-                type = "*/*"
-                putExtra(Intent.EXTRA_MIME_TYPES, imageMimes + videoMimes)
+                else -> {
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_MIME_TYPES, imageMimes + videoMimes)
+                }
             }
+            if (pendingGalleryMultiple) {
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            }
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        if (pendingGalleryMultiple) {
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-        }
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        fileChooserLauncher.launch(Intent.createChooser(intent, "Choose from gallery"))
+        fileChooserLauncher.launch(Intent.createChooser(intent, "Choose file"))
     }
 
     private fun deliverFileChooserResult(resultCode: Int, data: Intent?) {
@@ -2466,16 +3245,16 @@ class MainActivity : AppCompatActivity() {
             cb.onReceiveValue(null)
             return
         }
-        val uris = mutableListOf<Uri>()
+        val rawUris = mutableListOf<Uri>()
         data.clipData?.let { clip ->
             for (i in 0 until clip.itemCount) {
-                clip.getItemAt(i)?.uri?.let { uris.add(uriForWebViewUpload(it)) }
+                clip.getItemAt(i)?.uri?.let { rawUris.add(it) }
             }
         }
-        if (uris.isEmpty()) {
-            data.data?.let { uris.add(uriForWebViewUpload(it)) }
+        if (rawUris.isEmpty()) {
+            data.data?.let { rawUris.add(it) }
         }
-        uris.forEach { uri ->
+        rawUris.forEach { uri ->
             try {
                 contentResolver.takePersistableUriPermission(
                     uri,
@@ -2484,7 +3263,23 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
             }
         }
+        val uris = rawUris.map { uriForWebViewUpload(it) }
         cb.onReceiveValue(if (uris.isEmpty()) null else uris.toTypedArray())
+    }
+
+    private fun notifyDownloadProgress(filename: String, receivedBytes: Long, totalBytes: Long) {
+        postToShell(
+            JSONObject()
+                .put("type", "download")
+                .put("phase", "progress")
+                .put(
+                    "data",
+                    JSONObject()
+                        .put("filename", filename)
+                        .put("receivedBytes", receivedBytes)
+                        .put("totalBytes", totalBytes)
+                )
+        )
     }
 
     private fun notifyDownloadCompleted(filename: String, savePath: String) {
@@ -2888,12 +3683,15 @@ class MainActivity : AppCompatActivity() {
         if (!src.contains("accounts.google.com", true)) return
         val email = jsString(emailRaw)
         val password = jsString(passwordRaw)
+        val targetUrl = jsString(flowCredTarget ?: "https://flow.google.com/")
         val code = """
 (() => {
   const email = $email;
   const password = $password;
+  const targetUrl = $targetUrl;
   if (!email) return { ok:false, reason:'no-email' };
-  window.__flowHostCreds = { email, password };
+  window.__flowCredTarget = targetUrl;
+  window.__flowHostCreds = { email, password, targetUrl };
   const st = window.__flowHostAuto = window.__flowHostAuto || {};
   const path = location.pathname || '';
   const stepKey = path.split('/').slice(0, 5).join('/');
@@ -3017,6 +3815,17 @@ class MainActivity : AppCompatActivity() {
     private fun postToFlow(payload: JSONObject) {
         if (!flowReady) return
         val json = JSONObject.quote(payload.toString())
+        runOnUiThread {
+            flowView.evaluateJavascript(
+                "(function(){try{if(window.__flowDeliverHostMessage)window.__flowDeliverHostMessage(JSON.parse($json));}catch(e){}})();",
+                null
+            )
+        }
+    }
+
+    private fun postRawToFlow(rawJson: String) {
+        if (!flowReady) return
+        val json = JSONObject.quote(rawJson)
         runOnUiThread {
             flowView.evaluateJavascript(
                 "(function(){try{if(window.__flowDeliverHostMessage)window.__flowDeliverHostMessage(JSON.parse($json));}catch(e){}})();",

@@ -309,20 +309,7 @@ class FlowBrowserApp {
 
     // Extension events
     if (this.btnToggleExtension) {
-      this.btnToggleExtension.addEventListener('click', () => {
-        this.extensionDrawer.classList.toggle('hidden');
-        if (!this.extensionDrawer.classList.contains('hidden')) {
-          const base =
-            typeof location !== 'undefined' && location.origin && location.origin !== 'null'
-              ? location.origin
-              : 'https://app.flowbrowser.localhost';
-          const url = base + '/extensions/veo-shio-auto-login/popup.html';
-          if (this.extensionWebview.src !== url) this.extensionWebview.src = url;
-          window.electronAPI.setShellMode?.('full');
-        } else {
-          this.syncShellModeFromUi();
-        }
-      });
+      this.btnToggleExtension.addEventListener('click', () => this.toggleExtensionDrawer());
     }
     if (this.btnCloseExtension) {
       this.btnCloseExtension.addEventListener('click', () => {
@@ -331,14 +318,13 @@ class FlowBrowserApp {
       });
     }
 
-        // Veo Auto events (native side-by-side Bulk Mode panel)
+    // Veo Auto events (native side-by-side Bulk Mode panel)
     if (this.btnToggleVeoAuto) {
-      this.btnToggleVeoAuto.addEventListener('click', () => {
-        window.electronAPI?.toggleBulkPanel?.();
-      });
+      this.btnToggleVeoAuto.addEventListener('click', () => this.toggleVeoAutoDrawer());
     }
     if (this.btnToggleVpn) {
       this.btnToggleVpn.addEventListener('click', () => {
+        if (document.documentElement.classList.contains('platform-android')) return;
         window.electronAPI?.toggleVpnPopup?.();
       });
     }
@@ -1292,14 +1278,37 @@ class FlowBrowserApp {
     this.checkAssignedAccountStillExists?.().catch(() => {});
   }
 
+  toggleVeoAutoDrawer() {
+    if (document.documentElement.classList.contains('platform-android')) return;
+    window.electronAPI?.toggleBulkPanel?.();
+  }
+
+  toggleExtensionDrawer() {
+    if (document.documentElement.classList.contains('platform-android')) return;
+    if (!this.extensionDrawer) return;
+    this.extensionDrawer.classList.toggle('hidden');
+    if (!this.extensionDrawer.classList.contains('hidden')) {
+      const base =
+        typeof location !== 'undefined' && location.origin && location.origin !== 'null'
+          ? location.origin
+          : 'https://app.flowbrowser.localhost';
+      const url = base + '/extensions/veo-shio-auto-login/popup.html';
+      if (this.extensionWebview && this.extensionWebview.src !== url) this.extensionWebview.src = url;
+      window.electronAPI.setShellMode?.('full');
+    } else {
+      this.syncShellModeFromUi();
+    }
+  }
+
   hideWorkspaceHub(keepTransitionCover = false) {
     if (!this.workspaceHubScreen) return;
     this.workspaceHubScreen.classList.add('hidden');
     this.btnOpenWorkspaceHub?.classList.remove('active');
     const isFlowTool = this.runningToolId === 'google-flow' || String(this.runningToolId || '').startsWith('flow-image-srv-');
+    const isAndroid = document.documentElement.classList.contains('platform-android');
     if (this.btnToggleVeoAuto) {
-      this.btnToggleVeoAuto.style.display = isFlowTool ? '' : 'none';
-      if (!isFlowTool) this.btnToggleVeoAuto.classList.remove('active');
+      this.btnToggleVeoAuto.style.display = (isFlowTool && !isAndroid) ? '' : 'none';
+      if (!isFlowTool || isAndroid) this.btnToggleVeoAuto.classList.remove('active');
     }
     const urlBar = document.getElementById('debug-url-bar');
     if (urlBar) {
@@ -1701,7 +1710,7 @@ class FlowBrowserApp {
           break;
         case 'veo-auto':
           closeMenu();
-          window.electronAPI?.toggleBulkPanel?.();
+          this.toggleVeoAutoDrawer();
           break;
         case 'downloads':
           // Keep shell full while opening downloads — closing settings first

@@ -140,10 +140,16 @@
               </div>
               <div class="pathline">
                 <div><span>OUTPUT FILE</span><input id="outPath" type="text" readonly placeholder="No file generated" /></div>
-                <button type="button" class="btn btn-replay" id="btnReplay" disabled>
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.34-5.66M4 4v8h8"/></svg>
-                  Replay
-                </button>
+                <div class="pathline-actions">
+                  <button type="button" class="btn btn-replay" id="btnReplay" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.34-5.66M4 4v8h8"/></svg>
+                    Replay
+                  </button>
+                  <button type="button" class="btn btn-download" id="btnDownloadAudio" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Download MP3
+                  </button>
+                </div>
               </div>
             </section>
           </div>
@@ -178,7 +184,14 @@
             <section class="card podcast-render">
               <div class="card-bar">
                 <div class="card-title"><span class="step dark">03</span><div><h3>Final mix</h3><p id="podProgressText">Your conversation is ready to render</p></div></div>
-                <div class="render-actions"><span class="mono" id="podProgressPct">0%</span><button type="button" class="btn btn-run" id="btnPodcast" disabled>✦ Generate podcast</button></div>
+                <div class="render-actions">
+                  <span class="mono" id="podProgressPct">0%</span>
+                  <button type="button" class="btn btn-download hidden" id="btnDownloadPodcast">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Download MP3
+                  </button>
+                  <button type="button" class="btn btn-run" id="btnPodcast" disabled>✦ Generate podcast</button>
+                </div>
               </div>
               <div class="track"><i id="podProgressFill"></i></div>
             </section>

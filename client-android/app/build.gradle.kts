@@ -18,8 +18,8 @@ android {
         applicationId = "com.flowbrowser.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 42
-        versionName = "2.6.0"
+        versionCode = 43
+        versionName = "2.0"
 
         val defaultServer =
             (project.findProperty("DEFAULT_SERVER_URL") as String?)
@@ -95,6 +95,7 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
 
 // Keep assets/www in sync with the obfuscated Windows client www-packed tree during builds.
@@ -103,8 +104,21 @@ tasks.register<Copy>("syncWwwAssets") {
     val plainDir = rootProject.file("../client-webview2/FlowBrowser/www")
     from(if (packedDir.exists()) packedDir else plainDir)
     into(layout.projectDirectory.dir("src/main/assets/www"))
-    exclude("**/*.pdb", "**/*.xml", "**/*cdp*")
+    exclude(
+        "**/*.pdb",
+        "**/*.xml",
+        "**/*cdp*",
+        "extensions/urban-vpn/**",
+        "extensions/veo-auto/**",
+        "scripts/veo-content-bundle.js"
+    )
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    doFirst {
+        val destRoot = layout.projectDirectory.dir("src/main/assets/www").asFile
+        destRoot.resolve("extensions/urban-vpn").deleteRecursively()
+        destRoot.resolve("extensions/veo-auto").deleteRecursively()
+        destRoot.resolve("scripts/veo-content-bundle.js").delete()
+    }
 }
 
 tasks.named("preBuild") {

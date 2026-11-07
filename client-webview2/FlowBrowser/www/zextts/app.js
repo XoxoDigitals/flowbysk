@@ -445,7 +445,37 @@ function playUrl(url, path = "", autoplay = true) {
   if (playable && playable.startsWith("blob:")) player._blobUrl = playable;
   player.src = playable;
   $("btnReplay").disabled = false;
+  if ($("btnDownloadAudio")) $("btnDownloadAudio").disabled = false;
   if (autoplay) player.play().catch(() => {});
+}
+
+function downloadAudioItem(item) {
+  const target = item || state.latestAudio;
+  if (!target || (!target.downloadUrl && !target.url)) {
+    toast("Generate audio first", "err");
+    return;
+  }
+  const rawUrl = target.downloadUrl || target.url;
+  const rawPath = String(target.path || "");
+  const lastSep = Math.max(rawPath.lastIndexOf("\\"), rawPath.lastIndexOf("/"));
+  let filename = lastSep >= 0 ? rawPath.slice(lastSep + 1) : "";
+  if (!filename || !/\.mp3$/i.test(filename)) {
+    filename = `zextts_${Date.now()}.mp3`;
+  }
+  try {
+    const a = document.createElement("a");
+    a.href = rawUrl;
+    a.download = filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      try { a.remove(); } catch {}
+    }, 500);
+    toast(rawPath ? `Saved MP3: ${filename}` : `Downloading ${filename}`, "ok");
+  } catch (err) {
+    toast(String(err.message || err), "err");
+  }
 }
 
 function setBusy(busy, mode = "") {
@@ -755,7 +785,10 @@ function renderHistory() {
   state.jobs.forEach((job) => {
     const row = document.createElement("div");
     row.className = "voice-item history-row";
-    row.innerHTML = `<div><strong>${escapeHtml(job.title)}</strong><small>${escapeHtml(job.path || "")}</small></div><div class="history-meta"><span>${escapeHtml(job.time)}</span><b>SAVED</b></div>`;
+    const hasDownload = Boolean(job.downloadUrl || job.url);
+    row.innerHTML = `<div><strong>${escapeHtml(job.title)}</strong><small>${escapeHtml(job.path || "")}</small></div><div class="history-meta">${hasDownload ? '<button type="button" class="btn btn-download btn-history-dl">Download MP3</button>' : ""}<span>${escapeHtml(job.time)}</span><b>SAVED</b></div>`;
+    const dlBtn = row.querySelector(".btn-history-dl");
+    if (dlBtn) dlBtn.addEventListener("click", () => downloadAudioItem(job));
     wrap.appendChild(row);
   });
 }
@@ -863,10 +896,11 @@ async function onGenerate() {
     });
     if (!result || !result.ok) throw new Error((result && result.error) || "Generation failed");
     setProgress(1, `Done · ${result.totalChunks || 1} chunk(s) · ${result.elapsedMs || 0} ms`);
-    state.latestAudio = { url: result.audioUrl, path: result.outputPath };
+    const dlUrl = result.downloadUrl || result.audioUrl;
+    state.latestAudio = { url: result.audioUrl, downloadUrl: dlUrl, path: result.outputPath };
     playUrl(result.audioUrl, result.outputPath);
     $("btnPreviewStudio").classList.add("show");
-    pushHistory({ title: `Studio · ${selected ? voiceLabel(selected) : state.selectedVoice}`, path: result.outputPath });
+    pushHistory({ title: `Studio · ${selected ? voiceLabel(selected) : state.selectedVoice}`, path: result.outputPath, url: result.audioUrl, downloadUrl: dlUrl });
     setDock("Saved", result.outputPath || "");
     toast("Audio generated and saved", "ok");
   } catch (error) {
@@ -969,9 +1003,11 @@ async function onPodcast() {
     });
     if (!result || !result.ok) throw new Error((result && result.error) || "Podcast failed");
     setPodProgress(1, `${result.elapsedMs || 0} ms · saved`);
-    state.latestAudio = { url: result.audioUrl, path: result.outputPath };
+    const dlUrl = result.downloadUrl || result.audioUrl;
+    state.latestAudio = { url: result.audioUrl, downloadUrl: dlUrl, path: result.outputPath };
     playUrl(result.audioUrl, result.outputPath, false);
-    pushHistory({ title: `Podcast · ${result.jobId}`, path: result.outputPath });
+    if ($("btnDownloadPodcast")) $("btnDownloadPodcast").classList.remove("hidden");
+    pushHistory({ title: `Podcast · ${result.jobId}`, path: result.outputPath, url: result.audioUrl, downloadUrl: dlUrl });
     setDock("Podcast saved", result.outputPath || "");
     toast("Podcast generated and saved", "ok");
   } catch (error) {
@@ -1087,6 +1123,8 @@ function bindEvents() {
     updateCharCount(); $("scriptText").focus();
   });
   $("btnReplay").addEventListener("click", onPreviewLatest);
+  if ($("btnDownloadAudio")) $("btnDownloadAudio").addEventListener("click", () => downloadAudioItem(state.latestAudio));
+  if ($("btnDownloadPodcast")) $("btnDownloadPodcast").addEventListener("click", () => downloadAudioItem(state.latestAudio));
   $("btnAddChar").addEventListener("click", () => {
     state.characters.push({ name: `Speaker ${state.characters.length + 1}`, voiceId: state.selectedVoice });
     renderChars(); renderLines();
