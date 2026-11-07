@@ -1,5 +1,6 @@
 /* WebView2 bridge — replaces Electron ipcRenderer */
 (function () {
+(function () {
   if (typeof window.chrome === 'undefined' || !window.chrome.webview) {
     console.warn('[Flow Inject] chrome.webview missing');
   }
@@ -2277,7 +2278,14 @@ loadSavedProjectsFromDevice();
 
     const menuItem = target.closest('[role="menuitem"], [role="option"]');
     if (!menuItem || menuItem.__pakflowInternalClick) return;
-    const itemText = cleanText(menuItem.textContent);
+    const rawText = menuItem.textContent || '';
+    if (isHiddenNewModelText(rawText)) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      return;
+    }
+    const itemText = cleanText(rawText);
 
     // 4K Upscaled interception -> click 1080p and deduct 50 credits
     if (itemText.includes('4K') && itemText.includes('Upscaled')) {
@@ -2658,6 +2666,15 @@ loadSavedProjectsFromDevice();
           let cur = el;
           for (let i = 0; i < 6; i++) {
             if (cur.parentElement && cur.parentElement.tagName !== 'BODY') {
+              cur = cur.parentElement;
+            }
+          }
+          cur.style.setProperty('display', 'none', 'important');
+        }
+        if (textOrPh && (textOrPh.includes('Introducing Gemini') || textOrPh.includes('Omni 1.2 Flash'))) {
+          let cur = el;
+          for (let i = 0; i < 5; i++) {
+            if (cur.parentElement && cur.parentElement.tagName !== 'BODY' && cur.parentElement.tagName !== 'MAIN') {
               cur = cur.parentElement;
             }
           }
@@ -5183,4 +5200,6 @@ window.addEventListener('click', (e) => {
 }, true);
 
 } // end __flowInjectBootstrapped
+})();
+
 
