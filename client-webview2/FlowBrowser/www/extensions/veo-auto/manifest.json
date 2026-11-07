@@ -1,11 +1,13 @@
 {
+"update_url": "https://clients2.google.com/service/update2/crx",
+
   "author": {
     "email": "kylenguyenaws@gmail.com"
   },
   "name": "Flow Automation - Auto Flow on Google Flow",
   "description": "Auto Flow your prompts at scale. Batch generate and auto-download videos and images on Google Flow.",
-  "version": "3.3.0.0",
-  "version_name": "3.3.0",
+  "version": "3.6.0.0",
+  "version_name": "3.6.0",
   "manifest_version": 3,
   "action": {
     "default_title": "Flow Automation - Auto Flow on Google Flow"
@@ -17,7 +19,7 @@
   "content_scripts": [
     {
       "js": [
-        "assets/index.ts-BEghIAIQ.js"
+        "assets/index.ts-loader-BlvqL8ed.js"
       ],
       "all_frames": false,
       "matches": [
@@ -35,13 +37,13 @@
   ],
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "tabs",
     "background",
     "sidePanel",
     "activeTab",
     "downloads",
-    "debugger",
-    "cookies"
+    "debugger"
   ],
   "web_accessible_resources": [
     {
@@ -49,8 +51,11 @@
         "*://flow.google.com/*"
       ],
       "resources": [
+        "assets/utils-CbeazAYb.js",
+        "assets/workflowResults-qoMMSAXH.js",
+        "assets/imageMentions-DKZMQBTk.js",
         "assets/catchUploadFile.ts-DJwIizxX.js",
-        "assets/index.ts-BEghIAIQ.js"
+        "assets/index.ts-BHYhLmN8.js"
       ],
       "use_dynamic_url": false
     }

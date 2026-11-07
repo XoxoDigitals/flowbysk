@@ -44,11 +44,7 @@ public sealed class AppConfig
             DataPaths.MigrateFromLegacy();
 
             if (File.Exists(SecureConfigPath))
-            {
-                // FBS7 needs password — without it, fall through to empty (force login)
-                try { return LoadFromProtected(SecureConfigPath, password: null); }
-                catch (CryptographicException) { /* password-sealed or corrupt → login */ }
-            }
+                return LoadFromProtected(SecureConfigPath);
 
             if (File.Exists(LegacySecurePath))
             {
@@ -76,38 +72,17 @@ public sealed class AppConfig
         return new AppConfig();
     }
 
-    public static AppConfig LoadWithPassword(string password)
-    {
-        try
-        {
-            if (!File.Exists(SecureConfigPath)) return new AppConfig();
-            return LoadFromProtected(SecureConfigPath, password);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine("Error unlocking config: " + ex.Message);
-            return new AppConfig();
-        }
-    }
-
-    static AppConfig LoadFromProtected(string path, string? password = null)
+    static AppConfig LoadFromProtected(string path)
     {
         var sealedBytes = File.ReadAllBytes(path);
         byte[] plain;
         try
         {
-            plain = VaultCrypto.OpenSession(sealedBytes, password);
+            plain = VaultCrypto.OpenSession(sealedBytes);
         }
-        catch (CryptographicException) when (password == null)
+        catch (CryptographicException)
         {
-            // FBS7 cannot be opened without password — do not try DPAPI on it
-            if (sealedBytes.Length >= 4
-                && sealedBytes[0] == (byte)'F'
-                && sealedBytes[1] == (byte)'B'
-                && sealedBytes[2] == (byte)'S'
-                && sealedBytes[3] == (byte)'7')
-                throw;
-            // Last resort: classic DPAPI-only blob (pre-v6)
+            // Last resort: classic DPAPI-only blob
             plain = ProtectedData.Unprotect(sealedBytes, optionalEntropy: null, DataProtectionScope.CurrentUser);
         }
         var json = Encoding.UTF8.GetString(plain);
@@ -163,7 +138,10 @@ public sealed class AppConfig
         }
     }
 
-    public void Save(string? vaultPassword = null)
+    /// <summary>Session save entry used by the shell (login password is accepted but not persisted).</summary>
+    public bool Save(string? vaultPassword) => Save();
+
+    public bool Save()
     {
         try
         {
@@ -174,9 +152,12 @@ public sealed class AppConfig
 
             var json = JsonSerializer.Serialize(this, JsonOpts);
             var plain = Encoding.UTF8.GetBytes(json);
-            var sealedBytes = VaultCrypto.SealSession(plain, vaultPassword);
-            File.WriteAllBytes(SecureConfigPath, sealedBytes);
+            var sealedBytes = VaultCrypto.SealSession(plain);
+            // Hidden+System files deny overwrite on Windows — clear attrs / write via temp replace
+            WriteSessionBytes(SecureConfigPath, sealedBytes);
             DataPaths.TryHide(SecureConfigPath);
+            System.Diagnostics.Debug.WriteLine("[AppConfig] session.bin saved → " + SecureConfigPath +
+                " (" + sealedBytes.Length + " bytes)");
 
             try
             {
@@ -184,10 +165,13 @@ public sealed class AppConfig
                     File.Delete(LegacyConfigPath);
             }
             catch { /* ignore */ }
+            return true;
         }
         catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine("Error saving config: " + ex.Message);
             Console.Error.WriteLine("Error saving config: " + ex.Message);
+            return false;
         }
     }
 
@@ -195,5 +179,29 @@ public sealed class AppConfig
     {
         SanitizeSecrets();
         return JsonSerializer.Serialize(this, JsonOpts);
+    }
+
+    /// <summary>
+    /// Atomic write that works when the target is Hidden/System (File.WriteAllBytes otherwise Access Denied).
+    /// </summary>
+    static void WriteSessionBytes(string path, byte[] bytes)
+    {
+        var dir = Path.GetDirectoryName(path) ?? SecureDir;
+        Directory.CreateDirectory(dir);
+        var tmp = Path.Combine(dir, "session.bin.tmp-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            File.WriteAllBytes(tmp, bytes);
+            if (File.Exists(path))
+            {
+                try { File.SetAttributes(path, FileAttributes.Normal); } catch { /* ignore */ }
+                File.Delete(path);
+            }
+            File.Move(tmp, path);
+        }
+        finally
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* ignore */ }
+        }
     }
 }

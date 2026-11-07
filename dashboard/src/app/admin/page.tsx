@@ -237,9 +237,9 @@ export default function AdminOverviewPage() {
 
           <section className="flex flex-col gap-3">
             <div>
-              <h2 className="text-[15px] font-semibold tracking-tight">Users by plan × admin</h2>
+              <h2 className="text-[15px] font-semibold tracking-tight">Users by plan × admin (10th → 10th UTC)</h2>
               <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
-                Sorted by plan — how many users each admin has on each plan
+                Sorted by plan — users created or renewed in current 10th → 10th UTC billing period
               </p>
             </div>
             {metrics.planBreakdown?.error ? (

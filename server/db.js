@@ -57,9 +57,9 @@ async function setJsonSetting(key, value) {
 }
 
 function normalizeClientApiVersion(value) {
-  // Only v8 is live (traditional login + vault EXE). Older clients FORCE_UPDATE.
+  // Only v11 is live (SHA-256 Authenticode/Keystore signed binary attestation). Older clients FORCE_UPDATE.
   void value;
-  return 'v8';
+  return 'v11';
 }
 
 async function getRuntime() {
@@ -71,7 +71,7 @@ async function getRuntime() {
     cssSelectorsToHide: [],
     customCss: '',
     downloads: { windows: null, android: null },
-    clientApiVersion: 'v8',
+    clientApiVersion: 'v11',
     jwtSecret: process.env.JWT_SECRET || 'flow_super_secret_jwt_key_2026',
   };
   const stored = (await getJsonSetting(RUNTIME_KEY, {})) || {};
@@ -2256,19 +2256,58 @@ class Database {
   }
 
   /**
-   * Per-admin plan counts, sorted by plan name then user count desc.
+   * Per-admin plan counts for the current (10th -> 10th UTC) billing period,
+   * sorted by plan name then user count desc.
    * @param {Array<{id:string,username:string,displayName?:string}>} admins
    */
 
   async adminPlanBreakdown(admins = []) {
     await this.ready();
+    const { periodWindow10th } = require('./deviceSecurity');
+    const { from, to } = periodWindow10th(new Date());
+
+    // Identify all CUSTOMER users created or renewed during the current (10th -> 10th UTC) billing period
+    const [ledgerRows, createdUsers] = await Promise.all([
+      prisma.creditLedger.findMany({
+        where: {
+          createdAt: { gte: from, lt: to },
+          OR: [
+            { reason: 'admin_create_user' },
+            { reason: 'reseller_create_user' },
+            { reason: 'create_user' },
+            { type: 'ADMIN_ADJUSTMENT' },
+          ],
+        },
+        select: { userId: true },
+      }),
+      prisma.user.findMany({
+        where: {
+          role: 'CUSTOMER',
+          createdAt: { gte: from, lt: to },
+        },
+        select: { id: true },
+      }),
+    ]);
+
+    const periodUserIds = new Set();
+    for (const r of ledgerRows) {
+      if (r.userId) periodUserIds.add(r.userId);
+    }
+    for (const u of createdUsers) {
+      if (u.id) periodUserIds.add(u.id);
+    }
+
     const rows = [];
     const planTotals = new Map();
 
     for (const admin of admins || []) {
       if (!admin?.id) continue;
+      const baseWhere = await this.ownedCustomerWhereForAdmin(admin.id);
       const customers = await prisma.user.findMany({
-        where: await this.ownedCustomerWhereForAdmin(admin.id),
+        where: {
+          ...baseWhere,
+          id: { in: [...periodUserIds] },
+        },
         select: {
           id: true,
           subscriptions: {
@@ -2314,7 +2353,12 @@ class Database {
       .map(([planName, userCount]) => ({ planName, userCount }))
       .sort((a, b) => b.userCount - a.userCount || a.planName.localeCompare(b.planName));
 
-    return { rows, byPlan };
+    return {
+      rows,
+      byPlan,
+      periodStart: from.toISOString(),
+      periodEnd: to.toISOString(),
+    };
   }
 
   async ownedUserCountsByAdmin() {

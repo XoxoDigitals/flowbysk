@@ -257,7 +257,6 @@ public partial class MainWindow : Window
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
 
-        // Spoof Whale Browser UA + Client Hints (matches Whale/4.0.0.0 fingerprint)
         ApplyWhaleUserAgent(core);
         core.WebMessageReceived += Flow_WebMessageReceived;
 
@@ -511,7 +510,6 @@ public partial class MainWindow : Window
         };
 
         await core.AddScriptToExecuteOnDocumentCreatedAsync(_flowInject);
-        await InjectVeoContentBundleAsync(core);
     }
 
     void ApplyWhaleUserAgent(CoreWebView2 core)
@@ -2375,14 +2373,20 @@ public partial class MainWindow : Window
                 if (string.IsNullOrWhiteSpace(channelId) || string.IsNullOrWhiteSpace(serverPublicKey))
                     throw new ArgumentException("channelId and serverPublicKey required");
                 if (payload.TryGetProperty("serverTime", out var stEl) && stEl.ValueKind == JsonValueKind.Number && stEl.TryGetInt64(out var stMs))
+                {
                     _credChannel.SetServerTime(stMs);
+                    SecurityGuard.SetServerTime(stMs);
+                }
                 _credChannel.Establish(channelId!, serverPublicKey!);
                 return new { success = true, channelId = _credChannel.ChannelId };
             }
             case "credSetServerTime":
             {
                 if (payload.TryGetProperty("serverTime", out var stEl) && stEl.ValueKind == JsonValueKind.Number && stEl.TryGetInt64(out var stMs))
+                {
                     _credChannel.SetServerTime(stMs);
+                    SecurityGuard.SetServerTime(stMs);
+                }
                 return new { success = true };
             }
             case "credMac":
@@ -2414,7 +2418,17 @@ public partial class MainWindow : Window
                 return new { success = true, restored };
             }
             case "getDeviceId":
-                return new { deviceId = GetStableDeviceId(), client = "windows-exe/" + AppVersion(), version = AppVersion() };
+            {
+                long? srvTime = null;
+                if (payload.ValueKind == JsonValueKind.Object &&
+                    payload.TryGetProperty("serverTime", out var stEl) &&
+                    stEl.ValueKind == JsonValueKind.Number &&
+                    stEl.TryGetInt64(out var stMs))
+                {
+                    srvTime = stMs;
+                }
+                return SecurityGuard.CreateClientAttestation(GetStableDeviceId(), AppVersion(), srvTime);
+            }
             default:
                 throw new InvalidOperationException("Unknown command: " + cmd);
         }

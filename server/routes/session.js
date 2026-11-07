@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const db = require('../db');
-const { loginClientUser } = require('./client-v8');
+const { loginClientUser } = require('./client-v11');
 
 const router = express.Router();
 
@@ -98,9 +98,11 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // Website login — never require EXE/APK Device ID (that auto-banned portal users).
+    // Website login — never require EXE/APK Device ID for browser portal users,
+    // but ALWAYS enforce v11 attestation if x-flow-client header is present (EXE/APK).
+    const isAppClient = Boolean(String(req.headers?.['x-flow-client'] || '').trim());
     const result = await loginClientUser(username, password, req.ip, req, {
-      requireDeviceAttestation: false,
+      requireDeviceAttestation: isAppClient,
     });
     if (!result.body?.success) {
       return res.status(result.status).json(result.body);

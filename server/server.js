@@ -31,29 +31,14 @@ const forceUpdatePayload = {
   error: 'Please download the latest Flow Browser.',
 };
 
-/** Both /api/v8/client and /api/v9/client are live (traditional login). v2–v7 → FORCE_UPDATE. */
-const clientV8Routes = require('./routes/client-v8');
-const clientV9Routes = require('./routes/client-v9');
-app.use('/api/v2/client', (req, res) => {
-  res.status(410).json(forceUpdatePayload);
-});
-app.use('/api/v3/client', (req, res) => {
-  res.status(410).json(forceUpdatePayload);
-});
-app.use('/api/v4/client', (req, res) => {
-  res.status(410).json(forceUpdatePayload);
-});
-app.use('/api/v5/client', (req, res) => {
-  res.status(410).json(forceUpdatePayload);
-});
-app.use('/api/v6/client', (req, res) => {
-  res.status(410).json(forceUpdatePayload);
-});
-app.use('/api/v7/client', (req, res) => {
-  res.status(410).json(forceUpdatePayload);
-});
-app.use('/api/v8/client', clientV8Routes);
-app.use('/api/v9/client', clientV9Routes);
+/** Only /api/v11/client is live (signed binary attestation). v2–v10 → FORCE_UPDATE. */
+const clientV11Routes = require('./routes/client-v11');
+for (const legacyVer of ['v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10']) {
+  app.use(`/api/${legacyVer}/client`, (req, res) => {
+    res.status(410).json(forceUpdatePayload);
+  });
+}
+app.use('/api/v11/client', clientV11Routes);
 app.use('/api/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -85,8 +70,9 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
-        clientApiVersion: 'v9',
+        clientApiVersion: 'v11',
       },
+      serverTime: Date.now(),
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -160,22 +146,22 @@ app.get('*', (req, res) => {
 
 db.ready()
   .then(async () => {
-    // Permanently lock client API to v8 (v2–v7 always return 410)
+    // Permanently lock client API to v11 (v2–v10 always return 410)
     try {
       const cur = await db.getSettings();
-      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v8') {
-        await db.updateSettings({ clientApiVersion: 'v8' });
-        console.log('[boot] Locked clientApiVersion → v8 (v2–v7 permanently stopped)');
+      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v11') {
+        await db.updateSettings({ clientApiVersion: 'v11' });
+        console.log('[boot] Locked clientApiVersion → v11 (v2–v10 permanently stopped)');
       }
     } catch (err) {
-      console.warn('[boot] could not lock clientApiVersion v8:', err.message);
+      console.warn('[boot] could not lock clientApiVersion v11:', err.message);
     }
     app.listen(PORT, () => {
       console.log(`====================================================`);
       console.log(`Flow Creator Ai API server on port ${PORT}`);
       console.log(`Admin UI:   http://localhost:3100/admin`);
       console.log(`Demo Flow:  http://localhost:${PORT}/demo-flow`);
-      console.log(`Client API: /api/v8/client only (traditional login); v2–v7 → 410 FORCE_UPDATE`);
+      console.log(`Client API: /api/v11/client only (SHA-256 signed attestation); v2–v10 → 410 FORCE_UPDATE`);
       console.log(`Data store: PostgreSQL (Prisma) — data.json is not live`);
       console.log(`====================================================`);
     });

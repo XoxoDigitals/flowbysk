@@ -18,8 +18,8 @@ android {
         applicationId = "com.flowbrowser.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 39
-        versionName = "2.5.0"
+        versionCode = 42
+        versionName = "2.6.0"
 
         val defaultServer =
             (project.findProperty("DEFAULT_SERVER_URL") as String?)
@@ -35,12 +35,18 @@ android {
 
     signingConfigs {
         create("release") {
+            val defaultKeystore = rootProject.file("keystore/flowbrowser-release.jks")
             val storeFilePath = localProps.getProperty("RELEASE_STORE_FILE")
-            if (storeFilePath != null) {
+            if (storeFilePath != null && file(storeFilePath).exists()) {
                 storeFile = file(storeFilePath)
                 storePassword = localProps.getProperty("RELEASE_STORE_PASSWORD") ?: ""
                 keyAlias = localProps.getProperty("RELEASE_KEY_ALIAS") ?: "flowbrowser"
                 keyPassword = localProps.getProperty("RELEASE_KEY_PASSWORD") ?: ""
+            } else if (defaultKeystore.exists()) {
+                storeFile = defaultKeystore
+                storePassword = "FlowCreatorAi_Android_2026!#v11"
+                keyAlias = "flowbrowser"
+                keyPassword = "FlowCreatorAi_Android_2026!#v11"
             }
         }
     }
@@ -91,9 +97,11 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }
 
-// Keep assets/www in sync with the Windows client www tree during builds.
+// Keep assets/www in sync with the obfuscated Windows client www-packed tree during builds.
 tasks.register<Copy>("syncWwwAssets") {
-    from(rootProject.file("../client-webview2/FlowBrowser/www"))
+    val packedDir = rootProject.file("../client-webview2/FlowBrowser/www-packed")
+    val plainDir = rootProject.file("../client-webview2/FlowBrowser/www")
+    from(if (packedDir.exists()) packedDir else plainDir)
     into(layout.projectDirectory.dir("src/main/assets/www"))
     exclude("**/*.pdb", "**/*.xml", "**/*cdp*")
     duplicatesStrategy = DuplicatesStrategy.INCLUDE

@@ -10,7 +10,7 @@
     <RootNamespace>FlowBrowser</RootNamespace>
     <ApplicationTitle>Flow Browser</ApplicationTitle>
     <ApplicationIcon>FlowBrowser.ico</ApplicationIcon>
-    <Version>8.0.10</Version>
+    <Version>8.0.14</Version>
     <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
     <DebugSymbols Condition="'$(Configuration)' == 'Release'">false</DebugSymbols>
   </PropertyGroup>
@@ -54,6 +54,15 @@
   <Target Name="CleanWwwZip" AfterTargets="Clean">
     <Delete Files="$(MSBuildProjectDirectory)\www.zip;$(MSBuildProjectDirectory)\www.vault" TreatErrorsAsWarnings="true" />
     <RemoveDir Directories="$(MSBuildProjectDirectory)\www-packed" />
+  </Target>
+
+  <!-- Automatically sign Flow Browser.dll and Flow Browser.exe with SHA-256 Authenticode on Release build & Publish -->
+  <Target Name="SignBinariesAfterBuild" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\tools\sign-exe.ps1&quot; -TargetDir &quot;$(TargetDir.TrimEnd('\'))&quot;" />
+  </Target>
+
+  <Target Name="SignBinariesAfterPublish" AfterTargets="Publish">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\tools\sign-exe.ps1&quot; -TargetDir &quot;$(PublishDir.TrimEnd('\'))&quot;" />
   </Target>
 
 </Project>

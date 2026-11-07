@@ -1,65 +1,58 @@
-﻿using System.IO;
+using System.IO;
+using System.Text.RegularExpressions;
 
 namespace FlowBrowser;
 
 /// <summary>
-/// WebView2 user-data folders. v6.1+: durable under LocalAppData (DataPaths).
-/// TEMP GUID profiles are no longer used so Google cookies survive EXE close.
+/// WebView2 user-data folders. Durable LocalAppData profiles (cookies survive restart);
+/// legacy per-run TEMP GUID profiles are purged.
 /// </summary>
 static class RuntimeProfiles
 {
+    static readonly Regex GuidName = new("^[0-9a-fA-F]{32}$|^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$",
+        RegexOptions.Compiled);
+
     public static string CreateShell()
     {
-        Directory.CreateDirectory(DataPaths.ShellProfile);
+        var overrideRoot = Environment.GetEnvironmentVariable("FLOW_PROFILE_OVERRIDE");
+        if (!string.IsNullOrWhiteSpace(overrideRoot))
+        {
+            var p = Path.Combine(overrideRoot, "shell");
+            Directory.CreateDirectory(p);
+            return p;
+        }
+        DataPaths.EnsureDurableProfiles();
         return DataPaths.ShellProfile;
     }
 
     public static string CreateFlow()
     {
-        Directory.CreateDirectory(DataPaths.FlowProfile);
+        var overrideRoot = Environment.GetEnvironmentVariable("FLOW_PROFILE_OVERRIDE");
+        if (!string.IsNullOrWhiteSpace(overrideRoot))
+        {
+            var p = Path.Combine(overrideRoot, "flow");
+            Directory.CreateDirectory(p);
+            return p;
+        }
+        DataPaths.EnsureDurableProfiles();
         return DataPaths.FlowProfile;
     }
 
-    /// <summary>
-    /// Best-effort cleanup of leftover TEMP v6 ephemeral profile folders (GUID dirs).
-    /// Never delete ui-* — WwwExtractor stores the embedded shell there.
-    /// </summary>
+    /// <summary>Delete GUID-named leftovers in %TEMP%\FlowBrowserV6 (never ui-*).</summary>
     public static void CleanupLegacyTempProfiles()
     {
         try
         {
-            var root = Path.Combine(Path.GetTempPath(), "FlowBrowserV6");
-            if (!Directory.Exists(root)) return;
-            foreach (var dir in Directory.EnumerateDirectories(root))
+            var baseDir = Path.Combine(Path.GetTempPath(), "FlowBrowserV6");
+            if (!Directory.Exists(baseDir)) return;
+            foreach (var dir in Directory.EnumerateDirectories(baseDir))
             {
                 var name = Path.GetFileName(dir);
-                // Active / cached www extract for virtual-host mapping
-                if (name.StartsWith("ui-", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                // Old ephemeral layout: {guid}\shell|flow
-                TryDeleteDirectory(dir);
+                if (name.StartsWith("ui-", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!GuidName.IsMatch(name)) continue;
+                try { Directory.Delete(dir, true); } catch { /* in use / best-effort */ }
             }
         }
-        catch { /* ignore */ }
-    }
-
-    public static void TryDeleteDirectory(string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
-        try
-        {
-            Directory.Delete(path, recursive: true);
-        }
-        catch
-        {
-            try
-            {
-                foreach (var f in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
-                {
-                    try { File.SetAttributes(f, FileAttributes.Normal); File.Delete(f); } catch { }
-                }
-            }
-            catch { }
-        }
+        catch { /* best-effort */ }
     }
 }

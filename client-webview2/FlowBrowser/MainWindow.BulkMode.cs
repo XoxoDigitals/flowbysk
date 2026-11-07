@@ -133,12 +133,27 @@ public partial class MainWindow
         };
     }
 
-    async Task InjectVeoContentBundleAsync(CoreWebView2 flowCore)
+    bool _veoDocCreatedHookInstalled;
+
+    async Task EnsureVeoContentBundleOnFlowAsync()
     {
-        if (!string.IsNullOrWhiteSpace(_veoContentBundle))
+        var flowCore = FlowView.CoreWebView2;
+        if (flowCore == null || string.IsNullOrWhiteSpace(_veoContentBundle)) return;
+        try
         {
-            await flowCore.AddScriptToExecuteOnDocumentCreatedAsync(_veoContentBundle);
+            if (!_veoDocCreatedHookInstalled)
+            {
+                _veoDocCreatedHookInstalled = true;
+                await flowCore.AddScriptToExecuteOnDocumentCreatedAsync(_veoContentBundle);
+            }
+            await flowCore.ExecuteScriptAsync(_veoContentBundle);
+            var curUrl = flowCore.Source ?? "";
+            if (IsFlowWorkspaceUrl(curUrl))
+            {
+                await flowCore.ExecuteScriptAsync("try { if (typeof window.__veoStartModules === 'function') window.__veoStartModules(); } catch(e) {}");
+            }
         }
+        catch { /* ignore */ }
     }
 
     void SyncBulkLayout()
@@ -227,6 +242,7 @@ public partial class MainWindow
                     await wv.EnsureCoreWebView2Async(_shellEnv);
                     ConfigureBulkView(wv.CoreWebView2);
                     _workflowReady = true;
+                    _ = EnsureVeoContentBundleOnFlowAsync();
                     wv.CoreWebView2.Navigate(VeoWorkflowUrl);
                 }
                 catch (Exception ex)
@@ -292,9 +308,9 @@ public partial class MainWindow
 
     void NotifyBulkFlowUrl(string? url)
     {
-        if (FlowView.CoreWebView2 != null && !string.IsNullOrWhiteSpace(url) && IsFlowWorkspaceUrl(url))
+        if ((_bulkPanelOpen || _workflowReady) && FlowView.CoreWebView2 != null && !string.IsNullOrWhiteSpace(url) && IsFlowWorkspaceUrl(url))
         {
-            _ = FlowView.CoreWebView2.ExecuteScriptAsync("try { if (typeof window.__veoStartModules === 'function') window.__veoStartModules(); } catch(e) {}");
+            _ = EnsureVeoContentBundleOnFlowAsync();
         }
         if (string.IsNullOrWhiteSpace(url)) return;
         PostToBulkAndWorkflow(new { type = "veo-flow-url", url });
@@ -438,6 +454,8 @@ public partial class MainWindow
                 {
                     return new { isFlowPage = true };
                 }
+
+                await EnsureVeoContentBundleOnFlowAsync();
 
                 var expr = $"(window.__veoDispatch ? window.__veoDispatch({msgRawJson}) : Promise.resolve({{ isFlowPage: true, success: true }}))";
                 var cdpParams = JsonSerializer.Serialize(new

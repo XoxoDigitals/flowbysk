@@ -1,4 +1,5 @@
 // WebView2 bridge for Flow Browser native ZexTTS C# backend
+(function () {
 (function initFlowBrowserZexTtsBridge() {
   if (window.pywebview && window.pywebview.api) return;
   if (!window.chrome || !window.chrome.webview) return;
@@ -1187,3 +1188,4 @@ async function boot() {
 
 window.addEventListener("pywebviewready", boot);
 boot();
+})();

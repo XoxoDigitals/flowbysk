@@ -1,19 +1,53 @@
 // Flow Browser App Shell Controller
 
 /** Active client API base � v7 traditional login only. */
-let CLIENT_API = '/api/v9/client';
+(function () {
+let CLIENT_API = '/api/v11/client';
 
 function normalizeClientApiVersion(value) {
   const v = String(value || '').trim().toLowerCase();
-  if (v === 'v8' || v === 'v9') return v;
-  return 'v9';
+  if (v === 'v11') return 'v11';
+  return 'v11';
 }
+
+const _nativeFetch = window.fetch.bind(window);
+window.fetch = async function (input, init) {
+  const urlStr = typeof input === 'string' ? input : (input && input.url ? input.url : String(input || ''));
+  if (/\/api\/v\d+\/client\//i.test(urlStr)) {
+    init = init ? { ...init } : {};
+    const headers = new Headers(init.headers || {});
+    try {
+      if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
+        const att = await window.electronAPI.getDeviceId();
+        if (att && typeof att === 'object') {
+          if (att.client) headers.set('X-Flow-Client', String(att.client));
+          if (att.deviceId) headers.set('X-Flow-Device-Id', String(att.deviceId));
+          if (att.binHash) headers.set('X-Flow-Bin-Hash', String(att.binHash));
+          if (att.ts != null) headers.set('X-Flow-Ts', String(att.ts));
+          if (att.nonce) headers.set('X-Flow-Nonce', String(att.nonce));
+          if (att.signature) headers.set('X-Flow-Signature', String(att.signature));
+        }
+      }
+    } catch (e) {}
+    const hObj = {};
+    headers.forEach((v, k) => { hObj[k] = v; });
+    init.headers = hObj;
+  }
+  return _nativeFetch(input, init);
+};
 
 async function resolveClientApiBase(serverUrl, force = false) {
   const base = String(serverUrl || '').replace(/\/$/, '') || 'https://flowcreatorai.site';
   try {
-    const res = await fetch(`${base}/api/public/branding`, { cache: 'no-store' });
+    const res = await _nativeFetch(`${base}/api/public/branding`, { cache: 'no-store' });
     const data = await res.json();
+    if (data && data.serverTime) {
+      const st = typeof data.serverTime === 'number' ? data.serverTime : Date.parse(data.serverTime);
+      if (Number.isFinite(st) && st > 0) {
+        window.__flowServerTimeOffset = st - Date.now();
+        try { window.electronAPI?.credSetServerTime?.(st); } catch (e) {}
+      }
+    }
     const ver = normalizeClientApiVersion(
       data?.settings?.clientApiVersion ?? data?.clientApiVersion
     );
@@ -577,7 +611,7 @@ class FlowBrowserApp {
           await this.forceLogout(data.error || 'Please download the latest Flow Browser.');
           return false;
         }
-        if (code === 'SESSION_REPLACED' || code === 'NO_CREDITS' || code === 'BANNED' || code === 'PLAN_EXPIRED') {
+        if (code === 'SESSION_REPLACED' || code === 'NO_CREDITS' || code === 'BANNED' || code === 'PLAN_EXPIRED' || code === 'TAMPERED_CLIENT' || code === 'SUSPICIOUS_CLIENT') {
           await this.forceLogout(data.error || 'Please sign in again.');
           return false;
         }
@@ -606,21 +640,34 @@ class FlowBrowserApp {
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
       let deviceId = null;
-      let flowClient = 'windows-exe/8.0.0';
+      let flowClient = 'windows-exe/8.0.14';
+      let binHash = '';
+      let attestTs = 0;
+      let attestNonce = '';
+      let signature = '';
       try {
         if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
           const dev = await window.electronAPI.getDeviceId();
           if (dev && dev.deviceId) deviceId = String(dev.deviceId);
           if (dev && dev.client) flowClient = String(dev.client);
+          if (dev && dev.binHash) binHash = String(dev.binHash);
+          if (dev && dev.ts != null) attestTs = Number(dev.ts) || 0;
+          if (dev && dev.nonce) attestNonce = String(dev.nonce);
+          if (dev && dev.signature) signature = String(dev.signature);
         }
       } catch (err) {
         console.warn('[AppShell] getDeviceId failed', err); window.__deviceErr = err && err.message ? String(err.message) : String(err);
       }
       if (!deviceId) throw new Error('Device ID unavailable' + (window.__deviceErr ? ' (' + window.__deviceErr + ')' : '') + '. Please update the app.');
-      const loginBody = { username, password, clientPublicKey, deviceId };
+      const loginBody = { username, password, clientPublicKey, deviceId, binHash, attestTs, attestNonce, signature };
       const loginHeaders = {
         'Content-Type': 'application/json',
-        'X-Flow-Client': flowClient
+        'X-Flow-Client': flowClient,
+        'X-Flow-Device-Id': deviceId,
+        'X-Flow-Bin-Hash': binHash,
+        'X-Flow-Ts': String(attestTs),
+        'X-Flow-Nonce': attestNonce,
+        'X-Flow-Signature': signature
       };
       const res = await fetch(`${serverUrl}${CLIENT_API}/login`, {
         method: 'POST',
@@ -1021,7 +1068,9 @@ class FlowBrowserApp {
           code === 'SESSION_REPLACED' ||
           code === 'NO_CREDITS' ||
           code === 'BANNED' ||
-          code === 'PLAN_EXPIRED'
+          code === 'PLAN_EXPIRED' ||
+          code === 'TAMPERED_CLIENT' ||
+          code === 'SUSPICIOUS_CLIENT'
         ) {
           await this.forceLogout((data && data.error) || 'Please sign in again.');
         }
@@ -3418,3 +3467,4 @@ if (document.readyState === 'loading') {
 } else {
   initApp();
 }
+})();

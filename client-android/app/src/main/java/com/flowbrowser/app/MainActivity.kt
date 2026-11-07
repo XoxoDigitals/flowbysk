@@ -69,7 +69,7 @@ class MainActivity : AppCompatActivity() {
         private const val AUTH_UI_COVER = 1
         private const val AUTH_UI_CAPTCHA = 2
         /** Auth cover ON — masks Google automation; lifts for real captcha. */
-        private const val DISABLE_AUTH_COVER = false
+        private const val DISABLE_AUTH_COVER = true
         /** Autoclick Next / 2FA enabled (production). */
         private const val DISABLE_GOOGLE_AUTO_NEXT = false
         /** Force Flow workspace to lay out at this CSS width (then scale to fit). */
@@ -1173,8 +1173,142 @@ class MainActivity : AppCompatActivity() {
                 val code = payload.optString("code", "null")
                 evaluateFlowAsync(code)
             }
+            "credSetServerTime" -> {
+                val st = payload.optLong("serverTime", 0L)
+                if (st > 0L) {
+                    serverClockOffsetMs = st - System.currentTimeMillis()
+                }
+                JSONObject().put("success", true)
+            }
+            "switchFlowCookieProfile" -> {
+                JSONObject().put("success", true).put("restored", true)
+            }
+            "getDeviceId" -> {
+                createClientAttestation()
+            }
             else -> throw IllegalArgumentException("Unknown command: $cmd")
         }
+    }
+
+    @Volatile
+    private var serverClockOffsetMs: Long = 0L
+
+    /** Reconstruct 32-byte master seed via XOR mask for v11 cryptographic attestation */
+    private fun deriveMasterSeed(): ByteArray {
+        val mask = intArrayOf(
+            0x93, 0x4A, 0xE7, 0x12, 0xC8, 0x55, 0x3B, 0xF0,
+            0x6D, 0xA1, 0x29, 0x84, 0x7E, 0xDF, 0x16, 0x43,
+            0xB2, 0x0C, 0x89, 0xE5, 0x31, 0x74, 0xFA, 0x68,
+            0x9C, 0x5E, 0xD0, 0x27, 0x4B, 0xA6, 0x1F, 0x82
+        )
+        val xored = intArrayOf(
+            0xF5, 0x26, 0x88, 0x65, 0x97, 0x16, 0x49, 0x95,
+            0x0C, 0xD5, 0x46, 0xF6, 0x53, 0xBE, 0x7F, 0x6E,
+            0xC4, 0x3D, 0xB8, 0xBA, 0x52, 0x1B, 0x9E, 0x0D,
+            0xEB, 0x37, 0xBA, 0x49, 0x38, 0xC9, 0x71, 0xF1
+        )
+        val out = ByteArray(32)
+        for (i in 0 until 32) {
+            out[i] = (mask[i] xor xored[i]).toByte()
+        }
+        return out
+    }
+
+    @Suppress("DEPRECATION")
+    private fun apkSigningCertSha256(): String {
+        return try {
+            val certBytes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val info = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+                val sigs = info.signingInfo?.apkContentsSigners ?: info.signingInfo?.signingCertificateHistory
+                sigs?.firstOrNull()?.toByteArray()
+            } else {
+                val info = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNATURES)
+                info.signatures?.firstOrNull()?.toByteArray()
+            } ?: return ""
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            md.digest(certBytes).joinToString("") { "%02x".format(it) }
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    private fun createClientAttestation(): JSONObject {
+        val ver = appVersionName()
+        val client = "android/$ver"
+        val deviceId = stableDeviceId()
+        val certSha256 = apkSigningCertSha256()
+        val expectedCert = "40bfe6b4a46fb01f570fbd33a028d5b0c24d2b5959b33d46978faeccef83208e"
+        val debuggerAttached = android.os.Debug.isDebuggerConnected() || android.os.Debug.waitingForDebugger()
+        val untampered = !debuggerAttached && certSha256.equals(expectedCert, ignoreCase = true)
+
+        val binHash = if (untampered) {
+            "and:" + certSha256.take(32)
+        } else {
+            "TAMPERED:" + (if (debuggerAttached) "DEBUGGER" else certSha256.take(16))
+        }
+
+        val ts = System.currentTimeMillis() + serverClockOffsetMs
+        val nonceBytes = ByteArray(16)
+        java.security.SecureRandom().nextBytes(nonceBytes)
+        val nonce = nonceBytes.joinToString("") { "%02x".format(it) }
+
+        val seed = deriveMasterSeed()
+        val suffix = ("|and|" + certSha256.lowercase()).toByteArray(Charsets.UTF_8)
+        val combined = ByteArray(seed.size + suffix.size)
+        System.arraycopy(seed, 0, combined, 0, seed.size)
+        System.arraycopy(suffix, 0, combined, seed.size, suffix.size)
+        val signingKey = java.security.MessageDigest.getInstance("SHA-256").digest(combined)
+
+        val payloadStr = "v11|$client|$deviceId|$binHash|$ts|$nonce"
+        val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+        mac.init(javax.crypto.spec.SecretKeySpec(signingKey, "HmacSHA256"))
+        val sigBytes = mac.doFinal(payloadStr.toByteArray(Charsets.UTF_8))
+        val signature = Base64.encodeToString(
+            sigBytes,
+            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+        )
+
+        return JSONObject()
+            .put("deviceId", deviceId)
+            .put("client", client)
+            .put("version", ver)
+            .put("binHash", binHash)
+            .put("ts", ts)
+            .put("nonce", nonce)
+            .put("signature", signature)
+    }
+
+    /** App version from the APK (shown in the toolbar and sent as X-Flow-Client). */
+    private fun appVersionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "0.0.0"
+    } catch (_: Exception) {
+        "0.0.0"
+    }
+
+    /**
+     * Stable per-install device id for login attestation (server needs 16-128 chars).
+     * ANDROID_ID when usable, otherwise a random id persisted once.
+     */
+    @android.annotation.SuppressLint("HardwareIds")
+    private fun stableDeviceId(): String {
+        val androidId = try {
+            android.provider.Settings.Secure.getString(
+                contentResolver,
+                android.provider.Settings.Secure.ANDROID_ID
+            )
+        } catch (_: Exception) {
+            null
+        }
+        if (!androidId.isNullOrBlank() && androidId.length >= 8 && androidId != "9774d56d682e549c") {
+            return "and-$androidId"
+        }
+        val prefs = getSharedPreferences("flow_device", MODE_PRIVATE)
+        var id = prefs.getString("id", null)
+        if (id.isNullOrBlank()) {
+            id = "and-" + java.util.UUID.randomUUID().toString()
+            prefs.edit().putString("id", id).apply()
+        }
+        return id
     }
 
     /** Drop Google password from RAM + injected page state (never persist). */
