@@ -84,10 +84,15 @@ function obfuscateFile(rel) {
     console.warn('[obfuscate] skip missing', rel);
     return;
   }
-  // Keep WebCrypto ECDH helper readable — heavy string-array passes have broken subtle APIs before.
+  // Keep WebCrypto ECDH helper and in-memory flow-inject clean — heavy string-array passes hoist _0x globals into window/subframes.
   const relNorm = rel.replace(/\\/g, '/').toLowerCase();
-  if (relNorm === 'scripts/cred-channel.js' || relNorm.endsWith('/scripts/cred-channel.js')) {
-    console.log(`[obfuscate] SKIP crypto helper ${rel}`);
+  if (
+    relNorm === 'scripts/cred-channel.js' ||
+    relNorm.endsWith('/scripts/cred-channel.js') ||
+    relNorm === 'scripts/flow-inject.js' ||
+    relNorm.endsWith('/scripts/flow-inject.js')
+  ) {
+    console.log(`[obfuscate] SKIP in-memory/crypto helper ${rel}`);
     return;
   }
   const code = fs.readFileSync(full, 'utf8');

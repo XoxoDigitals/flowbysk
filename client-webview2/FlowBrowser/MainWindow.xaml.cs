@@ -257,8 +257,7 @@ public partial class MainWindow : Window
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
 
-        // Spoof Whale Browser UA + Client Hints (matches Whale/4.0.0.0 fingerprint)
-        ApplyWhaleUserAgent(core);
+        // Use native WebView2 Chromium/Edge UA + Client Hints so main frame and cross-origin subframes stay 100% consistent
         core.WebMessageReceived += Flow_WebMessageReceived;
 
         core.SetVirtualHostNameToFolderMapping(

@@ -1,190 +1,50 @@
-/* WebView2 bridge — replaces Electron ipcRenderer */
+/* WebView2 bridge — replaces Electron ipcRenderer (TOP FRAME ONLY — never touch subframes) */
 (function () {
-  if (typeof window.chrome === 'undefined' || !window.chrome.webview) {
-    console.warn('[Flow Inject] chrome.webview missing');
-  }
-  const handlers = Object.create(null);
-  function post(msg) {
-    try { window.chrome.webview.postMessage(JSON.stringify(msg)); } catch (e) {}
-  }
   try {
-    window.chrome.webview.addEventListener('message', (ev) => {
-      let msg = ev.data;
-      try { if (typeof msg === 'string') msg = JSON.parse(msg); } catch (e) { return; }
-      if (!msg || msg.type !== 'toGuest') return;
-      const fn = handlers[msg.channel];
-      if (typeof fn === 'function') {
-        try { fn(null, msg.data); } catch (e) { console.error(e); }
-      }
-    });
-  } catch (e) {}
-  window.ipcRenderer = {
-    sendToHost(channel, data) {
-      post({ type: 'toHost', channel: channel, data: data === undefined ? null : data });
-    },
-    on(channel, listener) {
-      handlers[channel] = listener;
-    },
-    send() {},
-    invoke() { return Promise.resolve(null); }
-  };
-})();
-const { ipcRenderer } = window;
-
-const __flowIsSubFrame = (() => {
-  try { return window !== window.top; } catch (e) { return true; }
-})();
-const __flowIsRecaptchaFrame = /recaptcha|challenge/i.test(location.href || '');
-
-if (
-  window.__flowInjectBootstrapped ||
-  location.hostname === 'app.flowbrowser.localhost' ||
-  location.hostname === 'flowbrowser.local' ||
-  (__flowIsSubFrame && !__flowIsRecaptchaFrame)
-) {
-  // Skip duplicate inject, built-in local studio pages (TTS STUDIO), or non-captcha background iframes
-} else {
+    if (window !== window.top) return;
+  } catch (e) {
+    return;
+  }
+  if (
+    window.__flowInjectBootstrapped ||
+    location.hostname === 'app.flowbrowser.localhost' ||
+    location.hostname === 'flowbrowser.local'
+  ) {
+    return;
+  }
   window.__flowInjectBootstrapped = true;
 
-// =========================================================================
-// CID PROTOCOL RANDOMIZER (fetch / XHR / sendBeacon / WebSocket / EventSource)
-// =========================================================================
-(function installCidRandomizer() {
-  if (window.__flowCidRandomizerInstalled) return;
-  window.__flowCidRandomizerInstalled = true;
-
-  const CID_QUERY_REGEX = /([?&]cid=)(\d+\.\d+)(?=(?:&|#|$))/gi;
-  const CID_BARE_REGEX = /^(\s*cid=)(\d+\.\d+)(\s*)$/i;
-
-  function randomDigit(nonZero) {
-    const min = nonZero ? 1 : 0;
-    const max = 9;
-    return String(Math.floor(Math.random() * (max - min + 1)) + min);
-  }
-
-  function randomDigits(length, nonZeroFirst) {
-    const safeLen = Math.max(1, Number(length) || 1);
-    let out = '';
-    for (let i = 0; i < safeLen; i += 1) {
-      out += randomDigit(Boolean(nonZeroFirst && i === 0));
+  (function () {
+    if (typeof window.chrome === 'undefined' || !window.chrome.webview) {
+      console.warn('[Flow Inject] chrome.webview missing');
     }
-    return out;
-  }
-
-  function generateCidLike(sampleCid) {
-    const raw = String(sampleCid || '').trim();
-    const parts = raw.split('.');
-    if (parts.length !== 2 || !parts[0] || !parts[1]) {
-      return `${randomDigits(9, true)}.${randomDigits(10, false)}`;
+    const handlers = Object.create(null);
+    function post(msg) {
+      try { window.chrome.webview.postMessage(JSON.stringify(msg)); } catch (e) {}
     }
-    const leftLen = Math.max(6, parts[0].replace(/\D/g, '').length || 9);
-    const rightLen = Math.max(6, parts[1].replace(/\D/g, '').length || 10);
-    return `${randomDigits(leftLen, true)}.${randomDigits(rightLen, false)}`;
-  }
-
-  function replaceNumericCidInUrlString(input) {
-    const raw = String(input ?? '');
-    if (!raw || !/cid=/i.test(raw)) return raw;
-    if (CID_BARE_REGEX.test(raw)) {
-      return raw.replace(CID_BARE_REGEX, (_, pfx, cid, sfx) => `${pfx}${generateCidLike(cid)}${sfx}`);
-    }
-    let next = raw.replace(CID_QUERY_REGEX, (_, pfx, cid) => `${pfx}${generateCidLike(cid)}`);
-    if (next !== raw) return next;
     try {
-      const base = (typeof location !== 'undefined' && location && location.href) ? location.href : 'https://labs.google/';
-      const parsed = new URL(raw, base);
-      let mutated = false;
-      for (const [k, v] of parsed.searchParams.entries()) {
-        if (String(k).toLowerCase() === 'cid' && /^\d+\.\d+$/.test(String(v || '').trim())) {
-          parsed.searchParams.set(k, generateCidLike(v));
-          mutated = true;
+      window.chrome.webview.addEventListener('message', (ev) => {
+        let msg = ev.data;
+        try { if (typeof msg === 'string') msg = JSON.parse(msg); } catch (e) { return; }
+        if (!msg || msg.type !== 'toGuest') return;
+        const fn = handlers[msg.channel];
+        if (typeof fn === 'function') {
+          try { fn(null, msg.data); } catch (e) { console.error(e); }
         }
-      }
-      if (!mutated) return raw;
-      if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(raw)) return parsed.toString();
-      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
-    } catch (e) {
-      return raw;
-    }
-  }
-
-  if (typeof window.fetch === 'function') {
-    const origFetch = window.fetch;
-    window.fetch = function (input, init) {
-      try {
-        if (typeof input === 'string') {
-          const next = replaceNumericCidInUrlString(input);
-          if (next !== input) input = next;
-        } else if (typeof URL !== 'undefined' && input instanceof URL) {
-          const cur = input.toString();
-          const next = replaceNumericCidInUrlString(cur);
-          if (next !== cur) input = new URL(next);
-        } else if (typeof Request !== 'undefined' && input instanceof Request) {
-          const cur = input.url;
-          const next = replaceNumericCidInUrlString(cur);
-          if (next !== cur) input = new Request(next, input);
-        }
-      } catch (e) {}
-      return Reflect.apply(origFetch, this, [input, init]);
+      });
+    } catch (e) {}
+    window.ipcRenderer = {
+      sendToHost(channel, data) {
+        post({ type: 'toHost', channel: channel, data: data === undefined ? null : data });
+      },
+      on(channel, listener) {
+        handlers[channel] = listener;
+      },
+      send() {},
+      invoke() { return Promise.resolve(null); }
     };
-  }
-
-  if (typeof window.XMLHttpRequest === 'function' && window.XMLHttpRequest.prototype) {
-    const origOpen = window.XMLHttpRequest.prototype.open;
-    if (typeof origOpen === 'function') {
-      window.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-        let nextUrl = url;
-        try {
-          if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
-          else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
-        } catch (e) {}
-        return Reflect.apply(origOpen, this, [method, nextUrl, ...rest]);
-      };
-    }
-  }
-
-  if (typeof Navigator !== 'undefined' && Navigator.prototype && typeof Navigator.prototype.sendBeacon === 'function') {
-    const origBeacon = Navigator.prototype.sendBeacon;
-    Navigator.prototype.sendBeacon = function (url, data) {
-      let nextUrl = url;
-      try {
-        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
-        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
-      } catch (e) {}
-      return Reflect.apply(origBeacon, this, [nextUrl, data]);
-    };
-  }
-
-  if (typeof window.WebSocket === 'function') {
-    const OrigWS = window.WebSocket;
-    const WrappedWS = function (url, protocols) {
-      let nextUrl = url;
-      try {
-        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
-        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
-      } catch (e) {}
-      return arguments.length > 1 ? new OrigWS(nextUrl, protocols) : new OrigWS(nextUrl);
-    };
-    WrappedWS.prototype = OrigWS.prototype;
-    Object.setPrototypeOf(WrappedWS, OrigWS);
-    window.WebSocket = WrappedWS;
-  }
-
-  if (typeof window.EventSource === 'function') {
-    const OrigES = window.EventSource;
-    const WrappedES = function (url, cfg) {
-      let nextUrl = url;
-      try {
-        if (typeof url === 'string') nextUrl = replaceNumericCidInUrlString(url);
-        else if (typeof URL !== 'undefined' && url instanceof URL) nextUrl = new URL(replaceNumericCidInUrlString(url.toString()));
-      } catch (e) {}
-      return arguments.length > 1 ? new OrigES(nextUrl, cfg) : new OrigES(nextUrl);
-    };
-    WrappedES.prototype = OrigES.prototype;
-    Object.setPrototypeOf(WrappedES, OrigES);
-    window.EventSource = WrappedES;
-  }
-})();
+  })();
+  const { ipcRenderer } = window;
 
 // =========================================================================
 // MASKING RULES & CREDENTIALS STATE
@@ -227,7 +87,10 @@ function recalcDisplayedBalance() {
   fakeBalance = Math.max(0, serverDatabaseCredits);
   try { localStorage.setItem('pakflow_db_credits', String(fakeBalance)); } catch (e) {}
   try {
-    const totalCreditsLink = document.querySelector("a[href*='flow_ai_credits_page']");
+    if (document.documentElement) {
+      document.documentElement.style.setProperty('--flow-fake-credits-str', JSON.stringify(String(fakeBalance) + ' Google Flow credits'));
+    }
+    const totalCreditsLink = document.querySelector("a[href*='flow_ai_credits_page'], flow-account-panel .credits-count");
     if (totalCreditsLink) {
       totalCreditsLink.setAttribute('data-fake-total-credits', String(fakeBalance));
     }
@@ -242,6 +105,7 @@ function loadFakeBalance() {
       fakeBalance = serverDatabaseCredits;
     }
   } catch (e) {}
+  recalcDisplayedBalance();
   try {
     ipcRenderer.sendToHost('request-credits');
   } catch (e) {}
@@ -293,6 +157,44 @@ function isImageOnlyAccount() {
   return !!credentials.imageOnly;
 }
 
+function syncFlowPromptBoxLocalStorage() {
+  try {
+    const h = (window.location.hostname || '').toLowerCase();
+    if (!h.includes('flow.google.com') && !h.includes('labs.google')) return;
+    let curPromptState = {};
+    try {
+      const existingRaw = localStorage.getItem('FLOW_MAIN_PROMPT_BOX_STATE');
+      if (existingRaw) curPromptState = JSON.parse(existingRaw) || {};
+    } catch (e) {
+      curPromptState = {};
+    }
+    curPromptState.aspectRatio = curPromptState.aspectRatio || 'LANDSCAPE';
+    curPromptState.selectedImageModelFamily = curPromptState.selectedImageModelFamily || 'narwhal_display';
+    curPromptState.selectedVideoModelFamily = 'veo_3_1_lite_low_priority';
+    if (isImageOnlyAccount()) {
+      curPromptState.imageOrVideoMode = 'IMAGE';
+    } else {
+      curPromptState.imageOrVideoMode = curPromptState.imageOrVideoMode || 'VIDEO';
+    }
+    curPromptState.outputsPerPrompt = 1;
+    localStorage.setItem('FLOW_MAIN_PROMPT_BOX_STATE', JSON.stringify(curPromptState));
+
+    const lsKeys = Object.keys(localStorage);
+    for (const key of lsKeys) {
+      if (key.includes('FLOW_') || key.includes('model') || key.includes('video') || key.includes('prompt')) {
+        try {
+          const val = localStorage.getItem(key);
+          if (val && val.includes('"abra"')) {
+            localStorage.setItem(key, val.replace(/"abra"/g, '"veo_3_1_lite_low_priority"'));
+          }
+        } catch (e) {}
+      }
+    }
+  } catch (e) {}
+}
+
+syncFlowPromptBoxLocalStorage();
+
 window.__flowSetImageOnlyMode = function (flag, serverId) {
   credentials.imageOnly = !!flag;
   if (serverId !== undefined && serverId !== null && String(serverId).trim() !== '') {
@@ -309,6 +211,7 @@ window.__flowSetImageOnlyMode = function (flag, serverId) {
   try {
     sessionStorage.setItem('__flow_image_only', credentials.imageOnly ? '1' : '0');
   } catch (e) {}
+  syncFlowPromptBoxLocalStorage();
   if (document.body) {
     if (credentials.imageOnly) {
       document.body.setAttribute('data-flow-image-only', 'true');
@@ -1088,6 +991,12 @@ function setupGenerateActionHook() {
       return (
         u.includes('batchgenerate') ||
         u.includes('batch_generate') ||
+        u.includes('batchasyncgeneratevideo') ||
+        u.includes('batchgenerateimages') ||
+        u.includes('upsamplevideo') ||
+        u.includes('yhhmef') ||
+        u.includes('eb1hjf') ||
+        u.includes('ogiz0b') ||
         u.includes('generatevideo') ||
         u.includes('generateimage') ||
         u.includes('checkoperations') ||
@@ -1106,8 +1015,16 @@ function setupGenerateActionHook() {
               if (!res.ok && res.status >= 400) {
                 failOldestRunningJob('Generation HTTP ' + res.status);
               } else if (res.ok && typeof res.clone === 'function') {
-                res.clone().json().then((data) => {
-                  inspectDataForGenerations(url, data);
+                res.clone().text().then((rawTxt) => {
+                  if (!rawTxt) return;
+                  if (rawTxt.includes('PUBLIC_ERROR_UNUSUAL_ACTIVITY') || rawTxt.includes('reCAPTCHA evaluation failed')) {
+                    failOldestRunningJob('API unusual activity / reCAPTCHA error');
+                    return;
+                  }
+                  try {
+                    const data = JSON.parse(rawTxt);
+                    inspectDataForGenerations(url, data);
+                  } catch (e) {}
                 }).catch(() => {});
               }
             }
@@ -1133,6 +1050,10 @@ function setupGenerateActionHook() {
             if (this.status >= 400) {
               failOldestRunningJob('Generation XHR HTTP ' + this.status);
             } else if (this.status >= 200 && this.status < 300 && this.responseText) {
+              if (this.responseText.includes('PUBLIC_ERROR_UNUSUAL_ACTIVITY') || this.responseText.includes('reCAPTCHA evaluation failed')) {
+                failOldestRunningJob('API unusual activity / reCAPTCHA error');
+                return;
+              }
               try {
                 const data = JSON.parse(this.responseText);
                 inspectDataForGenerations(this.__flowUrl, data);
@@ -1192,7 +1113,7 @@ function scanDomForFailedGenerations() {
   if (!hasRunningJob) return;
 
   // Match explicit generation failure messages in snackbars/alerts/tiles — never match "Privacy Policy" or account dialogs!
-  const explicitFailRegex = /\b(couldn'?t generate|could not generate|failed to generate|generation failed|unable to generate|error generating|can'?t generate|violates our|blocked by|something went wrong|try again later|prompt was blocked)\b/i;
+  const explicitFailRegex = /\b(couldn'?t generate|could not generate|failed to generate|generation failed|unable to generate|error generating|can'?t generate|violates our|blocked by|something went wrong|try again later|prompt was blocked|we noticed some unusual activity|unusual activity)\b/i;
   const candidates = document.querySelectorAll('[role="alert"], [role="status"], mat-snack-bar-container, .mat-mdc-snack-bar-label, .mdc-snackbar__label, flow-grid-tile-container');
   for (const el of candidates) {
     if (!el || el.id === 'flow-generation-toast' || el.closest('#flow-generation-toast')) continue;
@@ -1352,7 +1273,7 @@ let isLockedBySubmission = false;
 let waitStartTime = 0;
 let isGenerating = false;
 let lastDeductTime = 0;
-let setupState = 0;
+let setupState = 6;
 let isImageModeActive = false;
 let lastActionTime = 0;
 let setupStartTime = 0;
@@ -1375,9 +1296,12 @@ function queueDeduction() {
 // Spoof Google Account Email -> flowcreator@gmail.com and Name -> Flow Creator
 function spoofAccountIdentityInDom() {
   try {
+    if (document.documentElement) {
+      document.documentElement.style.setProperty('--flow-fake-credits-str', JSON.stringify(String(fakeBalance) + ' Google Flow credits'));
+    }
     const emailRegex = /[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}/g;
     // 1. Spoof aria-label / title on header profile buttons
-    document.querySelectorAll('header button, header a, .header-user-button, [aria-label*="@"]').forEach((el) => {
+    document.querySelectorAll('header button, header a, .header-user-button, flow-header-user-icon, [aria-label*="@"]').forEach((el) => {
       ['aria-label', 'title'].forEach((attr) => {
         const val = el.getAttribute(attr);
         if (val && emailRegex.test(val) && !val.includes('flowcreator@gmail.com')) {
@@ -1405,7 +1329,7 @@ function spoofAccountIdentityInDom() {
           }
         }
         // Also check parent container for single-letter avatar circle (e.g. "J")
-        const card = el.parentElement && el.parentElement.parentElement;
+        const card = el.closest('flow-account-panel, [aria-label="Account details"]') || (el.parentElement && el.parentElement.parentElement);
         if (card) {
           card.querySelectorAll('div, span').forEach((av) => {
             if (av.children.length === 0 && /^[A-Z]$/.test((av.textContent || '').trim())) {
@@ -1416,9 +1340,15 @@ function spoofAccountIdentityInDom() {
       }
     }
 
-    // 3. Mark Account details popup as spoofed once real email/name are replaced so it never flashes unspoofed identity
-    document.querySelectorAll('[aria-label="Account details"]:not(button):not(.header-user-button):not(.account-switcher-placeholder)').forEach((popup) => {
-      if (popup.querySelector('.header-user-button')) return;
+    // 3. Mark Account details popup / flow-account-panel as spoofed once real email/name are replaced (or CSS ::after is active)
+    document.querySelectorAll('flow-account-panel, [aria-label="Account details"]:not(button):not(.header-user-button):not(.account-switcher-placeholder)').forEach((popup) => {
+      if (popup.querySelector('.header-user-button, flow-header-user-icon')) return;
+      if (popup.tagName === 'FLOW-ACCOUNT-PANEL' || popup.querySelector('flow-account-panel')) {
+        if (popup.getAttribute('data-flow-spoofed') !== '1') {
+          popup.setAttribute('data-flow-spoofed', '1');
+        }
+        return;
+      }
       const rawTxt = popup.textContent || '';
       const emailsInPopup = rawTxt.match(emailRegex) || [];
       const hasUnspoofedEmail = emailsInPopup.some((em) => em.toLowerCase() !== 'flowcreator@gmail.com');
@@ -1436,6 +1366,7 @@ function ensureProfileIconVisible() {
   try {
     const targets = document.querySelectorAll(
       'header button, header a, header img, .header-user-button, .header-user-button *, ' +
+      'flow-header-user-icon, flow-header-user-icon *, ' +
       'flow-user-tier-chip, flow-user-tier-chip *, .tier-chip, [aria-label="ULTRA tier"], ' +
       '[aria-label*="Google Account" i], .account-switcher-placeholder, .account-switcher-placeholder *'
     );
@@ -1446,7 +1377,7 @@ function ensureProfileIconVisible() {
       if (el.getAttribute('aria-label') === 'Account details' && el.tagName !== 'BUTTON' && !el.classList.contains('header-user-button')) {
         return;
       }
-      if (el.closest('[aria-label="Account details"]:not(button):not(.header-user-button):not(.account-switcher-placeholder):not(:has(.header-user-button))')) {
+      if (el.closest('flow-account-panel, [aria-label="Account details"]:not(button):not(.header-user-button):not(.account-switcher-placeholder):not(:has(.header-user-button))')) {
         return;
       }
       if ((el.textContent || '').toLowerCase().includes('sign out')) return;
@@ -1494,7 +1425,7 @@ function ensureProfileIconVisible() {
     if (!target || !target.closest) return false;
     if (isTierChipTarget(target)) return false;
     const userBtn = target.closest(
-      '.header-user-button, .account-switcher-placeholder, header button[aria-label*="Google Account" i], header button[aria-label*="Account" i], header [aria-label*="Google Account" i], button[aria-label="Account details"]'
+      '.header-user-button, flow-header-user-icon, .account-switcher-placeholder, header button[aria-label*="Google Account" i], header button[aria-label*="Account" i], header [aria-label*="Google Account" i], button[aria-label="Account details"]'
     );
     if (!userBtn) return false;
     // Must be in the top header area (top 90px of viewport)
@@ -1517,7 +1448,7 @@ function ensureProfileIconVisible() {
       if (!t || !t.closest) return;
 
       // Clicking ULTRA chip itself should never open the account popup
-      if (isTierChipTarget(t) && t.closest('.header-user-button, header')) {
+      if (isTierChipTarget(t) && t.closest('.header-user-button, flow-header-user-icon, header')) {
         e.stopPropagation();
         e.preventDefault();
         setPopupAllowed(false);
@@ -1527,7 +1458,7 @@ function ensureProfileIconVisible() {
       // Clicking the profile avatar icon (J) in top-right header
       if (isProfileAvatarClick(t, e.clientX, e.clientY)) {
         const currentlyOpen = document.documentElement?.getAttribute('data-flow-profile-popup-open') === '1';
-        const popupEl = document.querySelector('[aria-label="Account details"]');
+        const popupEl = document.querySelector('flow-account-panel, [aria-label="Account details"]');
         const popupVisible = popupEl && popupEl.getBoundingClientRect().width > 10;
         if (currentlyOpen && popupVisible) {
           setPopupAllowed(false);
@@ -1538,7 +1469,7 @@ function ensureProfileIconVisible() {
       }
 
       // Clicking close button inside Account details popup
-      const inPopup = t.closest('[aria-label="Account details"]');
+      const inPopup = t.closest('flow-account-panel, [aria-label="Account details"]');
       if (inPopup) {
         const closeBtn = t.closest('button[aria-label*="Close" i], button[aria-label*="close" i], [role="button"][aria-label*="Close" i]');
         if (closeBtn) {
@@ -2054,10 +1985,10 @@ loadSavedProjectsFromDevice();
         "button[data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path),[role='combobox'][data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path){color:transparent!important}" +
         "button[data-fake-model]::after,[role='combobox'][data-fake-model]::after{content:attr(data-fake-model)!important;position:absolute!important;left:var(--fake-model-left,14px)!important;top:50%!important;transform:translateY(-50%)!important;color:#fff!important;font-family:'Google Sans Text','Google Sans',sans-serif!important;font-size:13px!important;font-weight:500!important;pointer-events:none!important;white-space:nowrap!important}" +
         "button[data-fake-model] i,button[data-fake-model] .google-symbols,button[data-fake-model] mat-icon,button[data-fake-model] svg,[role='combobox'][data-fake-model] i,[role='combobox'][data-fake-model] .google-symbols,[role='combobox'][data-fake-model] mat-icon,[role='combobox'][data-fake-model] svg{color:#fff!important;visibility:visible!important}" +
-        "[role='menuitem'][data-hide-lp='true'],[role='option'][data-hide-lp='true']{height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
-        "flow-menu-item:has([data-hide-lp='true']){height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
-        "[role='menuitem'][data-fake-active='true'],[role='option'][data-fake-active='true']{background-color:rgba(255,255,255,.12)!important;border-radius:12px!important}" +
-        "[role='menuitem'][data-fake-inactive='true'],[role='option'][data-fake-inactive='true']{background-color:transparent!important}" +
+        "flow-menu-item[data-hide-lp='true'],[role='menuitem'][data-hide-lp='true'],[role='option'][data-hide-lp='true']{display:none!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
+        "flow-menu-item:has([data-hide-lp='true']){display:none!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
+        "flow-menu-item[data-fake-active='true'] button,[role='menuitem'][data-fake-active='true'],[role='option'][data-fake-active='true']{background-color:rgba(255,255,255,.12)!important;border-radius:12px!important}" +
+        "flow-menu-item[data-fake-inactive='true'] button,[role='menuitem'][data-fake-inactive='true'],[role='option'][data-fake-inactive='true']{background-color:transparent!important}" +
         "[data-pakflow-autosetup-hide='true']{opacity:0!important;pointer-events:none!important;transition:none!important}" +
         "body[data-pakflow-boot-hide='true'] [role='dialog'],body[data-pakflow-boot-hide='true'] [data-radix-popper-content-wrapper],body[data-pakflow-boot-hide='true'] .cdk-overlay-pane,body[data-pakflow-boot-hide='true'] flow-prompt-box-settings,body[data-pakflow-boot-hide='true'] [role='menu'],body[data-pakflow-boot-hide='true'] [role='listbox']{opacity:0!important;pointer-events:none!important;transition:none!important}" +
         "a[data-fake-credits]{color:transparent!important;position:relative!important}" +
@@ -2073,18 +2004,25 @@ loadSavedProjectsFromDevice();
         "a[href*='flow_ai_credits_page']{font-size:0!important;color:transparent!important;pointer-events:none!important;}" +
         "a[href*='flow_ai_credits_page']>*{display:none!important;}" +
         "a[href*='flow_ai_credits_page']::after{content:attr(data-fake-total-credits) ' Google Flow credits'!important;font-size:16px!important;color:#fff!important;visibility:visible!important;text-decoration:underline!important;white-space:nowrap!important;}" +
+        "flow-account-panel .user-email{font-size:0!important;color:transparent!important;}" +
+        "flow-account-panel .user-email::after{content:'flowcreator@gmail.com'!important;font-size:12px!important;color:#c4c7c5!important;visibility:visible!important;}" +
+        "flow-account-panel .user-name{font-size:0!important;color:transparent!important;}" +
+        "flow-account-panel .user-name::after{content:'Flow Creator'!important;font-size:14px!important;font-weight:500!important;color:#e3e3e3!important;visibility:visible!important;}" +
+        "flow-account-panel .credits-count{font-size:0!important;color:transparent!important;pointer-events:none!important;text-decoration:none!important;}" +
+        "flow-account-panel .credits-count>*{display:none!important;}" +
+        "flow-account-panel .credits-count::after{content:var(--flow-fake-credits-str,'0 Google Flow credits')!important;font-size:16px!important;font-weight:500!important;color:#fff!important;visibility:visible!important;text-decoration:underline!important;white-space:nowrap!important;}" +
+        "flow-account-panel .switch-account-link,flow-account-panel .sign-out-button,a.switch-account-link{display:none!important;visibility:hidden!important;pointer-events:none!important;}" +
+        "flow-account-panel .upsell-link,a.upsell-link{pointer-events:none!important}" +
+        "flow-account-panel .upsell-link .mdc-button__label,a.upsell-link span.mdc-button__label{font-size:0!important}" +
+        "flow-account-panel .upsell-link .mdc-button__label::after,a.upsell-link span.mdc-button__label::after{content:'Google Ultra Plan 20x'!important;font-size:14px!important;color:#000!important}" +
         "#ct-blur-overlay { position: fixed !important; top: 0 !important; left: 0 !important; width: 100vw !important; height: 100vh !important; backdrop-filter: blur(10px) !important; background: rgba(0,0,0,0.6) !important; z-index: 2147483640 !important; pointer-events: auto !important; }" +
         "button[data-elevate-btn='true'],[data-elevate-btn='true'] { z-index: 2147483641 !important; box-shadow: 0 0 0 2px rgba(255,255,255,0.1), 0 0 30px rgba(255,255,255,0.3) !important; }" +
-        "a.switch-account-link{display:none!important}" +
-        "a.upsell-link{pointer-events:none!important}" +
-        "a.upsell-link span.mdc-button__label{font-size:0!important}" +
-        "a.upsell-link span.mdc-button__label::after{content:'Google Ultra Plan 20x'!important;font-size:14px!important;color:#000!important}" +
         "flow-credit-banner,.credit-banner{display:none!important}" +
         ".mavatar-footer-row,.mavatar-footer-row.collapsed,mavatar-footer-row,expandable-section[storagekey='chats'],[data-test-id='chats-expandable-section'],#sidenav-section-content-chats,#sidenav-section-content-chats .chat-history,#sidenav-section-content-chats .chat-history-list,conversations-list[data-test-id='all-conversations'],[data-test-id='all-conversations'],gem-nav-list-item[data-test-id='conversation']{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;}" +
         "model-response a,model-response a[href],message-content a,message-content a[href],user-query a,user-query a[href],.response-container a,.query-content a,.user-query-container a,.markdown a,chat-window a,source-footnote,inline-source-citation,sources-carousel,sources-carousel-inline,fact-check-evaluator,[data-test-id*='source'],button[aria-label*='source' i],button[aria-label*='Google Help' i]{pointer-events:none!important;cursor:text!important;text-decoration:none!important;}" +
-        "header button,header a,header img,.header-user-button,.header-user-button *,flow-user-tier-chip,.tier-chip,[aria-label='ULTRA tier'],[aria-label*='Google Account' i],.account-switcher-placeholder{visibility:visible!important;opacity:1!important;pointer-events:auto!important}" +
+        "header button,header a,header img,.header-user-button,.header-user-button *,flow-header-user-icon,flow-header-user-icon *,flow-user-tier-chip,.tier-chip,[aria-label='ULTRA tier'],[aria-label*='Google Account' i],.account-switcher-placeholder{visibility:visible!important;opacity:1!important;pointer-events:auto!important}" +
         "html:not([data-flow-profile-popup-open='1']) [aria-label='Account details']:not(button):not(.header-user-button):not(.account-switcher-placeholder):not(:has(.header-user-button)){display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}" +
-        "[aria-label='Account details']:not(button):not(.header-user-button):not(.account-switcher-placeholder):not(:has(.header-user-button)):not([data-flow-spoofed='1']){visibility:hidden!important;opacity:0!important;pointer-events:none!important;}" +
+        "[aria-label='Account details']:not(button):not(.header-user-button):not(.account-switcher-placeholder):not(:has(.header-user-button)):not(:has(flow-account-panel)):not([data-flow-spoofed='1']){visibility:hidden!important;opacity:0!important;pointer-events:none!important;}" +
         "#flow-my-projects-dock{position:fixed!important;bottom:18px!important;right:22px!important;left:auto!important;z-index:2147483645!important;display:flex!important;align-items:center!important;gap:10px!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
         "#flow-my-projects-btn,#flow-save-current-project-btn{display:inline-flex!important;align-items:center!important;gap:8px!important;background:rgba(22,19,36,0.94)!important;border:1px solid rgba(139,92,246,0.45)!important;color:#f3f4f6!important;padding:8px 16px!important;border-radius:999px!important;font-size:13px!important;font-weight:600!important;cursor:pointer!important;box-shadow:0 8px 24px rgba(0,0,0,0.6)!important;transition:all .18s ease!important;}" +
         "#flow-my-projects-btn:hover,#flow-save-current-project-btn:hover{background:rgba(38,31,64,0.98)!important;border-color:rgba(167,139,250,0.8)!important;transform:translateY(-1px)!important;}" +
@@ -2190,7 +2128,10 @@ loadSavedProjectsFromDevice();
   }
 
   function findBestBackendModelItem(allMenuItems) {
-    const items = Array.from(allMenuItems || document.querySelectorAll('[role="menuitem"], [role="option"]'));
+    const items = Array.from(
+      allMenuItems ||
+      document.querySelectorAll('.cdk-overlay-container flow-menu-item, .cdk-overlay-container [role="menuitem"], flow-menu-item, [role="menuitem"], [role="option"]')
+    );
     const lpTarget =
       items.find((mi) => {
         const t = cleanText(mi.textContent);
@@ -2206,13 +2147,23 @@ loadSavedProjectsFromDevice();
     // Fallback when account has no [Lower Priority] option: use Veo 3.1 - Lite
     const liteTarget = items.find((mi) => {
       const t = cleanText(mi.textContent);
-      return t.includes('Veo') && t.includes('Lite');
+      return t.includes('Veo') && t.includes('Lite') && !t.includes('Lower Priority');
     });
     if (liteTarget) return { target: liteTarget, isLp: false };
     return { target: null, isLp: false };
   }
 
   function findModelDropdownButton() {
+    const settingsBtns = Array.from(document.querySelectorAll('flow-prompt-box-settings button, flow-prompt-box-settings [role="combobox"]'));
+    const inSettings = settingsBtns.find((b) => {
+      const txt = (b.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!txt || txt.length > 80) return false;
+      const cleanLbl = getButtonCleanLabel(b).toLowerCase();
+      if (/^(image|video|videos|frames|ingredients|4s|6s|8s|10s|x[1-4]|[1-4]x|16:9|9:16|1:1|4:3|3:4|360p|720p|1080p)$/i.test(cleanLbl)) return false;
+      return /Veo|Omni|Lower Priority|Fast|Quality|Lite|Abra/i.test(txt) || b.getAttribute('aria-haspopup') === 'menu';
+    });
+    if (inSettings) return inSettings;
+
     const allBtns = Array.from(document.querySelectorAll('button, [role="combobox"]'));
     return (
       allBtns.find((b) => {
@@ -2220,6 +2171,7 @@ loadSavedProjectsFromDevice();
         const txt = (b.textContent || '').replace(/\s+/g, ' ').trim();
         if (!txt || txt.length > 70) return false;
         if (txt.includes('Extend (') || txt.includes('pen_magic')) return false;
+        if (/\b(Video|Image)\b/i.test(txt) && (/(4s|6s|8s|10s|x[1-4]|16:9|9:16)/i.test(txt) || txt.includes('·'))) return false;
         return txt.includes('Veo') || txt.includes('Omni') || txt.includes('Lower Priority');
       }) || null
     );
@@ -2275,14 +2227,14 @@ loadSavedProjectsFromDevice();
 
   function closeOpenModelDropdownMenu() {
     setTimeout(() => {
-      const openMenu = document.querySelector('[role="menu"], [role="listbox"]');
+      const openMenu = document.querySelector('.cdk-overlay-container [role="menu"], [role="menu"], [role="listbox"]');
       if (!openMenu) return;
       const escInit = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true };
       try { openMenu.dispatchEvent(new KeyboardEvent('keydown', escInit)); } catch (e) {}
       try { document.dispatchEvent(new KeyboardEvent('keydown', escInit)); } catch (e) {}
       try { document.dispatchEvent(new KeyboardEvent('keyup', escInit)); } catch (e) {}
       setTimeout(() => {
-        const stillOpen = document.querySelector('[role="menu"], [role="listbox"]');
+        const stillOpen = document.querySelector('.cdk-overlay-container [role="menu"], [role="menu"], [role="listbox"]');
         if (stillOpen) {
           const expandedTrigger = document.querySelector('button[aria-expanded="true"], [role="combobox"][aria-expanded="true"]');
           if (expandedTrigger) {
@@ -2296,14 +2248,20 @@ loadSavedProjectsFromDevice();
   function triggerLowerPrioritySelection(allMenuItems) {
     const { target } = findBestBackendModelItem(allMenuItems);
     if (target) {
+      const clickEl = (target.querySelector && target.querySelector('button')) || target;
       const wasHidden = target.getAttribute('data-hide-lp') === 'true';
       if (wasHidden) target.removeAttribute('data-hide-lp');
       target.__pakflowInternalClick = true;
-      simulateClick(target);
-      try { target.click(); } catch (err) {}
+      clickEl.__pakflowInternalClick = true;
+      try { clickEl.click(); } catch (err) {
+        simulateClick(clickEl);
+      }
       if (wasHidden) target.setAttribute('data-hide-lp', 'true');
       setTimeout(() => {
-        try { delete target.__pakflowInternalClick; } catch (err) {}
+        try {
+          delete target.__pakflowInternalClick;
+          delete clickEl.__pakflowInternalClick;
+        } catch (err) {}
       }, 250);
       closeOpenModelDropdownMenu();
       return true;
@@ -2318,14 +2276,14 @@ loadSavedProjectsFromDevice();
     const target = e.target;
     if (!target || !target.closest) return;
 
-    const menuItem = target.closest('[role="menuitem"], [role="option"]');
-    if (!menuItem || menuItem.__pakflowInternalClick) return;
+    const menuItem = target.closest('flow-menu-item, [role="menuitem"], [role="option"]');
+    if (!menuItem || menuItem.__pakflowInternalClick || target.__pakflowInternalClick) return;
     const itemText = cleanText(menuItem.textContent);
 
     // 4K Upscaled interception -> click 1080p and deduct 50 credits
     if (itemText.includes('4K') && itemText.includes('Upscaled')) {
       let has1080p = false;
-      const allMenuItems = document.querySelectorAll('[role="menuitem"]');
+      const allMenuItems = document.querySelectorAll('flow-menu-item, [role="menuitem"]');
       for (const mi of allMenuItems) {
         if ((mi.textContent || '').includes('1080p')) {
           has1080p = true;
@@ -2338,7 +2296,8 @@ loadSavedProjectsFromDevice();
         e.stopImmediatePropagation();
         for (const mi of allMenuItems) {
           if ((mi.textContent || '').includes('1080p')) {
-            simulateClick(mi);
+            const clickEl = (mi.querySelector && mi.querySelector('button')) || mi;
+            try { clickEl.click(); } catch (err) { simulateClick(clickEl); }
             break;
           }
         }
@@ -2358,9 +2317,9 @@ loadSavedProjectsFromDevice();
           try { sessionStorage.setItem('__pakflow_fake_model', fakeModelName); } catch (err) {}
           applyFakeModelToDomNow();
         }
-        const allMenuItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
+        const allMenuItems = document.querySelectorAll('.cdk-overlay-container flow-menu-item, .cdk-overlay-container [role="menuitem"], flow-menu-item, [role="menuitem"], [role="option"]');
         const best = findBestBackendModelItem(allMenuItems);
-        if (!best.target || best.target === menuItem) {
+        if (!best.target || best.target === menuItem || best.target.contains(menuItem) || menuItem.contains(best.target)) {
           // Allow native click on Veo 3.1 - Lite to select it & close the dropdown naturally
           closeOpenModelDropdownMenu();
           return;
@@ -2626,7 +2585,8 @@ loadSavedProjectsFromDevice();
 
     if (window.location.pathname !== lastPakflowPathname) {
       lastPakflowPathname = window.location.pathname;
-      setupState = 0;
+      syncFlowPromptBoxLocalStorage();
+      setupState = 6;
       setupStartTime = 0;
       if (!initPakflowDomEngine._userExplicitlyPickedModel) {
         fakeModelName = 'Veo 3.1 - Lite';
@@ -2666,8 +2626,8 @@ loadSavedProjectsFromDevice();
       });
     }
 
-    // Hide video quality selector (360p / 720p / 1080p) inside settings popover and strip quality text from the prompt bar pill
-    document.querySelectorAll('button').forEach((btn) => {
+    // Hide video quality selector (360p / 720p / 1080p) inside settings popover
+    document.querySelectorAll('flow-prompt-box-settings button, button').forEach((btn) => {
       const bt = (btn.textContent || '').trim();
       const lower = bt.toLowerCase();
       if (lower === '360p' || lower === '720p' || lower === '1080p') {
@@ -2676,18 +2636,6 @@ loadSavedProjectsFromDevice();
           group.style.setProperty('display', 'none', 'important');
         } else {
           btn.style.setProperty('display', 'none', 'important');
-        }
-      }
-      if (bt.includes('Video') && /(360p|720p|1080p)/i.test(bt)) {
-        const walker = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT);
-        let tn;
-        while ((tn = walker.nextNode())) {
-          if (/(360p|720p|1080p)/i.test(tn.nodeValue || '')) {
-            tn.nodeValue = tn.nodeValue
-              .replace(/\s*·\s*(360p|720p|1080p)/gi, '')
-              .replace(/(360p|720p|1080p)\s*·\s*/gi, '')
-              .replace(/\b(360p|720p|1080p)\b/gi, '');
-          }
         }
       }
     });
@@ -2745,7 +2693,8 @@ loadSavedProjectsFromDevice();
             btn.getAttribute('aria-pressed') === 'true' ||
             btn.getAttribute('data-state') === 'active' ||
             btn.classList.contains('active') ||
-            btn.classList.contains('selected')
+            btn.classList.contains('selected') ||
+            btn.classList.contains('mat-button-toggle-checked')
           );
         })
       );
@@ -2886,7 +2835,7 @@ loadSavedProjectsFromDevice();
         if (el.childNodes.length === 1 && el.childNodes[0].nodeType === 3) {
           const txt = el.textContent || '';
           if (txt.includes('Veo 3.1') || txt.includes('Omni') || txt.includes('[Lower Priority]')) {
-            if (!el.closest('button') && !el.closest('[role="menuitem"]') && !el.closest('[role="menu"]')) {
+            if (!el.closest('button') && !el.closest('flow-menu-item') && !el.closest('[role="menuitem"]') && !el.closest('[role="menu"]')) {
               el.style.setProperty('display', 'none', 'important');
             }
           }
@@ -2908,7 +2857,23 @@ loadSavedProjectsFromDevice();
 
     isLockedBySubmission = false;
 
-    // Hide sign-out buttons & x2/x3/x4 batch multiplier tabs, and auto-select x1 when popover is open
+    const isToggleBtnActive = (b) => {
+      if (!b) return false;
+      const toggleParent = b.closest ? b.closest('mat-button-toggle, .mat-button-toggle') : null;
+      return (
+        b.getAttribute('aria-selected') === 'true' ||
+        b.getAttribute('aria-pressed') === 'true' ||
+        b.getAttribute('aria-checked') === 'true' ||
+        b.getAttribute('data-state') === 'active' ||
+        b.getAttribute('data-state') === 'on' ||
+        b.classList.contains('active') ||
+        b.classList.contains('selected') ||
+        b.classList.contains('mat-button-toggle-checked') ||
+        !!(toggleParent && (toggleParent.classList.contains('mat-button-toggle-checked') || toggleParent.getAttribute('aria-checked') === 'true'))
+      );
+    };
+
+    // Hide sign-out buttons & x2/x3/x4 batch multiplier tabs, and auto-select x1 ONLY if non-x1 is actually active
     const allButtons = document.querySelectorAll('button, [role="tab"], [role="radio"]');
     let x1Btn = null;
     let nonX1Selected = false;
@@ -2927,15 +2892,7 @@ loadSavedProjectsFromDevice();
         if (b.getAttribute('data-hide-tab') !== 'true') {
           b.setAttribute('data-hide-tab', 'true');
         }
-        if (
-          b.getAttribute('aria-selected') === 'true' ||
-          b.getAttribute('aria-pressed') === 'true' ||
-          b.getAttribute('aria-checked') === 'true' ||
-          b.getAttribute('data-state') === 'active' ||
-          b.getAttribute('data-state') === 'on' ||
-          b.classList.contains('active') ||
-          b.classList.contains('selected')
-        ) {
+        if (isToggleBtnActive(b)) {
           nonX1Selected = true;
         }
       }
@@ -2946,28 +2903,18 @@ loadSavedProjectsFromDevice();
       return /\b(Video|Image)\b/i.test(txt) && (/(4s|6s|8s|10s|x[1-4]|16:9|9:16)/i.test(txt) || txt.includes('·'));
     });
     const pillShowsNonX1 = !!(promptPillBtn && /\bx[2-4]\b/i.test(promptPillBtn.textContent || ''));
+    const anyMenuOpen = !!document.querySelector('.cdk-overlay-container [role="menu"], [role="menu"], [role="listbox"]');
 
-    // If x1 button is in the DOM (settings popover open) and x1 is not active (or pill shows x2/x3/x4), click x1 immediately!
-    if (x1Btn) {
-      const x1ExplicitlyActive =
-        !nonX1Selected &&
-        !pillShowsNonX1 &&
-        (x1Btn.getAttribute('aria-selected') === 'true' ||
-          x1Btn.getAttribute('aria-pressed') === 'true' ||
-          x1Btn.getAttribute('aria-checked') === 'true' ||
-          x1Btn.getAttribute('data-state') === 'active' ||
-          x1Btn.getAttribute('data-state') === 'on' ||
-          x1Btn.classList.contains('active') ||
-          x1Btn.classList.contains('selected'));
-      if (!x1ExplicitlyActive && now - (initPakflowDomEngine._lastX1ClickAt || 0) > 450) {
+    // Only click x1Btn if x2/x3/x4 is actually selected (never click-spam when x1 is already active or when a dropdown menu is open!)
+    if (x1Btn && (nonX1Selected || pillShowsNonX1) && !anyMenuOpen) {
+      if (now - (initPakflowDomEngine._lastX1ClickAt || 0) > 800) {
         initPakflowDomEngine._lastX1ClickAt = now;
-        simulateClick(x1Btn);
-        try { x1Btn.click(); } catch (e) {}
+        try { x1Btn.click(); } catch (e) { simulateClick(x1Btn); }
       }
     }
 
-    // Update total credits link (a[href*='flow_ai_credits_page']) with database credits
-    const totalCreditsLink = document.querySelector("a[href*='flow_ai_credits_page']");
+    // Update total credits link (a[href*='flow_ai_credits_page'] / flow-account-panel .credits-count) with database credits
+    const totalCreditsLink = document.querySelector("a[href*='flow_ai_credits_page'], flow-account-panel .credits-count");
     if (totalCreditsLink) {
       const balStr = fakeBalance.toString();
       if (totalCreditsLink.getAttribute('data-fake-total-credits') !== balStr) {
@@ -3020,16 +2967,10 @@ loadSavedProjectsFromDevice();
       const allModeBtns = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]'));
       const imgTabBtn = allModeBtns.find((b) => getButtonCleanLabel(b).toLowerCase() === 'image');
       if (imgTabBtn) {
-        const imgSelected =
-          imgTabBtn.getAttribute('aria-selected') === 'true' ||
-          imgTabBtn.getAttribute('aria-pressed') === 'true' ||
-          imgTabBtn.getAttribute('data-state') === 'active' ||
-          imgTabBtn.classList.contains('active') ||
-          imgTabBtn.classList.contains('selected');
+        const imgSelected = isToggleBtnActive(imgTabBtn);
         if (!imgSelected && now - (initPakflowDomEngine._lastImgTabClick || 0) > 500) {
           initPakflowDomEngine._lastImgTabClick = now;
-          simulateClick(imgTabBtn);
-          try { imgTabBtn.click(); } catch (e) {}
+          try { imgTabBtn.click(); } catch (e) { simulateClick(imgTabBtn); }
         }
         if (initPakflowDomEngine._autoOpenedForImageSwitch && (imgSelected || now - (initPakflowDomEngine._lastImageSwitchAttempt || 0) > 250)) {
           initPakflowDomEngine._autoOpenedForImageSwitch = false;
@@ -3049,8 +2990,7 @@ loadSavedProjectsFromDevice();
           initPakflowDomEngine._lastImageSwitchAttempt = now;
           initPakflowDomEngine._autoOpenedForImageSwitch = true;
           if (document.body) document.body.setAttribute('data-pakflow-boot-hide', 'true');
-          simulateClick(promptPillBtn);
-          try { promptPillBtn.click(); } catch (e) {}
+          try { promptPillBtn.click(); } catch (e) { simulateClick(promptPillBtn); }
         }
       }
 
@@ -3069,12 +3009,7 @@ loadSavedProjectsFromDevice();
 
     // Detect Image Mode vs Video Mode on normal (Video + Image) accounts
     const imgTabSelected = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]')).find(
-      (b) =>
-        (b.getAttribute('aria-selected') === 'true' ||
-          b.getAttribute('aria-pressed') === 'true' ||
-          b.getAttribute('data-state') === 'active' ||
-          b.classList.contains('active')) &&
-        getButtonCleanLabel(b).toLowerCase() === 'image'
+      (b) => isToggleBtnActive(b) && getButtonCleanLabel(b).toLowerCase() === 'image'
     );
     const nanoMenuTrigger = Array.from(document.querySelectorAll('button, [role="combobox"]')).find(
       (b) => b.textContent && b.textContent.length < 70 && b.textContent.includes('Nano')
@@ -3110,70 +3045,25 @@ loadSavedProjectsFromDevice();
       fakeModelName = 'Veo 3.1 - Lite';
     }
 
-    // If the bottom pill shows x2/x3/x4 after setup finished, trigger a quick silent setup pass to switch to x1 + [Lower Priority]
-    if (pillShowsNonX1 && setupState >= 6 && now - (initPakflowDomEngine._lastSetupCompletedAt || 0) > 2500) {
-      setupState = 0;
-      setupStartTime = 0;
-    }
-
-    // Automatic silent project setup: open settings popover -> click x1 -> open model dropdown -> select [Lower Priority] -> close popover
-    if (setupState < 6 && promptPillBtn) {
-      if (!setupStartTime) setupStartTime = now;
-      if (now - setupStartTime > 1200) {
-        setupState = 6;
-        initPakflowDomEngine._lastSetupCompletedAt = now;
-        if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
-        closeOpenModelDropdownMenu();
-      } else if (setupState === 0) {
-        if (document.body) document.body.setAttribute('data-pakflow-boot-hide', 'true');
-        if (!modelMenuBtn) {
-          simulateClick(promptPillBtn);
-          try { promptPillBtn.click(); } catch (e) {}
-        }
-        setupState = 1;
-        lastActionTime = now;
-      } else if (setupState === 1 && now - lastActionTime >= 60) {
-        if (x1Btn) {
-          simulateClick(x1Btn);
-          try { x1Btn.click(); } catch (e) {}
-        }
-        modelMenuBtn = findModelDropdownButton();
-        if (modelMenuBtn) {
-          if ((modelMenuBtn.textContent || '').includes('Lower Priority')) {
-            setupState = 3;
-            lastActionTime = now;
-          } else {
-            simulateClick(modelMenuBtn);
-            try { modelMenuBtn.click(); } catch (e) {}
-            setupState = 2;
-            lastActionTime = now;
-          }
-        } else if (now - setupStartTime > 500) {
-          setupState = 3;
-          lastActionTime = now;
-        }
-      } else if (setupState === 2 && now - lastActionTime >= 60) {
-        const menuItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
-        if (menuItems.length > 0) {
-          triggerLowerPrioritySelection(menuItems);
-          setupState = 3;
-          lastActionTime = now;
-        } else if (now - lastActionTime > 350) {
-          setupState = 3;
-          lastActionTime = now;
-        }
-      } else if (setupState === 3 && now - lastActionTime >= 60) {
-        if (findModelDropdownButton() && promptPillBtn) {
-          simulateClick(promptPillBtn);
-          try { promptPillBtn.click(); } catch (e) {}
-        }
-        if (document.body) document.body.removeAttribute('data-pakflow-boot-hide');
-        setupState = 6;
-        initPakflowDomEngine._lastSetupCompletedAt = now;
+    // Passive settings-popover model sync: if the user opens <flow-prompt-box-settings> and the backend model button still says Omni/Abra (not Lower Priority), silently switch it once
+    const settingsPanelEl = document.querySelector('flow-prompt-box-settings');
+    if (settingsPanelEl && modelMenuBtn && !anyMenuOpen && !settingsPanelEl.__pakflowModelSynced) {
+      settingsPanelEl.__pakflowModelSynced = true;
+      const rawModelBtnTxt = (modelMenuBtn.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!/Lower Priority/i.test(rawModelBtnTxt) && /Omni|Abra/i.test(rawModelBtnTxt)) {
+        try {
+          modelMenuBtn.click();
+          setTimeout(() => {
+            const menuItems = document.querySelectorAll('.cdk-overlay-container flow-menu-item, .cdk-overlay-container [role="menuitem"], flow-menu-item, [role="menuitem"], [role="option"]');
+            if (menuItems.length > 0) {
+              triggerLowerPrioritySelection(menuItems);
+            }
+          }, 80);
+        } catch (e) {}
       }
     }
 
-    // Spoof modelMenuBtn with fakeModelName, hide [Lower Priority] menu items, and spoof credits line
+    // Spoof modelMenuBtn with fakeModelName, hide [Lower Priority] & Omni 1.2 menu items, and spoof credits line
     if (modelMenuBtn) {
       try {
         const btnRect = modelMenuBtn.getBoundingClientRect();
@@ -3186,7 +3076,7 @@ loadSavedProjectsFromDevice();
       }
     }
 
-    document.querySelectorAll('[role="menuitem"], [role="option"]').forEach((mi) => {
+    document.querySelectorAll('flow-menu-item, [role="menuitem"], [role="option"]').forEach((mi) => {
       const txt = cleanText(mi.textContent);
       if (txt.includes('Lower Priority') || isHiddenNewModelText(txt)) {
         mi.setAttribute('data-hide-lp', 'true');
@@ -4664,58 +4554,15 @@ function hideExistingProjects() {
     const host = (location.hostname || '').toLowerCase();
     if (!host.includes('flow.google.com') && !host.includes('labs.google')) return;
   } catch (e) {}
-  if (/\/project\//i.test(window.location.pathname || '')) {
-    ensureNewProjectClickable();
-    return;
-  }
-
   ensureNewProjectClickable();
-  const dateRe = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s*[-–]\s*\d{1,2}:\d{2}/i;
-
-  document.querySelectorAll(
-    'flow-project-card, [data-testid*="project"], [data-testid*="recents"], a[href*="/project/"], [class*="project-card"], [class*="ProjectCard"], [class*="project-tile"], [role="listitem"]'
-  ).forEach((card) => {
+  document.querySelectorAll('.projects-grid, flow-project-card').forEach((card) => {
     const t = (card.innerText || card.textContent || '').replace(/\s+/g, ' ').trim();
-    if (/new project/i.test(t) || card.querySelector('[data-flow-new-project="1"]')) {
+    if (/new project|create tool/i.test(t) || card.querySelector('[data-flow-new-project="1"]')) {
       ensureClickableTree(card);
       return;
     }
     hideEl(card);
-    card.querySelectorAll('a, button, [role="button"]').forEach((b) => hideEl(b));
   });
-
-  document.querySelectorAll('a, article, li, div, section').forEach((el) => {
-    if (el.getAttribute('data-flow-hidden') === '1') return;
-    if (el.getAttribute('data-flow-new-project') === '1') return;
-    if (el.querySelector && el.querySelector('[data-flow-new-project="1"]')) return;
-    const slice = (el.innerText || '').slice(0, 100);
-    if (/new project/i.test(slice)) {
-      ensureClickableTree(el);
-      return;
-    }
-    if (el.childElementCount > 25) return;
-    const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
-    if (!dateRe.test(t)) return;
-    if (el.closest('header, nav, textarea, [contenteditable="true"], flow-prompt, [class*="prompt"]')) return;
-    const r = el.getBoundingClientRect();
-    if (r.width < 100 || r.height < 80 || r.width > 700 || r.height > 700) return;
-    hideEl(el);
-    el.querySelectorAll('a, button, [role="button"]').forEach((b) => hideEl(b));
-  });
-
-  document.querySelectorAll('img, video, canvas').forEach((media) => {
-    if (media.closest('[data-flow-new-project="1"]')) return;
-    if (media.closest('header, nav, flow-prompt, [class*="prompt"]')) return;
-    const card = media.closest('a, article, li, [role="listitem"], div');
-    if (!card || card.getAttribute('data-flow-hidden') === '1') return;
-    const t = (card.innerText || '').replace(/\s+/g, ' ');
-    if (/new project/i.test(t)) return;
-    const r = card.getBoundingClientRect();
-    if (r.width < 120 || r.height < 100 || r.width > 600) return;
-    if (dateRe.test(t) || r.height > 140) hideEl(card);
-  });
-
-  ensureNewProjectClickable();
 }
 
 function maskFlowWorkspace() {
@@ -5204,5 +5051,5 @@ window.addEventListener('click', (e) => {
   }
 }, true);
 
-} // end __flowInjectBootstrapped
+})(); // end __flowInjectBootstrapped
 
