@@ -257,6 +257,8 @@ public partial class MainWindow : Window
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
 
+        // Spoof Whale Browser UA + Client Hints (matches Whale/4.0.0.0 fingerprint)
+        ApplyWhaleUserAgent(core);
         core.WebMessageReceived += Flow_WebMessageReceived;
 
         core.SetVirtualHostNameToFolderMapping(
