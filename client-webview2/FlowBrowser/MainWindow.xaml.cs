@@ -119,6 +119,7 @@ public partial class MainWindow : Window
         Closing += (_, _) =>
         {
             CloseWorkflowWindow();
+            CloseVpnPopupWindow();
             // Keep durable WebView profiles (Google cookies). Only wipe extracted www temp.
             WwwExtractor.WipeTempWww();
         };
@@ -161,7 +162,10 @@ public partial class MainWindow : Window
             const string bgFlags = "--disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding";
             const string chromeUaArg = "--user-agent=\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\"";
             var shellOpts = new CoreWebView2EnvironmentOptions(additionalBrowserArguments: bgFlags);
-            var flowOpts = new CoreWebView2EnvironmentOptions(additionalBrowserArguments: chromeUaArg);
+            var flowOpts = new CoreWebView2EnvironmentOptions(additionalBrowserArguments: chromeUaArg)
+            {
+                AreBrowserExtensionsEnabled = true
+            };
             var shellEnvTask = CoreWebView2Environment.CreateAsync(
                 browserExecutableFolder: null,
                 userDataFolder: _shellUserData,
@@ -174,6 +178,7 @@ public partial class MainWindow : Window
             var shellEnv = await shellEnvTask;
             var flowEnv = await flowEnvTask;
             _shellEnv = shellEnv;
+            _flowEnv = flowEnv;
 
             await Task.WhenAll(
                 ShellView.EnsureCoreWebView2Async(shellEnv),
@@ -184,6 +189,7 @@ public partial class MainWindow : Window
             SetShellMode("full");
 
             await ConfigureFlowAsync();
+            await EnsureUrbanVpnExtensionLoadedAsync();
             _flowReady = true;
 
             // Navigate ShellView once FlowView and its injection scripts are 100% ready
@@ -2064,14 +2070,10 @@ public partial class MainWindow : Window
         {
             if (FlowView.CoreWebView2 == null) return;
             if (x <= 0 || y <= 0) return;
-            await VeoSmoothMouseMoveAsync(x, y);
-            await Task.Delay(_veoRng.Next(25, 65));
-            int rx = (int)Math.Round(x);
-            int ry = (int)Math.Round(y);
-            var pressed = $"{{\"type\":\"mousePressed\",\"x\":{rx},\"y\":{ry},\"button\":\"left\",\"buttons\":1,\"clickCount\":1,\"modifiers\":0}}";
-            var released = $"{{\"type\":\"mouseReleased\",\"x\":{rx},\"y\":{ry},\"button\":\"left\",\"buttons\":0,\"clickCount\":1,\"modifiers\":0}}";
+            var pressed = $"{{\"type\":\"mousePressed\",\"x\":{(int)Math.Round(x)},\"y\":{(int)Math.Round(y)},\"button\":\"left\",\"clickCount\":1}}";
+            var released = $"{{\"type\":\"mouseReleased\",\"x\":{(int)Math.Round(x)},\"y\":{(int)Math.Round(y)},\"button\":\"left\",\"clickCount\":1}}";
             await FlowView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", pressed);
-            await Task.Delay(_veoRng.Next(40, 85));
+            await Task.Delay(40);
             await FlowView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", released);
             Debug.WriteLine($"[CdpClick] {x},{y}");
         }
@@ -2223,6 +2225,11 @@ public partial class MainWindow : Window
             case "toggleBulkPanel":
             {
                 ToggleBulkPanel();
+                break;
+            }
+            case "toggleVpnPopup":
+            {
+                ToggleVpnPopup();
                 break;
             }
             case "authOverlay":

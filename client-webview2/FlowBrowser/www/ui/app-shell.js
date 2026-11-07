@@ -221,6 +221,7 @@ class FlowBrowserApp {
     this.btnCloseExtension = document.getElementById('btn-close-extension');
     this.extensionWebview = document.getElementById('extension-webview');
     this.btnToggleVeoAuto = document.getElementById('btn-toggle-veo-auto');
+    this.btnToggleVpn = document.getElementById('btn-toggle-vpn');
     this.btnOpenWorkspaceHub = document.getElementById('btn-open-workspace-hub');
     this.workspaceHubScreen = document.getElementById('workspace-hub-screen');
     this.hubToolsGrid = document.getElementById('hub-tools-grid');
@@ -334,6 +335,11 @@ class FlowBrowserApp {
     if (this.btnToggleVeoAuto) {
       this.btnToggleVeoAuto.addEventListener('click', () => {
         window.electronAPI?.toggleBulkPanel?.();
+      });
+    }
+    if (this.btnToggleVpn) {
+      this.btnToggleVpn.addEventListener('click', () => {
+        window.electronAPI?.toggleVpnPopup?.();
       });
     }
     if (this.btnCloseVeoAuto) {

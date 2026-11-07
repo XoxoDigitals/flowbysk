@@ -129,6 +129,9 @@
     toggleBulkPanel: () => {
       post({ type: 'cmd', cmd: 'toggleBulkPanel' });
     },
+    toggleVpnPopup: () => {
+      post({ type: 'cmd', cmd: 'toggleVpnPopup' });
+    },
     openWorkflowWindow: () => {
       post({ type: 'veo-open-workflow', url: 'src/ui/workflow/index.html' });
     },

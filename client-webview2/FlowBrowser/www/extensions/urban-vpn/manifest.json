@@ -1,0 +1,40 @@
+{
+  "name": "__MSG_appName__",
+  "description": "__MSG_appDesc__",
+  "default_locale": "en",
+  "homepage_url": "https://www.urban-vpn.com/",
+  "manifest_version": 3,
+  "action": {
+    "default_icon": "icons/icon-pink-16.png",
+    "default_title": "Urban VPN",
+    "default_popup": "popup/index.html"
+  },
+  "icons": {
+    "16": "icons/icon-pink-16.png",
+    "48": "icons/icon-pink-48.png",
+    "128": "icons/icon-pink-128.png"
+  },
+  "permissions": [
+    "webRequestAuthProvider",
+    "offscreen",
+    "alarms",
+    "management",
+    "proxy",
+    "storage",
+    "tabs",
+    "webNavigation",
+    "webRequest"
+  ],
+  "optional_permissions": [
+    "privacy"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "service-worker/index.js"
+  },
+  "minimum_chrome_version": "110.0",
+  "version": "5.14.4"
+}
+

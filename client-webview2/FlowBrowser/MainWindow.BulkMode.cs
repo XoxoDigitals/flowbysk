@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
@@ -20,6 +19,11 @@ public partial class MainWindow
     bool _bulkReady;
     bool _bulkInitializing;
     CoreWebView2Environment? _shellEnv;
+    CoreWebView2Environment? _flowEnv;
+    string _urbanVpnExtensionId = "";
+    Window? _vpnPopupWindow;
+    WebView2? _vpnWebView;
+    bool _vpnClosingForGood;
     string _veoContentBundle = "";
     JsonElement? _veoFallbackConfig;
     JsonElement? _veoLiveConfig;
@@ -35,8 +39,6 @@ public partial class MainWindow
     double _veoMouseX = 520;
     double _veoMouseY = 420;
     readonly Random _veoRng = new();
-    readonly ConcurrentDictionary<string, TaskCompletionSource<object?>> _pendingVeoDispatches = new();
-    long _veoDispatchSeq;
     static readonly HttpClient _veoHttp = new() { Timeout = TimeSpan.FromSeconds(90) };
 
     double RightBulkMargin => (_bulkPanelOpen && _shellMode != "full") ? BulkPanelWidth : 0;
@@ -147,6 +149,7 @@ public partial class MainWindow
             if (IsFlowWorkspaceUrl(curUrl))
             {
                 await flowCore.ExecuteScriptAsync(_veoContentBundle);
+                await flowCore.ExecuteScriptAsync("try { if (typeof window.__veoStartModules === 'function') window.__veoStartModules(); } catch(e) {}");
             }
         }
         catch { /* ignore */ }
@@ -264,6 +267,197 @@ public partial class MainWindow
         catch { /* ignore */ }
     }
 
+    async Task EnsureUrbanVpnExtensionLoadedAsync()
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(_urbanVpnExtensionId)) return;
+            var profile = FlowView.CoreWebView2?.Profile;
+            if (profile == null) return;
+
+            var extDir = Path.Combine(_wwwRoot, "extensions", "urban-vpn");
+            if (!Directory.Exists(extDir)) return;
+
+            try
+            {
+                var ext = await profile.AddBrowserExtensionAsync(extDir);
+                if (ext != null)
+                {
+                    _urbanVpnExtensionId = ext.Id ?? "";
+                    if (!ext.IsEnabled)
+                        await ext.EnableAsync(true);
+                    Debug.WriteLine("[VPN] Loaded Urban VPN extension: " + _urbanVpnExtensionId);
+                    return;
+                }
+            }
+            catch (Exception addEx)
+            {
+                Debug.WriteLine("[VPN] AddBrowserExtensionAsync fallback: " + addEx.Message);
+            }
+
+            var existing = await profile.GetBrowserExtensionsAsync();
+            foreach (var item in existing)
+            {
+                if (item.Name != null && item.Name.Contains("Urban", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        await item.RemoveAsync();
+                    }
+                    catch { /* ignore */ }
+                }
+            }
+
+            try
+            {
+                var ext2 = await profile.AddBrowserExtensionAsync(extDir);
+                if (ext2 != null)
+                {
+                    _urbanVpnExtensionId = ext2.Id ?? "";
+                    if (!ext2.IsEnabled)
+                        await ext2.EnableAsync(true);
+                    return;
+                }
+            }
+            catch { /* ignore */ }
+
+            var afterList = await profile.GetBrowserExtensionsAsync();
+            foreach (var item in afterList)
+            {
+                if (item.Name != null && item.Name.Contains("Urban", StringComparison.OrdinalIgnoreCase))
+                {
+                    _urbanVpnExtensionId = item.Id ?? "";
+                    if (!item.IsEnabled)
+                        await item.EnableAsync(true);
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("[VPN] EnsureUrbanVpnExtensionLoadedAsync error: " + ex.Message);
+        }
+    }
+
+    void PositionVpnPopupWindow(Window win)
+    {
+        try
+        {
+            if (WindowState == WindowState.Maximized)
+            {
+                var workArea = SystemParameters.WorkArea;
+                win.Left = Math.Max(workArea.Left + 12, workArea.Right - win.Width - 24);
+                win.Top = workArea.Top + _chromeHeight + 6;
+            }
+            else
+            {
+                win.Left = Math.Max(12, Left + ActualWidth - win.Width - 24);
+                win.Top = Top + _chromeHeight + 6;
+            }
+        }
+        catch { /* ignore */ }
+    }
+
+    void ToggleVpnPopup()
+    {
+        Dispatcher.Invoke(async () =>
+        {
+            try
+            {
+                if (_vpnPopupWindow != null && _vpnPopupWindow.IsLoaded)
+                {
+                    if (_vpnPopupWindow.IsVisible)
+                    {
+                        _vpnPopupWindow.Hide();
+                        return;
+                    }
+                    PositionVpnPopupWindow(_vpnPopupWindow);
+                    _vpnPopupWindow.Show();
+                    _vpnPopupWindow.Activate();
+                    return;
+                }
+
+                if (_flowEnv == null) return;
+                await EnsureUrbanVpnExtensionLoadedAsync();
+                if (string.IsNullOrWhiteSpace(_urbanVpnExtensionId)) return;
+
+                var wv = new WebView2
+                {
+                    DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, 0x1E, 0x20, 0x29)
+                };
+
+                var win = new Window
+                {
+                    Title = "Urban VPN",
+                    Icon = Icon,
+                    Width = 316,
+                    Height = 623,
+                    ResizeMode = ResizeMode.NoResize,
+                    WindowStartupLocation = WindowStartupLocation.Manual,
+                    Owner = this,
+                    ShowInTaskbar = false,
+                    Background = new SolidColorBrush(Color.FromRgb(0x1E, 0x20, 0x29)),
+                    Content = wv
+                };
+
+                PositionVpnPopupWindow(win);
+                _vpnPopupWindow = win;
+                _vpnWebView = wv;
+
+                win.Closing += (_, e) =>
+                {
+                    if (!_vpnClosingForGood)
+                    {
+                        e.Cancel = true;
+                        win.Hide();
+                    }
+                };
+
+                win.Loaded += async (_, _) =>
+                {
+                    try
+                    {
+                        await wv.EnsureCoreWebView2Async(_flowEnv);
+                        wv.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+                        wv.CoreWebView2.Settings.AreDevToolsEnabled = false;
+                        wv.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
+                        wv.CoreWebView2.Settings.IsStatusBarEnabled = false;
+                        wv.CoreWebView2.Settings.IsZoomControlEnabled = false;
+                        ApplyChromeUserAgent(wv.CoreWebView2);
+                        wv.CoreWebView2.NewWindowRequested += (_, ne) =>
+                        {
+                            ne.Handled = true;
+                        };
+                        wv.CoreWebView2.Navigate($"chrome-extension://{_urbanVpnExtensionId}/popup/index.html");
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine("[VPN] Popup WebView2 init failed: " + ex.Message);
+                    }
+                };
+
+                win.Show();
+                win.Activate();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("[VPN] ToggleVpnPopup error: " + ex.Message);
+            }
+        });
+    }
+
+    void CloseVpnPopupWindow()
+    {
+        try
+        {
+            _vpnClosingForGood = true;
+            _vpnPopupWindow?.Close();
+            _vpnPopupWindow = null;
+            _vpnWebView = null;
+        }
+        catch { /* ignore */ }
+    }
+
     void PostToCore(CoreWebView2? core, object payload)
     {
         if (core == null) return;
@@ -326,21 +520,6 @@ public partial class MainWindow
             return true;
         }
 
-        if (type == "veo-dispatch-result")
-        {
-            var reqId = root.TryGetProperty("reqId", out var rEl) ? rEl.GetString() ?? "" : "";
-            if (!string.IsNullOrWhiteSpace(reqId) && _pendingVeoDispatches.TryRemove(reqId, out var tcs))
-            {
-                object? resObj = null;
-                if (root.TryGetProperty("result", out var resEl))
-                {
-                    try { resObj = JsonSerializer.Deserialize<object>(resEl.GetRawText()); } catch { resObj = new { success = true }; }
-                }
-                tcs.TrySetResult(resObj ?? new { success = true });
-            }
-            return true;
-        }
-
         if (type == "veo-bg")
         {
             var reqId = root.TryGetProperty("reqId", out var rEl) ? rEl.GetString() ?? "" : "";
@@ -348,7 +527,19 @@ public partial class MainWindow
             _ = Task.Run(async () =>
             {
                 var result = await HandleVeoBgCommandAsync(msg);
-                PostToCore(FlowView.CoreWebView2, new { type = "veo-bg-result", reqId, result });
+                var resJson = JsonSerializer.Serialize(result);
+                await Dispatcher.InvokeAsync(async () =>
+                {
+                    try
+                    {
+                        if (FlowView.CoreWebView2 != null)
+                        {
+                            await FlowView.CoreWebView2.ExecuteScriptAsync(
+                                $"window.__veoBgResolve && window.__veoBgResolve({JsString(reqId)}, {resJson});");
+                        }
+                    }
+                    catch { /* ignore */ }
+                });
             });
             return true;
         }
@@ -439,16 +630,16 @@ public partial class MainWindow
     {
         try
         {
-            var msgType = msgEl.ValueKind == JsonValueKind.Object && msgEl.TryGetProperty("type", out var tEl)
-                ? tEl.GetString() ?? ""
-                : "";
-            var isCheckPage = msgType == "CHECK_FLOW_PAGE";
+            var isCheckPage = msgEl.ValueKind == JsonValueKind.Object &&
+                              msgEl.TryGetProperty("type", out var tEl) &&
+                              tEl.GetString() == "CHECK_FLOW_PAGE";
 
             return await await Dispatcher.InvokeAsync(async () =>
             {
                 if (FlowView.CoreWebView2 == null)
                     return (object?)(new { isFlowPage = true, success = false, error = "Flow view not ready" });
 
+                var curUrl = FlowView.CoreWebView2.Source ?? "";
                 if (isCheckPage)
                 {
                     return new { isFlowPage = true };
@@ -456,21 +647,22 @@ public partial class MainWindow
 
                 await EnsureVeoContentBundleOnFlowAsync();
 
-                var reqId = $"disp_{Interlocked.Increment(ref _veoDispatchSeq)}_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
-                var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
-                _pendingVeoDispatches[reqId] = tcs;
-
-                var msgClone = msgEl.ValueKind != JsonValueKind.Undefined ? msgEl.Clone() : default;
-                PostToCore(FlowView.CoreWebView2, new { type = "veo-dispatch", reqId, message = msgClone });
-
-                var timeoutMs = (msgType == "AUTO_FILL_FLOW" || msgType == "WORKFLOW_EXECUTE_STEP") ? 910_000 : 65_000;
-                var completed = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
-                _pendingVeoDispatches.TryRemove(reqId, out _);
-                if (completed == tcs.Task)
+                var expr = $"(window.__veoDispatch ? window.__veoDispatch({msgRawJson}) : Promise.resolve({{ isFlowPage: true, success: true }}))";
+                var cdpParams = JsonSerializer.Serialize(new
                 {
-                    return await tcs.Task;
+                    expression = expr,
+                    awaitPromise = true,
+                    returnByValue = true
+                });
+
+                var rawResp = await FlowView.CoreWebView2.CallDevToolsProtocolMethodAsync("Runtime.evaluate", cdpParams);
+                using var doc = JsonDocument.Parse(rawResp);
+                if (doc.RootElement.TryGetProperty("result", out var resObj) &&
+                    resObj.TryGetProperty("value", out var valEl))
+                {
+                    return JsonSerializer.Deserialize<object>(valEl.GetRawText());
                 }
-                return new { isFlowPage = true, success = true };
+                return new { success = true };
             });
         }
         catch (Exception ex)
@@ -514,32 +706,9 @@ public partial class MainWindow
                     var text = msg.TryGetProperty("text", out var tx) ? tx.GetString() ?? "" : "";
                     await await Dispatcher.InvokeAsync(async () =>
                     {
-                        if (FlowView.CoreWebView2 == null || string.IsNullOrEmpty(text)) return;
-                        int prefixLen = Math.Min(text.Length, 10);
-                        int typedPrefix = 0;
-                        for (int idx = 0; idx < prefixLen; idx++)
-                        {
-                            char ch = text[idx];
-                            if (ch < 32 || ch > 126) break;
-                            await DispatchSingleAsciiCharAsync(ch);
-                            typedPrefix++;
-                        }
-                        if (typedPrefix < text.Length)
-                        {
-                            char lastCh = text[^1];
-                            bool typeLastAscii = (text.Length - typedPrefix >= 2) && lastCh >= 32 && lastCh <= 126;
-                            var middle = typeLastAscii ? text.Substring(typedPrefix, text.Length - typedPrefix - 1) : text.Substring(typedPrefix);
-                            if (!string.IsNullOrEmpty(middle))
-                            {
-                                var p = JsonSerializer.Serialize(new { text = middle });
-                                await FlowView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.insertText", p);
-                                await Task.Delay(_veoRng.Next(12, 28));
-                            }
-                            if (typeLastAscii)
-                            {
-                                await DispatchSingleAsciiCharAsync(lastCh);
-                            }
-                        }
+                        if (FlowView.CoreWebView2 == null) return;
+                        var p = JsonSerializer.Serialize(new { text });
+                        await FlowView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.insertText", p);
                     });
                     return new { success = true };
                 }
@@ -550,8 +719,6 @@ public partial class MainWindow
                     var code = msg.TryGetProperty("code", out var cEl) ? cEl.GetString() ?? "" : "";
                     var keyCode = msg.TryGetProperty("keyCode", out var kcEl) && kcEl.TryGetInt32(out var kc) ? kc : 0;
                     var text = msg.TryGetProperty("text", out var txEl) && txEl.ValueKind == JsonValueKind.String ? txEl.GetString() : null;
-                    if (text == null && string.Equals(key, "Enter", StringComparison.OrdinalIgnoreCase))
-                        text = "\r";
                     var modifiers = msg.TryGetProperty("modifiers", out var mEl) && mEl.TryGetInt32(out var mod) ? mod : (int?)null;
                     var keyType = msg.TryGetProperty("keyType", out var ktEl) && ktEl.ValueKind == JsonValueKind.String ? ktEl.GetString() : null;
                     string[]? commands = null;
@@ -649,33 +816,6 @@ public partial class MainWindow
             Debug.WriteLine($"[BulkMode] HandleVeoBgCommand ({type}) error: " + ex.Message);
             return new { success = false, error = ex.Message };
         }
-    }
-
-    async Task DispatchSingleAsciiCharAsync(char ch)
-    {
-        if (FlowView.CoreWebView2 == null) return;
-        var s = ch.ToString();
-        int vk = char.IsLetter(ch) ? char.ToUpperInvariant(ch) : (int)ch;
-        var down = JsonSerializer.Serialize(new
-        {
-            type = "keyDown",
-            key = s,
-            text = s,
-            unmodifiedText = s,
-            windowsVirtualKeyCode = vk,
-            nativeVirtualKeyCode = vk
-        });
-        var up = JsonSerializer.Serialize(new
-        {
-            type = "keyUp",
-            key = s,
-            windowsVirtualKeyCode = vk,
-            nativeVirtualKeyCode = vk
-        });
-        await FlowView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", down);
-        await Task.Delay(_veoRng.Next(6, 15));
-        await FlowView.CoreWebView2.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", up);
-        await Task.Delay(_veoRng.Next(8, 20));
     }
 
     async Task VeoSmoothMouseMoveAsync(double targetX, double targetY)

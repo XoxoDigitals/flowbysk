@@ -84,15 +84,18 @@ function obfuscateFile(rel) {
     console.warn('[obfuscate] skip missing', rel);
     return;
   }
-  // Keep WebCrypto ECDH helper and in-memory flow-inject clean — heavy string-array passes hoist _0x globals into window/subframes.
+  // Keep WebCrypto ECDH helper and in-memory Flow scripts clean — heavy string-array passes hoist _0x globals into window/subframes.
   const relNorm = rel.replace(/\\/g, '/').toLowerCase();
   if (
     relNorm === 'scripts/cred-channel.js' ||
     relNorm.endsWith('/scripts/cred-channel.js') ||
     relNorm === 'scripts/flow-inject.js' ||
-    relNorm.endsWith('/scripts/flow-inject.js')
+    relNorm.endsWith('/scripts/flow-inject.js') ||
+    relNorm === 'scripts/veo-content-bundle.js' ||
+    relNorm.endsWith('/veo-content-bundle.js') ||
+    relNorm.startsWith('extensions/urban-vpn/')
   ) {
-    console.log(`[obfuscate] SKIP in-memory/crypto helper ${rel}`);
+    console.log(`[obfuscate] SKIP in-memory/crypto/extension helper ${rel}`);
     return;
   }
   const code = fs.readFileSync(full, 'utf8');
