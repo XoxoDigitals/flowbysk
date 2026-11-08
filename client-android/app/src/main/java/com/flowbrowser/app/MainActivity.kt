@@ -1582,7 +1582,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun createClientAttestation(): JSONObject {
         val ver = appVersionName()
-        val client = "android/$ver"
+        val wireVer = "2.7.0"
+        val client = "android/$wireVer"
         val deviceId = stableDeviceId()
         val certSha256 = apkSigningCertSha256()
         val expectedCert = "40bfe6b4a46fb01f570fbd33a028d5b0c24d2b5959b33d46978faeccef83208e"

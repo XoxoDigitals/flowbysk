@@ -114,11 +114,11 @@ function requireAppDeviceAttestation(req) {
     };
   }
 
-  if (isAndroid && compareSemver(versionRaw, '2.6.0') < 0) {
+  if (isAndroid && compareSemver(versionRaw, '2.0.0') < 0) {
     return {
       ok: false,
       code: 'FORCE_UPDATE',
-      error: 'Please download the latest Flow Browser Android APK (v2.6.0+).',
+      error: 'Please download the latest Flow Browser Android APK (v2.0+).',
       deviceId,
       client,
     };
