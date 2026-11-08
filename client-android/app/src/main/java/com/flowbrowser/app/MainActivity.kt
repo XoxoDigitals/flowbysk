@@ -690,14 +690,17 @@ class MainActivity : AppCompatActivity() {
             "https://*.labs.google"
         )
         WebViewCompat.addDocumentStartJavaScript(flowView, FLOW_VIEWPORT_JS, flowOnlyOrigins)
-        // Run flow-inject.js on Flow, labs.google, and Gemini
+        // Run flow-inject.js on Flow, labs.google, Gemini, and Google Auth
         val flowAndGeminiOrigins = setOf(
             "https://flow.google.com",
             "https://*.flow.google.com",
             "https://labs.google",
             "https://*.labs.google",
             "https://gemini.google.com",
-            "https://*.gemini.google.com"
+            "https://*.gemini.google.com",
+            "https://accounts.google.com",
+            "https://*.accounts.google.com",
+            "https://accounts.youtube.com"
         )
         if (flowInjectScript.isNotBlank()) {
             WebViewCompat.addDocumentStartJavaScript(flowView, flowInjectScript, flowAndGeminiOrigins)
@@ -2340,6 +2343,10 @@ class MainActivity : AppCompatActivity() {
                 path.contains("/challenge/totp") ||
                 path.contains("/challenge/ipp") ||
                 path.contains("/challenge/sk") ||
+                path.contains("/challenge/skotp") ||
+                path.contains("/challenge/dp") ||
+                path.contains("/challenge/iap") ||
+                path.contains("/challenge/ootp") ||
                 path.contains("/challenge/selection") ||
                 path.contains("/rejected") ||
                 path.contains("/speedbump")
@@ -3309,18 +3316,45 @@ class MainActivity : AppCompatActivity() {
 
     private fun dispatchFlowClick(x: Double, y: Double) {
         if (x <= 0 || y <= 0) return
-        val ix = x.toFloat()
-        val iy = y.toFloat()
+        // Convert CSS viewport coordinates (from getBoundingClientRect) to Android WebView physical pixels!
+        // Without multiplying by webScale (~2.75x-3.5x on phones), touches land ~3x higher on screen
+        // and hit the top challenge option (e.g. "Tap Yes on your phone" -> /challenge/dp) instead of Authenticator!
+        @Suppress("DEPRECATION")
+        val webScale = flowView.scale.takeIf { it > 0.1f } ?: resources.displayMetrics.density
+        val ix = (x * webScale).toFloat()
+        val iy = (y * webScale).toFloat()
         val down = SystemClock.uptimeMillis()
         val downEv = MotionEvent.obtain(down, down, MotionEvent.ACTION_DOWN, ix, iy, 0)
-        val upEv = MotionEvent.obtain(down, down + 40, MotionEvent.ACTION_UP, ix, iy, 0)
+        val upEv = MotionEvent.obtain(down, down + 45, MotionEvent.ACTION_UP, ix, iy, 0)
         flowView.dispatchTouchEvent(downEv)
         flowView.dispatchTouchEvent(upEv)
         downEv.recycle()
         upEv.recycle()
-        // JS fallback
+        // JS fallback at CSS coordinates (x, y) — guarded against tapping non-Authenticator challenge rows
         flowView.evaluateJavascript(
-            "(function(){var el=document.elementFromPoint($x,$y); if(el){try{el.click();}catch(e){}}})();",
+            """
+            (function(){
+              var raw = document.elementFromPoint($x, $y);
+              if (!raw) return;
+              var typed = raw.closest && raw.closest('[data-challengetype]');
+              if (typed) {
+                var ct = String(typed.getAttribute('data-challengetype') || '').trim();
+                if (ct && ct !== '6' && !/totp|auth/i.test(ct)) return;
+              }
+              var el = (raw.closest && raw.closest('[role="link"], [role="button"], [data-action="selectchallenge"], [data-challengetype="6"], [data-challengeid="6"], button, a, li')) || raw;
+              try {
+                var opts = { bubbles: true, cancelable: true, view: window, clientX: $x, clientY: $y, button: 0, buttons: 1 };
+                el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'touch', clientX: $x, clientY: $y }));
+                el.dispatchEvent(new MouseEvent('mousedown', opts));
+                el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'touch', clientX: $x, clientY: $y }));
+                el.dispatchEvent(new MouseEvent('mouseup', opts));
+                el.dispatchEvent(new MouseEvent('click', opts));
+                if (typeof el.click === 'function') el.click();
+              } catch (e) {
+                try { el.click(); } catch (e2) {}
+              }
+            })();
+            """.trimIndent(),
             null
         )
     }
@@ -3531,67 +3565,98 @@ class MainActivity : AppCompatActivity() {
     const s = getComputedStyle(el);
     return s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) !== 0;
   };
-  const txt = (el) => ((el && (el.innerText || el.textContent || el.getAttribute && el.getAttribute('aria-label'))) || '')
+  const txt = (el) => ((el && (el.innerText || el.textContent || (el.getAttribute && el.getAttribute('aria-label')))) || '')
     .replace(/\s+/g, ' ').trim();
-  const click = (el) => {
+  const fireClick = (el) => {
+    if (!el) return;
     try {
       el.scrollIntoView({ block: 'center', inline: 'nearest' });
       el.focus && el.focus();
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
       try {
-        el.dispatchEvent(new PointerEvent('pointerdown', { bubbles:true, cancelable:true, pointerType:'touch' }));
-        el.dispatchEvent(new PointerEvent('pointerup', { bubbles:true, cancelable:true, pointerType:'touch' }));
+        el.dispatchEvent(new PointerEvent('pointerdown', { bubbles:true, cancelable:true, pointerType:'touch', isPrimary:true, clientX:cx, clientY:cy }));
+        el.dispatchEvent(new PointerEvent('pointerup', { bubbles:true, cancelable:true, pointerType:'touch', isPrimary:true, clientX:cx, clientY:cy }));
       } catch (e) {}
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles:true, cancelable:true, view:window }));
-      el.dispatchEvent(new MouseEvent('mouseup', { bubbles:true, cancelable:true, view:window }));
-      el.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true, view:window }));
+      const mOpts = { bubbles:true, cancelable:true, view:window, clientX:cx, clientY:cy, button:0, buttons:1 };
+      el.dispatchEvent(new MouseEvent('mousedown', mOpts));
+      el.dispatchEvent(new MouseEvent('mouseup', mOpts));
+      el.dispatchEvent(new MouseEvent('click', mOpts));
       if (typeof el.click === 'function') el.click();
+      try {
+        const kOpts = { key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true };
+        el.dispatchEvent(new KeyboardEvent('keydown', kOpts));
+        el.dispatchEvent(new KeyboardEvent('keypress', kOpts));
+        el.dispatchEvent(new KeyboardEvent('keyup', kOpts));
+      } catch (e) {}
     } catch (e) {}
   };
+  const activateChallengeNode = (node) => {
+    const row = (node.closest && node.closest('li[data-challengetype], li[data-challengeid], [data-challengetype="6"], [data-challengeid="6"], li')) || node;
+    const link = (row.querySelector && row.querySelector('[role="link"], [role="button"], [data-action="selectchallenge"], a, button, [tabindex="0"]')) ||
+      (node.closest && node.closest('[role="link"], [role="button"], [data-action="selectchallenge"], a, button')) ||
+      row;
+    fireClick(link);
+    if (row !== link) fireClick(row);
+    const r = link.getBoundingClientRect();
+    return { el: link, x: r.left + r.width / 2, y: r.top + r.height / 2, label: txt(row).slice(0, 60) };
+  };
+
   const path = (location.pathname || '').toLowerCase();
   const page = ((document.body && document.body.innerText) || '').slice(0, 4500);
-  const onChooser = /\/challenge\/selection/i.test(path) || /choose how you want to sign in|choose a way/i.test(page);
 
-  if (/\/challenge\/sk/i.test(path) || (/g\.co\/sc|get a code to sign in|security key/i.test(page) && !onChooser)) {
-    const tryAnother = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], span, div'))
-      .find((el) => visible(el) && /^try another way$/i.test(txt(el)));
-    if (tryAnother) { click(tryAnother); return 'try-another'; }
-  }
-
-  if (!onChooser && !/authenticator/i.test(page) && !/\/challenge\/selection/i.test(path)) {
-    return 'skip:' + path;
-  }
-
+  // Strict single-row Authenticator matcher — never matches a parent wrapper containing multiple options
   const isAuth = (raw) => {
     const t = String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    if (!t || t.length > 240) return false;
-    if (/one-time security code|tap yes|use your passkey|can.?t find an eligible|g\.co\/sc|phone or tablet|eligible device|passkey|sms|text message/i.test(t) &&
-        !/authenticator/i.test(t)) return false;
+    if (!t || t.length > 200) return false;
+    if (/one-time security code|security key|tap yes|check your|pull down|notification|use your passkey|can.?t find an eligible|g\.co\/sc|phone or tablet|your phone|eligible device|passkey|sms|text message|voice call|backup code|try another way|more ways to sign in|choose how you want/i.test(t)) {
+      return false;
+    }
     return /google authenticator/i.test(t) ||
       /authenticator app/i.test(t) ||
+      /authentication app/i.test(t) ||
       (/authenticator/i.test(t) && /code|verification|app|get/i.test(t)) ||
       (/verification code/i.test(t) && /authenticator/i.test(t)) ||
       (/code from/i.test(t) && /authenticator/i.test(t)) ||
       /^authenticator$/i.test(t);
   };
 
-  const sels = '[data-challengetype="6"], [data-challengeid="6"], [data-challengeid], [data-challengetype], [data-action="selectchallenge"], ' +
-    'li[jsname], li, div[role="link"], div[role="button"], button, a[role="link"], a, div[jsname]';
+  const isAllowedChallengeAncestry = (el) => {
+    const typed = el && el.closest && el.closest('[data-challengetype]');
+    if (typed) {
+      const ct = String(typed.getAttribute('data-challengetype') || '').trim().toLowerCase();
+      if (ct && ct !== '6' && !/totp|auth/.test(ct)) return false;
+    }
+    return true;
+  };
+
+  // STEP 1: Always search for Google Authenticator option FIRST (works whether URL is /challenge/selection or /challenge/dp)
+  const exactTypeNodes = Array.from(document.querySelectorAll(
+    '[data-challengetype="6"], [data-challengeid="6"], [data-challengetype="totp" i], [data-challengeid="totp" i]'
+  )).filter(visible);
+  if (exactTypeNodes[0]) {
+    const res = activateChallengeNode(exactTypeNodes[0]);
+    return JSON.stringify({ hit: 'auth-app', label: res.label, x: res.x, y: res.y });
+  }
+
+  const sels = '[data-challengeid], [data-challengetype], [data-action="selectchallenge"], ' +
+    'li[jsname], li, div[role="link"], div[role="button"], button, a[role="link"], a';
   let cands = Array.from(document.querySelectorAll(sels)).filter((el) => {
-    if (!visible(el)) return false;
-    const ctype = String(el.getAttribute('data-challengetype') || '');
-    const cid = String(el.getAttribute('data-challengeid') || '');
-    if (ctype === '6' || cid === '6') return true;
+    if (!visible(el) || !isAllowedChallengeAncestry(el)) return false;
+    const ctype = String(el.getAttribute('data-challengetype') || '').trim().toLowerCase();
+    const cid = String(el.getAttribute('data-challengeid') || '').trim().toLowerCase();
+    if (ctype && ctype !== '6' && !/totp|auth/.test(ctype)) return false;
+    if (ctype === '6' || cid === '6' || ctype === 'totp' || cid === 'totp') return true;
     const label = el.getAttribute('aria-label') || '';
     const own = txt(el);
-    if (own.length > 240) return false;
+    if (own.length > 200) return false;
     return isAuth(label) || isAuth(own);
   });
   cands.sort((a, b) => txt(a).length - txt(b).length);
   if (cands[0]) {
-    const el = cands[0].closest('[data-challengeid], [data-challengetype], [data-action="selectchallenge"], li, [role="link"], [role="button"], button, a') || cands[0];
-    click(el);
-    const r = el.getBoundingClientRect();
-    return JSON.stringify({ hit: 'auth-app', label: txt(el).slice(0, 60), x: r.left + r.width/2, y: r.top + r.height/2 });
+    const res = activateChallengeNode(cands[0]);
+    return JSON.stringify({ hit: 'auth-app', label: res.label, x: res.x, y: res.y });
   }
 
   try {
@@ -3603,18 +3668,37 @@ class MainActivity : AppCompatActivity() {
       if (!/authenticator/i.test(t)) continue;
       if (!isAuth(t) && !/google authenticator/i.test(t)) continue;
       let el = node.parentElement;
-      for (let i = 0; i < 12 && el; i++) {
+      for (let i = 0; i < 10 && el; i++) {
+        if (!isAllowedChallengeAncestry(el)) break;
         if (el.matches && el.matches('[data-challengeid], [data-challengetype], [data-action], [role="link"], [role="button"], li, button, a')) {
           if (visible(el)) {
-            click(el);
-            const r = el.getBoundingClientRect();
-            return JSON.stringify({ hit: 'auth-text', label: t.slice(0, 60), x: r.left + r.width/2, y: r.top + r.height/2 });
+            const res = activateChallengeNode(el);
+            return JSON.stringify({ hit: 'auth-text', label: res.label, x: res.x, y: res.y });
           }
         }
         el = el.parentElement;
       }
     }
   } catch (e) {}
+
+  // STEP 2: Authenticator option is not visible yet — if on Device Prompt (/challenge/dp), Security Key (/challenge/sk),
+  // IAP, or OOTP screen, click "Try another way" to open the challenge selection list!
+  const onNonTotpChallenge =
+    /\/challenge\/(dp|iap|ootp|sk|skotp)(?:\/|$|\?)/i.test(path) ||
+    /g\.co\/sc|get a code to sign in|security key|check your|tap yes|google sent a notification|pull down the notification|confirm it.?s you|verify it.?s you|use your passkey/i.test(page);
+  if (onNonTotpChallenge) {
+    const tryAnother = Array.from(document.querySelectorAll(
+      '[data-action="tryanotherway"], [jsname="Pr7Yme"] button, [jsname="Pr7Yme"], [jsname="rwl3qc"] button, [jsname="rwl3qc"], button, a, [role="button"], [role="link"], span, div'
+    )).find((el) => visible(el) && /^(try another way|more ways to sign in|use another way|other ways to sign in)$/i.test(txt(el)));
+    if (tryAnother) {
+      const btn = (tryAnother.closest && tryAnother.closest('button, a, [role="button"], [role="link"]')) || tryAnother;
+      fireClick(btn);
+      if (btn !== tryAnother) fireClick(tryAnother);
+      const r = btn.getBoundingClientRect();
+      return JSON.stringify({ hit: 'try-another', label: txt(btn).slice(0, 60), x: r.left + r.width / 2, y: r.top + r.height / 2 });
+    }
+  }
+
   return 'none:' + path;
 })()
 """.trimIndent()
@@ -3636,37 +3720,6 @@ class MainActivity : AppCompatActivity() {
                         if (x > 2 && y > 2) dispatchFlowClick(x, y)
                     }
                 } catch (_: Exception) {
-                }
-                scope.launch {
-                    delay(350)
-                    val still = flowView.url ?: return@launch
-                    if (isGoogle2faNavUrl(still)) {
-                        flowView.evaluateJavascript(
-                            """
-                            (() => {
-                              const els = Array.from(document.querySelectorAll('[data-challengetype="6"], [data-challengeid], li, div[role="link"], button, a'));
-                              const el = els.find(e => {
-                                const t = ((e.innerText||'')+(e.getAttribute('aria-label')||'')+(e.getAttribute('data-challengetype')||''));
-                                return t === '6' || /authenticator/i.test(t);
-                              });
-                              if (!el) return null;
-                              try { el.click(); } catch (e) {}
-                              const r = el.getBoundingClientRect();
-                              return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
-                            })()
-                            """.trimIndent()
-                        ) { coords ->
-                            try {
-                                var cleaned = coords?.trim()?.trim('"') ?: return@evaluateJavascript
-                                if (cleaned == "null" || cleaned.isBlank()) return@evaluateJavascript
-                                cleaned = cleaned.replace("\\\"", "\"")
-                                val o = JSONObject(cleaned)
-                                dispatchFlowClick(o.optDouble("x"), o.optDouble("y"))
-                            } catch (e: Exception) {
-                                Log.w(TAG, "2FA coord click parse: ${e.message}")
-                            }
-                        }
-                    }
                 }
             }
             val gen = selectionLoopGen.incrementAndGet()

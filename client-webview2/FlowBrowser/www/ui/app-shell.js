@@ -2654,41 +2654,83 @@ class FlowBrowserApp {
             return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
           };
           const center = (el) => {
+            try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) {}
             const r = el.getBoundingClientRect();
             return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
           };
           const isAuth = (raw) => {
             const t = String(raw || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-            if (!t || t.length > 220) return false;
-            if (/one-time security code|tap yes|use your passkey|can.?t find an eligible|g\\.co\\/sc/i.test(t) &&
-                !/authenticator/i.test(t)) return false;
+            if (!t || t.length > 200) return false;
+            if (/one-time security code|security key|tap yes|check your|pull down|notification|use your passkey|can.?t find an eligible|g\\.co\\/sc|phone or tablet|your phone|eligible device|passkey|sms|text message|voice call|backup code|try another way|more ways to sign in|choose how you want/i.test(t)) {
+              return false;
+            }
             return /google authenticator/i.test(t) ||
-              (/authenticator app/i.test(t) && /code|verification|get/i.test(t)) ||
+              /authenticator app/i.test(t) ||
+              /authentication app/i.test(t) ||
+              (/authenticator/i.test(t) && /code|verification|get|app/i.test(t)) ||
               (/verification code/i.test(t) && /authenticator/i.test(t)) ||
               (/get a verification code/i.test(t) && /authenticator/i.test(t)) ||
-              (/authentication app/i.test(t));
+              /^authenticator$/i.test(t);
           };
-          const text = (document.body && document.body.innerText || '');
-          const onChooser = /choose how you want to sign in|choose a way/i.test(text);
-          const onSecurityCode = /g\\.co\\/sc|get a code to sign in/i.test(text) && !onChooser && !/authenticator app/i.test(text);
+          const isAllowedAncestry = (el) => {
+            const typed = el && el.closest && el.closest('[data-challengetype]');
+            if (typed) {
+              const ct = String(typed.getAttribute('data-challengetype') || '').trim().toLowerCase();
+              if (ct && ct !== '6' && !/totp|auth/.test(ct)) return false;
+            }
+            return true;
+          };
+          const pickInteractive = (node) => {
+            const row = (node.closest && node.closest('li[data-challengetype], li[data-challengeid], [data-challengetype="6"], [data-challengeid="6"], li')) || node;
+            const link = (row.querySelector && row.querySelector('[role="link"], [role="button"], [data-action="selectchallenge"], a, button, [tabindex="0"]')) ||
+              (node.closest && node.closest('[role="link"], [role="button"], [data-action="selectchallenge"], a, button')) ||
+              row;
+            try { link.click(); } catch (e) {}
+            return link;
+          };
 
-          if (onSecurityCode || /\\/challenge\\/sk/i.test(location.pathname || '')) {
-            const tryAnother = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], span')).find(el =>
-              /^try another way$/i.test((el.innerText || '').replace(/\\s+/g, ' ').trim()) && visible(el)
-            );
-            if (tryAnother) return { action: 'try-another', ...center(tryAnother) };
+          // 1. Always look for Google Authenticator option FIRST (whether URL is /challenge/selection or /challenge/dp)
+          const byExactType = Array.from(document.querySelectorAll(
+            '[data-challengetype="6"], [data-challengeid="6"], [data-challengetype="totp" i], [data-challengeid="totp" i]'
+          )).filter(visible);
+          if (byExactType[0]) {
+            const el = pickInteractive(byExactType[0]);
+            return { action: 'auth-app', ...center(el), text: (el.innerText || '').slice(0, 80) };
           }
 
-          if (onChooser || /authenticator/i.test(text) || /\\/challenge\\/selection/i.test(location.pathname || '')) {
-            const cands = Array.from(document.querySelectorAll(
-              '[data-challengeid], [data-challengetype], [data-action="selectchallenge"], li, div[role="link"], div[role="button"], button, a'
-            )).filter(el => visible(el) && isAuth(el.getAttribute('aria-label') || el.innerText || ''));
-            cands.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
-            if (cands[0]) {
-              const el = cands[0].closest('[data-challengeid], [data-challengetype], li, [role="link"], [role="button"], button, a') || cands[0];
-              return { action: 'auth-app', ...center(el), text: (el.innerText || '').slice(0, 80) };
+          const cands = Array.from(document.querySelectorAll(
+            '[data-challengeid], [data-challengetype], [data-action="selectchallenge"], li[jsname], li, div[role="link"], div[role="button"], button, a'
+          )).filter(el => {
+            if (!visible(el) || !isAllowedAncestry(el)) return false;
+            const ct = String(el.getAttribute('data-challengetype') || '').trim().toLowerCase();
+            if (ct && ct !== '6' && !/totp|auth/.test(ct)) return false;
+            return isAuth(el.getAttribute('aria-label') || el.innerText || '');
+          });
+          cands.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+          if (cands[0]) {
+            const el = pickInteractive(cands[0]);
+            return { action: 'auth-app', ...center(el), text: (el.innerText || '').slice(0, 80) };
+          }
+
+          // 2. If Authenticator option is not visible yet, click "Try another way" on /challenge/(dp|iap|ootp|sk|skotp)
+          const text = (document.body && document.body.innerText || '');
+          const path = location.pathname || '';
+          const onNonTotpChallenge =
+            /\\/challenge\\/(dp|iap|ootp|sk|skotp)(?:\\/|$|\\?)/i.test(path) ||
+            /g\\.co\\/sc|get a code to sign in|security key|check your|tap yes|google sent a notification|pull down the notification|confirm it.?s you|verify it.?s you|use your passkey/i.test(text);
+          if (onNonTotpChallenge) {
+            const tryAnother = Array.from(document.querySelectorAll(
+              '[data-action="tryanotherway"], [jsname="Pr7Yme"] button, [jsname="Pr7Yme"], [jsname="rwl3qc"] button, [jsname="rwl3qc"], button, a, [role="button"], [role="link"], span'
+            )).find(el =>
+              /^(try another way|more ways to sign in|use another way|other ways to sign in)$/i.test((el.innerText || '').replace(/\\s+/g, ' ').trim()) && visible(el)
+            );
+            if (tryAnother) {
+              const btn = (tryAnother.closest && tryAnother.closest('button, a, [role="button"], [role="link"]')) || tryAnother;
+              try { btn.click(); } catch (e) {}
+              return { action: 'try-another', ...center(btn) };
             }
           }
+
           return { action: 'none', path: location.pathname };
         })()`);
         console.log('[AppShell] 2FA helper:', twoFa);

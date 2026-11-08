@@ -3220,11 +3220,11 @@ function clickElement(el) {
 function findAuthenticatorOption() {
   const isAuthText = (raw) => {
     const t = String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    if (!t || t.length > 220) return false;
+    if (!t || t.length > 200) return false;
     // Must look like THIS option alone — not a parent that lists every method
-    if (/one-time security code|security key|tap yes|use your passkey|try another way|phone or tablet|eligible device|text message|voice call|backup code/.test(t) &&
-        !/authenticator/.test(t)) return false;
-    if (/one-time security code|tap yes on your phone|use your passkey|can.?t find an eligible/.test(t)) return false;
+    if (/one-time security code|security key|tap yes|check your|pull down|notification|use your passkey|try another way|more ways to sign in|choose how you want|phone or tablet|your phone|eligible device|can.?t find an eligible|g\.co\/sc|text message|voice call|backup code/.test(t)) {
+      return false;
+    }
     return (
       /google authenticator/.test(t) ||
       /^authenticator$/.test(t) ||
@@ -3234,6 +3234,22 @@ function findAuthenticatorOption() {
       (/code from/.test(t) && /authenticator/.test(t)) ||
       /authentication app/.test(t)
     );
+  };
+
+  const isAllowedAncestry = (el) => {
+    const typed = el && el.closest && el.closest('[data-challengetype]');
+    if (typed) {
+      const ct = String(typed.getAttribute('data-challengetype') || '').trim().toLowerCase();
+      if (ct && ct !== '6' && !/totp|auth/.test(ct)) return false;
+    }
+    return true;
+  };
+
+  const pickInteractive = (node) => {
+    const row = (node.closest && node.closest('li[data-challengetype], li[data-challengeid], [data-challengetype="6"], [data-challengeid="6"], li')) || node;
+    return (row.querySelector && row.querySelector('[role="link"], [role="button"], [data-action="selectchallenge"], a, button, [tabindex="0"]')) ||
+      (node.closest && node.closest('[role="link"], [role="button"], [data-action="selectchallenge"], a, button')) ||
+      row;
   };
 
   const clickableSel =
@@ -3247,27 +3263,26 @@ function findAuthenticatorOption() {
     return typ === '6' || typ === 'totp' || /totp|authenticator/.test(typ);
   });
   if (byType[0]) {
-    return byType[0].closest(clickableSel) || byType[0];
+    return pickInteractive(byType[0]);
   }
 
   // Prefer dedicated challenge nodes (Google Glif)
   const preferred = Array.from(document.querySelectorAll(clickableSel));
   const rowHits = preferred.filter((el) => {
-    if (!isElementVisible(el)) return false;
+    if (!isElementVisible(el) || !isAllowedAncestry(el)) return false;
+    const ct = String(el.getAttribute?.('data-challengetype') || '').trim().toLowerCase();
+    if (ct && ct !== '6' && !/totp|auth/.test(ct)) return false;
     const label = el.getAttribute?.('aria-label') || '';
     const own = (el.innerText || el.textContent || '');
     // Prefer elements whose own text is the authenticator line (not a huge list)
     const ownNorm = own.replace(/\s+/g, ' ').trim();
-    if (ownNorm.length > 220) return false;
+    if (ownNorm.length > 200) return false;
     return isAuthText(label) || isAuthText(ownNorm);
   });
   // Smallest matching row wins (avoids outer wrappers)
   rowHits.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
   if (rowHits[0]) {
-    return (
-      rowHits[0].closest('[data-challengeid], [data-challengetype], [data-action="selectchallenge"], li, div[role="link"], div[role="button"], button, a') ||
-      rowHits[0]
-    );
+    return pickInteractive(rowHits[0]);
   }
 
   // Text-node walk: find the label, then climb to clickable ancestor
@@ -3281,11 +3296,12 @@ function findAuthenticatorOption() {
       if (!isAuthText(t) && !/google authenticator/i.test(t)) continue;
       let el = node.parentElement;
       for (let i = 0; i < 8 && el; i++) {
+        if (!isAllowedAncestry(el)) break;
         if (
           el.matches?.('[data-challengeid], [data-challengetype], [data-action], [role="link"], [role="button"], li, button, a') ||
           el.tabIndex >= 0
         ) {
-          if (isElementVisible(el)) return el;
+          if (isElementVisible(el)) return pickInteractive(el);
         }
         el = el.parentElement;
       }
@@ -3833,15 +3849,16 @@ function runGoogleAutoLogin() {
   // ---- 2FA: prefer Authenticator app TOTP ----
   const pageText = ((document.body && document.body.innerText) || '').slice(0, 4500);
   const onChallengeChooser =
-    /choose how you want to sign in/i.test(pageText) ||
+    /choose how you want to sign in|choose a way/i.test(pageText) ||
     /\/challenge\/selection/i.test(pathname);
   const onSecurityCodeScreen =
     !onChallengeChooser &&
     (
       /g\.co\/sc/i.test(pageText) ||
       /get a code to sign in/i.test(pageText) ||
+      /check your|tap yes|google sent a notification|pull down the notification|confirm it.?s you|use your passkey/i.test(pageText) ||
       (/enter security code/i.test(pageText) && !/authenticator/i.test(pageText)) ||
-      /\/challenge\/sk(?:otp)?(?:\/|$)/i.test(pathname)
+      /\/challenge\/(dp|iap|ootp|sk|skotp)(?:\/|$)/i.test(pathname)
     );
 
   const totpSelector =
@@ -3880,26 +3897,9 @@ function runGoogleAutoLogin() {
     return;
   }
 
-  // "Get a code to sign in" / g.co/sc / skotp → Try another way FIRST (before authenticator pick)
-  if (!DEBUG_FILL_ONLY && onSecurityCodeScreen && !totpReady) {
-    const tryAnother =
-      buttonByLabel(/^try another way$/i) ||
-      Array.from(document.querySelectorAll('button, a, div[role="button"], span[role="button"], div[role="link"]')).find(
-        (el) => /^try another way$/i.test((el.innerText || '').replace(/\s+/g, ' ').trim()) && isElementVisible(el)
-      );
-    if (tryAnother) {
-      console.log('[Flow Preload] Security code screen → Try another way');
-      const retryBucket = Math.floor(now / 2000);
-      // Allow hard re-click each bucket (Glif often ignores first click)
-      autoLoginState.submittedKeys.delete('try-another-way:' + pathname + ':' + (retryBucket - 1));
-      clickOnce('try-another-way:' + pathname + ':' + retryBucket, tryAnother);
-      return;
-    }
-  }
-
-  // Selection screen: click "Get a verification code from the Google Authenticator app"
-  // Keep cover on — only auto-select; do not wait for user.
-  if (!DEBUG_FILL_ONLY && !totpReady && (onChallengeChooser || /authenticator/i.test(pageText))) {
+  // 1. Selection screen (or /challenge/dp with selection list open):
+  // Always check for "Google Authenticator" option FIRST!
+  if (!DEBUG_FILL_ONLY && !totpReady && (onChallengeChooser || onSecurityCodeScreen || /authenticator/i.test(pageText))) {
     const authTarget = findAuthenticatorOption();
     if (authTarget) {
       const retryBucket = Math.floor(now / 1400);
@@ -3908,6 +3908,25 @@ function runGoogleAutoLogin() {
       clickOnce('auth-app:' + pathname + ':' + retryBucket, authTarget);
       return;
     }
+  }
+
+  // 2. Device Prompt (/challenge/dp) / Security code (/challenge/sk) → Try another way when Authenticator option is not visible yet
+  if (!DEBUG_FILL_ONLY && onSecurityCodeScreen && !totpReady) {
+    const tryAnother =
+      buttonByLabel(/^(try another way|more ways to sign in|use another way|other ways to sign in)$/i) ||
+      Array.from(document.querySelectorAll('[data-action="tryanotherway"], [jsname="Pr7Yme"] button, [jsname="Pr7Yme"], [jsname="rwl3qc"] button, [jsname="rwl3qc"], button, a, div[role="button"], span[role="button"], div[role="link"]')).find(
+        (el) => /^(try another way|more ways to sign in|use another way|other ways to sign in)$/i.test((el.innerText || '').replace(/\s+/g, ' ').trim()) && isElementVisible(el)
+      );
+    if (tryAnother) {
+      console.log('[Flow Preload] Non-TOTP challenge screen → Try another way');
+      const retryBucket = Math.floor(now / 2000);
+      autoLoginState.submittedKeys.delete('try-another-way:' + pathname + ':' + (retryBucket - 1));
+      clickOnce('try-another-way:' + pathname + ':' + retryBucket, tryAnother);
+      return;
+    }
+  }
+
+  if (!DEBUG_FILL_ONLY && !totpReady && (onChallengeChooser || /authenticator/i.test(pageText))) {
     // URL already /challenge/selection but SPA still shows password card — wait, do not reload
     if (/\/challenge\/selection/i.test(pathname)) {
       const pwdStill =

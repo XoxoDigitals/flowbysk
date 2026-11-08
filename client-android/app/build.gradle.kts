@@ -18,7 +18,7 @@ android {
         applicationId = "com.flowbrowser.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 44
+        versionCode = 45
         versionName = "2.0"
 
         val defaultServer =
