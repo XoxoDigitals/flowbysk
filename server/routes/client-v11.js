@@ -130,9 +130,12 @@ async function requireUserAuth(req, res, next) {
           : 'Your account has been deactivated by administrator.',
       });
     }
+    const isPortalToken = Boolean(decoded.portal);
+    const isPortalSafeRoute =
+      req.path === '/me' || req.path === '/profile' || req.path === '/activity';
     const tokenSv = decoded.sv;
     const currentSv = Number(user.sessionVersion) || 0;
-    if (tokenSv == null || Number(tokenSv) !== currentSv) {
+    if (!isPortalToken && (tokenSv == null || Number(tokenSv) !== currentSv)) {
       return res.status(401).json({
         success: false,
         code: 'SESSION_REPLACED',
@@ -141,7 +144,7 @@ async function requireUserAuth(req, res, next) {
     }
     const now = new Date();
     const expiry = new Date(user.planExpiry);
-    if (expiry <= now) {
+    if (expiry <= now && !(isPortalToken && isPortalSafeRoute)) {
       return res.status(403).json({
         success: false,
         code: 'PLAN_EXPIRED',
@@ -279,7 +282,7 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
 
   const now = new Date();
   const expiry = new Date(user.planExpiry);
-  if (expiry <= now) {
+  if (requireDevice && expiry <= now) {
     return {
       status: 403,
       body: {
@@ -290,7 +293,7 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
     };
   }
 
-  if ((user.credits || 0) <= 0) {
+  if (requireDevice && (user.credits || 0) <= 0) {
     return {
       status: 403,
       body: {
@@ -340,8 +343,12 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
       : {}),
     ...(attestation.client ? { lastClient: attestation.client } : {}),
   });
-  const sessionVersion = await db.bumpSessionVersion(user.id);
-  await db.clearPendingGoogleWipe(user.id);
+  const sessionVersion = requireDevice
+    ? await db.bumpSessionVersion(user.id)
+    : Number(user.sessionVersion) || 0;
+  if (requireDevice) {
+    await db.clearPendingGoogleWipe(user.id);
+  }
   let freshUser = await db.getUserById(user.id);
   await db.addLog(user.id, user.username, 'client_login', {
     ip: clientIp || '',
@@ -349,7 +356,7 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
     sessionVersion,
     channelId: channel?.channelId || null,
     deviceId: attestation.deviceId || null,
-    client: attestation.client || null,
+    client: attestation.client || (requireDevice ? null : 'web-portal'),
     binHash: attestation.binHash || null,
   });
 
@@ -358,6 +365,7 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
       userId: user.id,
       username: user.username,
       sv: sessionVersion,
+      ...(!requireDevice ? { portal: true } : {}),
       ...(channel ? { ch: channel.channelId } : {}),
     },
     await jwtSecret(),

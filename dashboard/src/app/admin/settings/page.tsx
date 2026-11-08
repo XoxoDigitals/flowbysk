@@ -21,7 +21,7 @@ type SiteForm = {
   ticketSystemEnabled: boolean;
   contactPageEnabled: boolean;
   maintenanceMode: boolean;
-  clientApiVersion: 'v8';
+  clientApiVersion: 'v11';
 };
 
 type DownloadPackage = {
@@ -50,7 +50,7 @@ const emptySite: SiteForm = {
   ticketSystemEnabled: true,
   contactPageEnabled: true,
   maintenanceMode: false,
-  clientApiVersion: 'v8',
+  clientApiVersion: 'v11',
 };
 
 function formatBytes(n: number) {
@@ -138,7 +138,7 @@ export default function AdminSettingsPage() {
       ticketSystemEnabled: row.ticketSystemEnabled !== false,
       contactPageEnabled: row.contactPageEnabled !== false,
       maintenanceMode: row.maintenanceMode === true,
-      clientApiVersion: 'v8',
+      clientApiVersion: 'v11',
     });
     setSocial(row.socialLinks || {});
     if (noticesRes.ok) setNotices(noticesData.notices || []);
@@ -498,16 +498,16 @@ export default function AdminSettingsPage() {
           style={{ borderColor: 'var(--a1)' }}
         >
           <div>
-            <div className="text-sm font-medium">Client API v8</div>
+            <div className="text-sm font-medium">Client API v11</div>
             <p className="text-xs text-[var(--ink3)]">
-              Locked on. /api/v2–/api/v7 always return 410 FORCE_UPDATE. Only /api/v8/client is live.
+              Locked on. /api/v2–/api/v10 always return 410 FORCE_UPDATE. Only /api/v11/client is live.
             </p>
           </div>
           <Toggle
             on={true}
-            onLabel="v8 ON"
-            offLabel="v8 ON"
-            onChange={() => setSite({ ...site, clientApiVersion: 'v8' })}
+            onLabel="v11 ON"
+            offLabel="v11 ON"
+            onChange={() => setSite({ ...site, clientApiVersion: 'v11' })}
           />
         </div>
 
