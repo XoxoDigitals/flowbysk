@@ -6,6 +6,7 @@ let CLIENT_API = '/api/v11/client';
 
 function normalizeClientApiVersion(value) {
   const v = String(value || '').trim().toLowerCase();
+  if (v === 'v12') return 'v12';
   if (v === 'v11') return 'v11';
   return 'v11';
 }
@@ -113,7 +114,7 @@ const SUITE_TOOLS_CATALOG = [
     name: 'Google Gemini',
     eyebrow: '— SHARED ACCESS / GOOGLE GEMINI',
     heroTitle: 'Supercharge your thinking.',
-    heroDesc: 'Powered by your shared Google Ultra account — access Gemini Advanced Pro for deep reasoning, coding, Canvas, and multimodal research.',
+    heroDesc: 'Powered by your Google Ultra account — access Gemini Advanced Pro for deep reasoning, coding, Canvas, and multimodal research.',
     category: 'Conversational AI / Google Ultra',
     description: 'Google Gemini Advanced Ultra — Deep Reasoning, Coding, Canvas & Multimodal AI',
     domain: '',
@@ -567,6 +568,9 @@ class FlowBrowserApp {
         this.currentServers = data.servers;
         this.settings = data.settings;
         this.activeServer = sanitizeServerForStorage(data.activeServer);
+        if (this.activeServer?.id && !this.isImageOnlyServer(this.activeServer)) {
+          this._lastStandardServerId = this.activeServer.id;
+        }
         this.updateToolbarUserInfo();
         this.populateServerSelect(data.servers);
         this.hideLoginScreen();
@@ -587,6 +591,9 @@ class FlowBrowserApp {
             ...activeSrv,
             imageOnly: this.isImageOnlyServer(activeSrv)
           });
+          if (!this.isImageOnlyServer(activeSrv) && activeSrv.id) {
+            this._lastStandardServerId = activeSrv.id;
+          }
           if (this.serverSelect && !this.isImageOnlyServer(activeSrv)) {
             this.serverSelect.value = activeSrv.id;
           }
@@ -632,7 +639,7 @@ class FlowBrowserApp {
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
       let deviceId = null;
-      let flowClient = 'windows-exe/8.0.15';
+      let flowClient = 'windows-exe/8.0.18';
       let binHash = '';
       let attestTs = 0;
       let attestNonce = '';
@@ -695,6 +702,9 @@ class FlowBrowserApp {
         this.currentServers = data.servers;
         this.settings = data.settings;
         this.activeServer = sanitizeServerForStorage(data.activeServer);
+        if (this.activeServer?.id && !this.isImageOnlyServer(this.activeServer)) {
+          this._lastStandardServerId = this.activeServer.id;
+        }
         this._flowLoginPassword = password; // memory only � seals session.bin (Phase 4)
 
         // Save session � never persist Google password
@@ -731,6 +741,9 @@ class FlowBrowserApp {
             ...data.servers[0],
             imageOnly: this.isImageOnlyServer(data.servers[0])
           });
+          if (!this.isImageOnlyServer(this.activeServer) && this.activeServer.id) {
+            this._lastStandardServerId = this.activeServer.id;
+          }
           if (this.serverSelect && !this.isImageOnlyServer(this.activeServer)) {
             this.serverSelect.value = this.activeServer.id;
           }
@@ -827,25 +840,43 @@ class FlowBrowserApp {
    * re-launch a fresh Google sign-in for the current assignment.
    */
   async handleClearCookies() {
+    const loggedInBefore = !!(this.currentUser && this.config?.authToken);
+    const hubOpenBefore = !!(this.workspaceHubScreen && !this.workspaceHubScreen.classList.contains('hidden'));
+    const wasOverlayHidden = !!(this.loadingOverlay && this.loadingOverlay.classList.contains('hidden'));
+    if (loggedInBefore && !hubOpenBefore) {
+      // Keep loading overlay rendered inside ShellView while confirm modal is in 'full' mode
+      this.showLoadingOverlay('Clear cookies & accounts', 'Confirm to wipe Google session and restart login', 60000);
+      this.postAuthOverlay({ show: true, captcha: false, done: false });
+    }
     const ok = await this.showConfirmDialog({
       title: 'Clear cookies & accounts',
       body: 'Clear all Google cookies and signed-in accounts in this app?\n\nThis wipes the Flow browser profile (cookies, cache, local data) and starts a fresh Google login.',
       confirmLabel: 'Clear everything',
-      cancelLabel: 'Cancel'
+      cancelLabel: 'Cancel',
+      keepAuthCoverOnConfirm: loggedInBefore
     });
-    if (!ok) return;
+    if (!ok) {
+      if (wasOverlayHidden && !this._switchingServerInFlight && !this._totpFilling && !this._pendingFreshLogin) {
+        this.hideLoadingOverlay();
+      }
+      return;
+    }
 
-    this.showLoadingOverlay('Clearing cookies…', 'Wiping Google accounts and browsing data', 12000);
+    const loggedIn = !!(this.currentUser && this.config?.authToken);
+    this.showLoadingOverlay('Clearing cookies…', 'Wiping Google accounts and browsing data', 20000);
     this.hideGoogleAuthBanner();
-    // Always drop sticky auth cover first — wipe must not leave a looping overlay
-    this.postAuthOverlay({ show: false, done: true });
+    // Keep sticky auth cover active when logged in so Google sign-in is NEVER exposed during wipe
+    if (loggedIn) {
+      this.postAuthOverlay({ show: true, captcha: false, done: false });
+    } else {
+      this.postAuthOverlay({ show: false, done: true });
+    }
     this._captchaActive = false;
     this._pendingFreshLogin = false;
     try {
       await window.electronAPI.clearPartitionSession();
       this._lastAutoFillKey = null;
 
-      const loggedIn = !!(this.currentUser && this.config?.authToken);
       if (!loggedIn) {
         // Not signed into Flow Creator — wipe only; do not start Google login / overlay
         this.notify('Cookies cleared');
@@ -893,7 +924,7 @@ class FlowBrowserApp {
     }
   }
 
-  showConfirmDialog({ title, body, confirmLabel = 'OK', cancelLabel = 'Cancel' } = {}) {
+  showConfirmDialog({ title, body, confirmLabel = 'OK', cancelLabel = 'Cancel', keepAuthCoverOnConfirm = false } = {}) {
     return new Promise((resolve) => {
       const modal = document.getElementById('app-confirm-modal');
       const titleEl = document.getElementById('app-confirm-title');
@@ -916,6 +947,9 @@ class FlowBrowserApp {
         okBtn.removeEventListener('click', onOk);
         cancelBtn.removeEventListener('click', onCancel);
         modal.removeEventListener('click', onBackdrop);
+        if (value && keepAuthCoverOnConfirm) {
+          this.postAuthOverlay({ show: true, captcha: false, done: false });
+        }
         this.syncShellModeFromUi();
         resolve(value);
       };
@@ -1101,6 +1135,9 @@ class FlowBrowserApp {
               ...data.activeServer,
               imageOnly: this.isImageOnlyServer(data.activeServer)
             });
+            if (!this.isImageOnlyServer(this.activeServer) && this.activeServer.id) {
+              this._lastStandardServerId = this.activeServer.id;
+            }
           }
         }
         this.populateServerSelect(data.servers || []);
@@ -1175,11 +1212,11 @@ class FlowBrowserApp {
         imageOnlyServer: true,
         code: 'FLOW IMAGES / 0' + (idx + 1),
         name: displayName,
-        eyebrow: '— FREE IMAGE GENERATION / ' + displayName.toUpperCase(),
-        heroTitle: 'Unlimited AI Image Studio.',
-        heroDesc: 'Dedicated Google Flow Image Generation account (' + displayName + ') — Nano Banana & Imagen studio with 0 credit cost and Bulk Image automation.',
-        category: 'Image Generation Only (0 Cost)',
-        description: 'Google Flow Image Generation Studio & Bulk Image Mode (Free — 0 Credits)',
+        eyebrow: '— AI IMAGE GENERATION / ' + displayName.toUpperCase(),
+        heroTitle: 'AI Image Generation Studio.',
+        heroDesc: 'Dedicated Google Flow Image Generation account (' + displayName + ') — Nano Banana & Imagen studio with Bulk Image automation (10 credits per generation).',
+        category: 'Image Generation (10 Credits)',
+        description: 'Google Flow Image Generation Studio & Bulk Image Mode (10 Credits)',
         domain: '',
         url: srv.targetUrl || 'https://flow.google.com/',
         ready: true,
@@ -1226,7 +1263,7 @@ class FlowBrowserApp {
     }
     if (this.hubHeroGuideBtn) {
       this.hubHeroGuideBtn.addEventListener('click', () => {
-        this.notify('Select any Ready tool below to launch immediately with your shared Pro account.');
+        this.notify('Select any Ready tool below to launch immediately with your account.');
       });
     }
     this.renderWorkspaceHub();
@@ -1401,7 +1438,12 @@ class FlowBrowserApp {
 
     if ((tool.id === 'google-flow' || tool.id === 'google-gemini') && (!this.activeServer?.id || this.isImageOnlyServer(this.activeServer))) {
       const stdList = this.getStandardServers(this.currentServers);
-      const stdSrv = stdList.find((s) => this.googleLockRemainingMs(s.id) <= 0) || stdList[0];
+      const preferredStdId = this._lastStandardServerId || (this.serverSelect && this.serverSelect.value) || '';
+      const stdSrv =
+        (preferredStdId && stdList.find((s) => s.id === preferredStdId && this.googleLockRemainingMs(s.id) <= 0)) ||
+        (preferredStdId && stdList.find((s) => s.id === preferredStdId)) ||
+        stdList.find((s) => this.googleLockRemainingMs(s.id) <= 0) ||
+        stdList[0];
       if (stdSrv && stdSrv.id) {
         await this.launchServerWorkspace(stdSrv.id, !!this._pendingFreshLogin, tool.url);
         return;
@@ -1829,11 +1871,25 @@ class FlowBrowserApp {
       this.runningToolId === 'google-flow';
     if (isGeminiOrStandardFlow && this.isImageOnlyServer({ id: serverId })) {
       const stdList = this.getStandardServers(this.currentServers);
-      const stdSrv = stdList.find((s) => this.googleLockRemainingMs(s.id) <= 0) || stdList[0];
+      const preferredStdId = this._lastStandardServerId || (this.serverSelect && this.serverSelect.value) || '';
+      const stdSrv =
+        (preferredStdId && stdList.find((s) => s.id === preferredStdId && this.googleLockRemainingMs(s.id) <= 0)) ||
+        (preferredStdId && stdList.find((s) => s.id === preferredStdId)) ||
+        stdList.find((s) => this.googleLockRemainingMs(s.id) <= 0) ||
+        stdList[0];
       if (stdSrv && stdSrv.id) {
         serverId = stdSrv.id;
       }
     }
+
+    // Cancel any pending webview credential or navigation timers from the previous workspace
+    // so they cannot push stale or premature serverIds during the switch.
+    clearTimeout(this._credTimer1);
+    clearTimeout(this._credTimer2);
+    clearTimeout(this._credTimer3);
+    clearTimeout(this._navTimer);
+
+    const previousServerId = this.activeServer?.id || '';
 
     const toolLabel = rawTarget.includes('gemini.google.com') ? 'Google Gemini' : 'Google Flow';
     this.showLoadingOverlay(
@@ -1842,6 +1898,7 @@ class FlowBrowserApp {
     );
 
     this._switchingServerInFlight = true;
+    this._switchingCookieProfileInFlight = true;
     try {
       let data;
       try {
@@ -1864,13 +1921,15 @@ class FlowBrowserApp {
         }
       }
       if (data && data.success) {
-        const previousServerId = this.activeServer?.id || '';
         const serverChanged = !!(previousServerId && previousServerId !== data.server.id);
         const isImgServer = !!this.isImageOnlyServer(data.server);
         this.activeServer = sanitizeServerForStorage({
           ...data.server,
           imageOnly: isImgServer
         });
+        if (!isImgServer && data.server.id) {
+          this._lastStandardServerId = data.server.id;
+        }
         if (this.serverSelect && !isImgServer) {
           this.serverSelect.value = data.server.id;
         }
@@ -1909,19 +1968,12 @@ class FlowBrowserApp {
         this._googleCredServerId = data.server.id;
         this._credUsedStages = new Set();
 
-        if (this.config?.authToken && this.config?.user) {
-          await window.electronAPI.saveSession({
-            token: this.config.authToken,
-            user: this.config.user,
-            activeServer: sanitizeServerForStorage(this.activeServer)
-          });
-        }
-
         const targetUrl = isGeminiTarget
           ? desiredUrl
           : desiredUrl.replace(/\/$/, '') + '/';
 
-        // Snapshot previous server's isolated cookies and restore target server's isolated cookies
+        // FIRST: Snapshot previous server's isolated cookies and restore target server's isolated cookies
+        // BEFORE any saveSession or sendCredentialsToWebview calls can touch C# server state!
         let cookieRestored = false;
         try {
           const cookieSwitch = await window.electronAPI.switchFlowCookieProfile?.({
@@ -1930,6 +1982,15 @@ class FlowBrowserApp {
           });
           cookieRestored = !!(cookieSwitch && cookieSwitch.restored);
         } catch (e) {}
+        this._switchingCookieProfileInFlight = false;
+
+        if (this.config?.authToken && this.config?.user) {
+          await window.electronAPI.saveSession({
+            token: this.config.authToken,
+            user: this.config.user,
+            activeServer: sanitizeServerForStorage(this.activeServer)
+          });
+        }
 
         if (cookieRestored && !resetGoogle) {
           this._pendingFreshLogin = false;
@@ -1950,6 +2011,7 @@ class FlowBrowserApp {
               if (altSrv) {
                 console.warn('[AppShell] Primary server locked/unavailable, switching to unlocked server:', altSrv.name);
                 this._switchingServerInFlight = false;
+                this._switchingCookieProfileInFlight = false;
                 return await this.launchServerWorkspace(altSrv.id, resetGoogle, targetOverrideUrl);
               }
             }
@@ -1974,6 +2036,7 @@ class FlowBrowserApp {
           this.loadTargetInWebview(loginUrl, true);
         }
       } else {
+        this._switchingCookieProfileInFlight = false;
         const isLock = data && data.code === 'GOOGLE_SESSION_LOCKED';
         this.notify(
           isLock ? this.googleLockMessage(data) : (data && data.error) || 'Failed to switch server node',
@@ -1999,6 +2062,7 @@ class FlowBrowserApp {
       this.postAuthOverlay({ show: false, captcha: false, done: true });
     } finally {
       this._switchingServerInFlight = false;
+      this._switchingCookieProfileInFlight = false;
     }
   }
 
@@ -2311,6 +2375,7 @@ class FlowBrowserApp {
   }
 
   async sendCredentialsToWebview(forceReset = false) {
+    if (this._switchingCookieProfileInFlight) return;
     if (this.activeServer && this.activeServer.id) {
       const imageOnly = !!(
         this.isImageOnlyServer(this.activeServer) ||

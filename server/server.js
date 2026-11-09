@@ -31,14 +31,14 @@ const forceUpdatePayload = {
   error: 'Please download the latest Flow Browser.',
 };
 
-/** Only /api/v11/client is live (signed binary attestation). v2–v10 → FORCE_UPDATE. */
-const clientV11Routes = require('./routes/client-v11');
-for (const legacyVer of ['v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10']) {
+/** Only /api/v12/client is live (signed binary attestation). v2–v11 → FORCE_UPDATE. */
+const clientV12Routes = require('./routes/client-v12');
+for (const legacyVer of ['v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', 'v11']) {
   app.use(`/api/${legacyVer}/client`, (req, res) => {
     res.status(410).json(forceUpdatePayload);
   });
 }
-app.use('/api/v11/client', clientV11Routes);
+app.use('/api/v12/client', clientV12Routes);
 app.use('/api/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -70,7 +70,7 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
-        clientApiVersion: 'v11',
+        clientApiVersion: 'v12',
       },
       serverTime: Date.now(),
     });
@@ -146,15 +146,15 @@ app.get('*', (req, res) => {
 
 db.ready()
   .then(async () => {
-    // Permanently lock client API to v11 (v2–v10 always return 410)
+    // Lock client API to v12 (v2–v10 always return 410)
     try {
       const cur = await db.getSettings();
-      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v11') {
-        await db.updateSettings({ clientApiVersion: 'v11' });
-        console.log('[boot] Locked clientApiVersion → v11 (v2–v10 permanently stopped)');
+      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v12') {
+        await db.updateSettings({ clientApiVersion: 'v12' });
+        console.log('[boot] Locked clientApiVersion → v12');
       }
     } catch (err) {
-      console.warn('[boot] could not lock clientApiVersion v11:', err.message);
+      console.warn('[boot] could not lock clientApiVersion v12:', err.message);
     }
     app.listen(PORT, () => {
       console.log(`====================================================`);

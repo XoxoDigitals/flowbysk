@@ -65,17 +65,41 @@ function normalizeModelLabel(text) {
  * Blocked model picker labels — hide ONLY these four so other options stay.
  * Keep "lower priority" / alternate variants and image models visible.
  */
-function isBlockedModelLabel(_text) {
-  // PakFlow mode: keep all standard models visible in dropdown; [Lower Priority] is hidden via data-hide-lp="true"
+function isBlockedModelLabel(raw) {
+  if (!raw) return false;
+  const label = normalizeModelLabel(raw);
+  if (!label || label.length > 120) return false;
+  if (/lower\s*priority/i.test(label)) return false;
+  if (/banana|nano|imagen|\bimage\b|frames|ingredients|aspect|duration|resolution/i.test(label)) return false;
+  const lower = label.toLowerCase();
+  if (
+    /^omni\s*1\.?[12]?\s*flash$/i.test(label) ||
+    (/\bomni\b/i.test(lower) && /\bflash\b/i.test(lower)) ||
+    /\bomni\s*1\.?2\b/i.test(lower) ||
+    /\babra\b/i.test(lower)
+  ) {
+    return true;
+  }
+  if (/^veo\s*3\.?1\s*[-–—]?\s*lite$/i.test(label)) return true;
+  if (/^veo\s*3\.?1\s*[-–—]?\s*fast$/i.test(label)) return true;
+  if (/^veo\s*3\.?1\s*[-–—]?\s*quality$/i.test(label)) return true;
+  if (/veo\s*3\.?1/i.test(lower) && /\blite\b/i.test(lower) && !/lower/i.test(lower)) return true;
+  if (/veo\s*3\.?1/i.test(lower) && /\bfast\b/i.test(lower) && !/lower/i.test(lower)) return true;
+  if (/veo\s*3\.?1/i.test(lower) && /\bquality\b/i.test(lower) && !/lower/i.test(lower)) return true;
   return false;
 }
 
 let fakeModelName = '';
 const creditMap = {
-  'Omni 1.1 Flash': '12',
-  'Veo 3.1 - Lite': '5',
+  'Omni 1.1 Flash': '10',
+  'Veo 3.1 - Lite': '10',
+  'Veo 3.1 - Lite [Lower Priority]': '10',
   'Veo 3.1 - Fast': '10',
-  'Veo 3.1 - Quality': '100'
+  'Veo 3.1 - Fast [Lower Priority]': '10',
+  'Veo 3.1 - Quality': '10',
+  'Nano Banana 2': '10',
+  'Nano Banana Pro': '10',
+  'Nano Banana Lite': '10'
 };
 
 let fakeBalance = 0;
@@ -303,7 +327,7 @@ window.addEventListener('keydown', (e) => {
 // =========================================================================
 // CREDIT TRACKING & GENERATION INTERCEPTOR ENGINE
 // Requirement:
-// Deduct 5 credits for each successful image generated
+// Deduct 10 credits for each successful image generated
 // Deduct 10 credits for each successful video generated
 // =========================================================================
 
@@ -418,28 +442,36 @@ function getGenerationModelDetails(forceType = '', modelHint = '', requestBodyTe
   }
 
   if (activeMode === 'video') {
-    let detectedModel = fakeModelName;
-    if (!detectedModel) {
-      const rawDom = getActiveDomModelText();
-      if (rawDom.includes('Quality')) detectedModel = 'Veo 3.1 - Quality';
-      else if (rawDom.includes('Fast')) detectedModel = 'Veo 3.1 - Fast';
-      else if (rawDom.includes('Omni')) detectedModel = 'Omni 1.1 Flash';
-      else if (rawDom.includes('Lite')) detectedModel = 'Veo 3.1 - Lite';
+    const rawDom = getActiveDomModelText();
+    let detectedModel = '';
+    if (/lower\s*priority/i.test(rawDom)) {
+      if (rawDom.includes('Fast')) detectedModel = 'Veo 3.1 - Fast [Lower Priority]';
+      else detectedModel = 'Veo 3.1 - Lite [Lower Priority]';
+    } else if (rawDom.includes('Quality')) {
+      detectedModel = 'Veo 3.1 - Quality';
+    } else if (rawDom.includes('Fast')) {
+      detectedModel = 'Veo 3.1 - Fast';
+    } else if (rawDom.includes('Omni')) {
+      detectedModel = 'Omni 1.1 Flash';
+    } else if (rawDom.includes('Lite')) {
+      detectedModel = 'Veo 3.1 - Lite';
+    } else if (fakeModelName && creditMap[fakeModelName]) {
+      detectedModel = fakeModelName;
     }
-    const mName = detectedModel && creditMap[detectedModel] ? detectedModel : 'Veo 3.1 - Fast';
-    const mRate = parseInt(creditMap[mName] || '5', 10) || 5;
+    const mName = detectedModel && creditMap[detectedModel] ? detectedModel : 'Veo 3.1 - Lite [Lower Priority]';
+    const mRate = 10;
     return { type: 'video', modelName: mName, rate: mRate };
   }
 
-  // Active mode is IMAGE (0 credit cost — free image generation):
+  // Active mode is IMAGE (10 credit cost per image generation):
   const imageSearchStr = reqStr + ' ' + domModelStr;
   if (imageSearchStr.includes('banana pro') || imageSearchStr.includes('nano banana pro') || imageSearchStr.includes('banana-pro') || imageSearchStr.includes('pro')) {
-    return { type: 'image', modelName: 'Nano Banana Pro', rate: 0 };
+    return { type: 'image', modelName: 'Nano Banana Pro', rate: 10 };
   }
   if (imageSearchStr.includes('banana lite') || imageSearchStr.includes('banana 2 lite') || imageSearchStr.includes('nano banana lite') || imageSearchStr.includes('nano banana 2 lite') || imageSearchStr.includes('banana-lite') || imageSearchStr.includes('lite')) {
-    return { type: 'image', modelName: 'Nano Banana Lite', rate: 0 };
+    return { type: 'image', modelName: 'Nano Banana Lite', rate: 10 };
   }
-  return { type: 'image', modelName: 'Nano Banana 2', rate: 0 };
+  return { type: 'image', modelName: 'Nano Banana 2', rate: 10 };
 }
 
 function showGenerationToast(type, modelName, amount, count, isRefund = false) {
@@ -568,7 +600,7 @@ function startGenerationJob(source = '', boundPendingTile = null) {
   const mode = pendingGeneration ? pendingGeneration.modelDetails.type : getActivePromptMode();
   const multiplier = pendingGeneration ? (pendingGeneration.multiplier || 1) : getActiveBatchMultiplier();
   const details = pendingGeneration ? pendingGeneration.modelDetails : getGenerationModelDetails(mode);
-  if (isImageOnlyAccount() || mode === 'image' || details.type === 'image' || !details.rate || details.rate <= 0) {
+  if (!details.rate || details.rate <= 0) {
     pendingGeneration = null;
     isWaitingForPercentage = false;
     lastTypedPromptText = '';
@@ -1965,31 +1997,13 @@ loadSavedProjectsFromDevice();
   };
   const isProtectedWorkspaceHost = () => isFlowHost() || isGeminiHost();
 
-  try {
-    const savedFakeModel = sessionStorage.getItem('__pakflow_fake_model');
-    if (savedFakeModel && creditMap[savedFakeModel]) {
-      fakeModelName = savedFakeModel;
-    } else {
-      fakeModelName = 'Veo 3.1 - Lite';
-    }
-  } catch (e) {
-    fakeModelName = 'Veo 3.1 - Lite';
-  }
-
   function injectPakflowStyles() {
     if (!isProtectedWorkspaceHost()) return;
     if (!document.getElementById('pakflow-core-style')) {
       const style = document.createElement('style');
       style.id = 'pakflow-core-style';
       style.textContent =
-        "button[data-fake-model],[role='combobox'][data-fake-model]{color:transparent!important;position:relative!important}" +
-        "button[data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path),[role='combobox'][data-fake-model] *:not(i):not(.google-symbols):not(mat-icon):not(svg):not(path){color:transparent!important}" +
-        "button[data-fake-model]::after,[role='combobox'][data-fake-model]::after{content:attr(data-fake-model)!important;position:absolute!important;left:var(--fake-model-left,14px)!important;top:50%!important;transform:translateY(-50%)!important;color:#fff!important;font-family:'Google Sans Text','Google Sans',sans-serif!important;font-size:13px!important;font-weight:500!important;pointer-events:none!important;white-space:nowrap!important}" +
-        "button[data-fake-model] i,button[data-fake-model] .google-symbols,button[data-fake-model] mat-icon,button[data-fake-model] svg,[role='combobox'][data-fake-model] i,[role='combobox'][data-fake-model] .google-symbols,[role='combobox'][data-fake-model] mat-icon,[role='combobox'][data-fake-model] svg{color:#fff!important;visibility:visible!important}" +
-        "flow-menu-item[data-hide-lp='true'],[role='menuitem'][data-hide-lp='true'],[role='option'][data-hide-lp='true']{display:none!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
-        "flow-menu-item:has([data-hide-lp='true']){display:none!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
-        "flow-menu-item[data-fake-active='true'] button,[role='menuitem'][data-fake-active='true'],[role='option'][data-fake-active='true']{background-color:rgba(255,255,255,.12)!important;border-radius:12px!important}" +
-        "flow-menu-item[data-fake-inactive='true'] button,[role='menuitem'][data-fake-inactive='true'],[role='option'][data-fake-inactive='true']{background-color:transparent!important}" +
+        "flow-menu-item[data-flow-blocked-model='1'],[role='menuitem'][data-flow-blocked-model='1'],[role='option'][data-flow-blocked-model='1'],flow-menu-item:has([data-flow-blocked-model='1']){display:none!important;height:0!important;min-height:0!important;max-height:0!important;overflow:hidden!important;opacity:0!important;padding:0!important;margin:0!important;border:0!important;pointer-events:none!important}" +
         "[data-pakflow-autosetup-hide='true']{opacity:0!important;pointer-events:none!important;transition:none!important}" +
         "body[data-pakflow-boot-hide='true'] [role='dialog'],body[data-pakflow-boot-hide='true'] [data-radix-popper-content-wrapper],body[data-pakflow-boot-hide='true'] .cdk-overlay-pane,body[data-pakflow-boot-hide='true'] flow-prompt-box-settings,body[data-pakflow-boot-hide='true'] [role='menu'],body[data-pakflow-boot-hide='true'] [role='listbox']{opacity:0!important;pointer-events:none!important;transition:none!important}" +
         "a[data-fake-credits]{color:transparent!important;position:relative!important}" +
@@ -1999,9 +2013,7 @@ loadSavedProjectsFromDevice();
         "mat-button-toggle{flex:1!important;}" +
         "button[data-hide-submit='true']{display:none!important;pointer-events:none!important;opacity:0!important}" +
         "button[data-hide-signout='true'],[data-hide-signout='true']{display:none!important;visibility:hidden!important;pointer-events:none!important;opacity:0!important;height:0!important;min-height:0!important;padding:0!important;margin:0!important;}" +
-        "button[data-hide-agent='true'],flow-agent-mode-toggle-chip[data-hide-agent='true'],[data-pakflow-agent-hidden='true']{display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;opacity:0!important;}" +
         "[data-hide-image-only='true'],mat-button-toggle:has([data-hide-image-only='true']){display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;opacity:0!important;overflow:hidden!important;}" +
-        "body[data-flow-image-only='true'] flow-agent-panel,body[data-flow-image-only='true'] flow-agent-mode-toggle-chip{display:none!important;visibility:hidden!important;pointer-events:none!important;}" +
         "a[href*='flow_ai_credits_page']{font-size:0!important;color:transparent!important;pointer-events:none!important;}" +
         "a[href*='flow_ai_credits_page']>*{display:none!important;}" +
         "a[href*='flow_ai_credits_page']::after{content:attr(data-fake-total-credits) ' Google Flow credits'!important;font-size:16px!important;color:#fff!important;visibility:visible!important;text-decoration:underline!important;white-space:nowrap!important;}" +
@@ -2027,6 +2039,7 @@ loadSavedProjectsFromDevice();
         "#flow-my-projects-dock{position:fixed!important;bottom:18px!important;right:22px!important;left:auto!important;z-index:2147483645!important;display:flex!important;align-items:center!important;gap:10px!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
         "#flow-my-projects-btn,#flow-save-current-project-btn{display:inline-flex!important;align-items:center!important;gap:8px!important;background:rgba(22,19,36,0.94)!important;border:1px solid rgba(139,92,246,0.45)!important;color:#f3f4f6!important;padding:8px 16px!important;border-radius:999px!important;font-size:13px!important;font-weight:600!important;cursor:pointer!important;box-shadow:0 8px 24px rgba(0,0,0,0.6)!important;transition:all .18s ease!important;}" +
         "#flow-my-projects-btn:hover,#flow-save-current-project-btn:hover{background:rgba(38,31,64,0.98)!important;border-color:rgba(167,139,250,0.8)!important;transform:translateY(-1px)!important;}" +
+        "flow-agent-mode-toggle-chip,flow-agent-mode-toggle-chip *,button.agent-mode-chip,.agent-mode-chip,.agent-mode-chip-label,.add-clip-button-container,[class*='add-clip-button-container'],button[aria-label*='agent' i],[role='tab'][aria-label*='agent' i],[role='button'][aria-label*='agent' i],[data-flow-agent-blocked='true'],button[aria-label*='create tool' i],[role='button'][aria-label*='create tool' i],a[aria-label*='create tool' i],[data-flow-create-tool='1'],button[aria-label='Tools' i],[role='tab'][aria-label='Tools' i],a[href*='/tools' i],[data-flow-tools-btn='1']{display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;min-width:0!important;min-height:0!important;max-width:0!important;max-height:0!important;margin:0!important;padding:0!important;border:0!important;overflow:hidden!important;opacity:0!important;}" +
         "#flow-my-projects-count{background:rgba(139,92,246,0.35)!important;color:#ddd6fe!important;padding:1px 8px!important;border-radius:999px!important;font-size:11px!important;font-weight:700!important;}" +
         "#flow-saved-projects-backdrop{position:fixed!important;inset:0!important;background:rgba(0,0,0,0.72)!important;backdrop-filter:blur(6px)!important;z-index:2147483646!important;display:none;align-items:center!important;justify-content:center!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
         "#flow-saved-projects-modal{width:92vw!important;max-width:960px!important;max-height:82vh!important;background:rgba(19,17,28,0.97)!important;border:1px solid rgba(139,92,246,0.38)!important;border-radius:16px!important;padding:22px!important;display:flex!important;flex-direction:column!important;gap:18px!important;box-shadow:0 24px 64px rgba(0,0,0,0.85)!important;}" +
@@ -2113,21 +2126,6 @@ loadSavedProjectsFromDevice();
     }, true);
   });
 
-  function matchKnownModelName(rawItemText) {
-    const cleaned = cleanText(rawItemText || '').replace(/\s*\[Lower Priority\]/gi, '').trim();
-    if (!cleaned) return '';
-    if (creditMap[cleaned]) return cleaned;
-    const lower = cleaned.toLowerCase();
-    if (lower.includes('omni')) return 'Omni 1.1 Flash';
-    if (lower.includes('quality')) return 'Veo 3.1 - Quality';
-    if (lower.includes('fast')) return 'Veo 3.1 - Fast';
-    if (lower.includes('lite')) return 'Veo 3.1 - Lite';
-    for (const k of Object.keys(creditMap)) {
-      if (cleaned.includes(k)) return k;
-    }
-    return '';
-  }
-
   function findBestBackendModelItem(allMenuItems) {
     const items = Array.from(
       allMenuItems ||
@@ -2136,11 +2134,11 @@ loadSavedProjectsFromDevice();
     const lpTarget =
       items.find((mi) => {
         const t = cleanText(mi.textContent);
-        return t.includes('Lower Priority') && t.includes('Fast');
+        return t.includes('Lower Priority') && t.includes('Lite');
       }) ||
       items.find((mi) => {
         const t = cleanText(mi.textContent);
-        return t.includes('Lower Priority') && t.includes('Lite');
+        return t.includes('Lower Priority') && t.includes('Fast');
       }) ||
       items.find((mi) => cleanText(mi.textContent).includes('Lower Priority'));
     if (lpTarget) return { target: lpTarget, isLp: true };
@@ -2199,7 +2197,7 @@ loadSavedProjectsFromDevice();
       if (creditLink) creditLink.removeAttribute('data-fake-credits');
       return;
     }
-    const targetCredits = creditMap[fakeModelName || 'Veo 3.1 - Lite'] || '5';
+    const targetCredits = '10';
     containers.forEach((row) => {
       row.style.removeProperty('display');
       const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
@@ -2215,15 +2213,6 @@ loadSavedProjectsFromDevice();
     if (creditLink) {
       creditLink.removeAttribute('data-fake-credits');
     }
-  }
-
-  function applyFakeModelToDomNow() {
-    if (!fakeModelName) fakeModelName = 'Veo 3.1 - Lite';
-    const modelMenuBtn = findModelDropdownButton();
-    if (modelMenuBtn) {
-      modelMenuBtn.setAttribute('data-fake-model', fakeModelName);
-    }
-    syncCreditCostInDom(false);
   }
 
   function closeOpenModelDropdownMenu() {
@@ -2250,14 +2239,11 @@ loadSavedProjectsFromDevice();
     const { target } = findBestBackendModelItem(allMenuItems);
     if (target) {
       const clickEl = (target.querySelector && target.querySelector('button')) || target;
-      const wasHidden = target.getAttribute('data-hide-lp') === 'true';
-      if (wasHidden) target.removeAttribute('data-hide-lp');
       target.__pakflowInternalClick = true;
       clickEl.__pakflowInternalClick = true;
       try { clickEl.click(); } catch (err) {
         simulateClick(clickEl);
       }
-      if (wasHidden) target.setAttribute('data-hide-lp', 'true');
       setTimeout(() => {
         try {
           delete target.__pakflowInternalClick;
@@ -2271,7 +2257,7 @@ loadSavedProjectsFromDevice();
     return false;
   }
 
-  // Click interception for 4K Upscaled -> 1080p (-50 cr) and redirecting model selection -> [Lower Priority] / Lite
+  // Click interception for 4K Upscaled -> 1080p (-50 cr) and redirecting any non-LP video model selection -> [Lower Priority]
   document.addEventListener('click', (e) => {
     if (!isFlowHost()) return;
     const target = e.target;
@@ -2308,211 +2294,22 @@ loadSavedProjectsFromDevice();
       }
     }
 
-    // PakFlow Model Redirection: user selects ANY model -> display & charge user's selection, but select [Lower Priority] (or Lite) in Flow
-    if (!isImageModeActive && !isImageOnlyAccount() && (itemText.includes('Veo') || itemText.includes('Omni'))) {
-      if (!itemText.includes('Lower Priority')) {
-        const matched = matchKnownModelName(itemText);
-        if (matched) {
-          fakeModelName = matched;
-          initPakflowDomEngine._userExplicitlyPickedModel = true;
-          try { sessionStorage.setItem('__pakflow_fake_model', fakeModelName); } catch (err) {}
-          applyFakeModelToDomNow();
-        }
-        const allMenuItems = document.querySelectorAll('.cdk-overlay-container flow-menu-item, .cdk-overlay-container [role="menuitem"], flow-menu-item, [role="menuitem"], [role="option"]');
-        const best = findBestBackendModelItem(allMenuItems);
-        if (!best.target || best.target === menuItem || best.target.contains(menuItem) || menuItem.contains(best.target)) {
-          // Allow native click on Veo 3.1 - Lite to select it & close the dropdown naturally
-          closeOpenModelDropdownMenu();
-          return;
-        }
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-        triggerLowerPrioritySelection(allMenuItems);
+    // Force Low Priority Model: if user clicks any non-Lower-Priority video model, redirect to [Lower Priority]
+    if (!isImageModeActive && !isImageOnlyAccount() && isBlockedModelLabel(itemText)) {
+      const allMenuItems = document.querySelectorAll('.cdk-overlay-container flow-menu-item, .cdk-overlay-container [role="menuitem"], flow-menu-item, [role="menuitem"], [role="option"]');
+      const best = findBestBackendModelItem(allMenuItems);
+      if (!best.target || best.target === menuItem || best.target.contains(menuItem) || menuItem.contains(best.target)) {
+        closeOpenModelDropdownMenu();
+        return;
       }
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      triggerLowerPrioritySelection(allMenuItems);
     }
   }, true);
 
-  // PakFlow Agent Mode Storage Sanitizer & Auto-Deactivator
-  let lastAgentDeactivateAt = 0;
-
-  function sanitizePakflowAgentStorage() {
-    try {
-      [sessionStorage, localStorage].forEach((st) => {
-        if (!st) return;
-        for (let i = 0; i < st.length; i++) {
-          const key = st.key(i);
-          if (!key) continue;
-          const lower = key.toLowerCase();
-          if ((lower.includes('agent') || lower.includes('agentmode')) && !key.startsWith('__pakflow')) {
-            const val = String(st.getItem(key) || '').toLowerCase();
-            if (val === 'true' || val === '1' || val === 'open' || val === 'active' || val === 'expanded') {
-              st.setItem(key, 'false');
-            }
-          }
-        }
-      });
-    } catch (e) {}
-  }
-
-  function cleanAgentUrlParams() {
-    try {
-      if (window.location.search && window.location.search.toLowerCase().includes('agent')) {
-        const url = new URL(window.location.href);
-        let changed = false;
-        for (const p of ['mode', 'agent', 'tab', 'panel', 'view']) {
-          if (url.searchParams.has(p) && (url.searchParams.get(p) || '').toLowerCase().includes('agent')) {
-            url.searchParams.delete(p);
-            changed = true;
-          }
-        }
-        if (changed) {
-          window.history.replaceState(null, '', url.pathname + (url.search ? url.search : '') + url.hash);
-        }
-      }
-    } catch (e) {}
-  }
-
-  function isAgentToggleActive(el) {
-    if (!el) return false;
-    const checkNode = (node) => {
-      if (!node || !(node instanceof Element)) return false;
-      if (node.getAttribute('aria-pressed') === 'true') return true;
-      if (node.getAttribute('aria-checked') === 'true') return true;
-      if (node.getAttribute('aria-selected') === 'true') return true;
-      if (node.getAttribute('data-state') === 'on' || node.getAttribute('data-state') === 'checked' || node.getAttribute('data-state') === 'active') return true;
-      const cls = String(node.className || '').toLowerCase();
-      if (/\b(active|selected|checked|enabled|is-active|on|mdc-evolution-chip--selected|mat-mdc-chip-selected)\b/.test(cls)) return true;
-      return false;
-    };
-    if (checkNode(el)) return true;
-    if (el.parentElement && checkNode(el.parentElement)) return true;
-    const chip = el.closest && el.closest('flow-agent-mode-toggle-chip, mat-chip-option, mat-chip');
-    if (chip && checkNode(chip)) return true;
-    return false;
-  }
-
-  function fireToggleExitClick(target) {
-    if (!target) return;
-    try {
-      target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
-      target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-      target.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true }));
-      target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-      target.click();
-    } catch (e) {
-      try { target.click(); } catch (_) {}
-    }
-  }
-
-  function ensureExitAgentModeAndHideToggle() {
-    cleanAgentUrlParams();
-    const now = Date.now();
-    const canTriggerExit = now - lastAgentDeactivateAt > 550;
-
-    // 1. Check if Google Flow's <flow-agent-panel> or Agent Mode toggle chip is open/checked
-    const agentPanel = document.querySelector('flow-agent-panel, [data-testid*="agent-panel" i]');
-    const checkedChip = document.querySelector('flow-agent-mode-toggle-chip.checked, flow-agent-mode-toggle-chip[aria-selected="true"], flow-agent-mode-toggle-chip[aria-pressed="true"]');
-
-    if (canTriggerExit) {
-      let triggered = false;
-
-      // Click close button inside <flow-agent-panel> if present
-      if (agentPanel) {
-        const closeBtns = agentPanel.querySelectorAll('button');
-        for (const b of closeBtns) {
-          const txt = (b.textContent || '').trim().toLowerCase();
-          const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-          const title = (b.getAttribute('title') || '').toLowerCase();
-          if (txt === 'close' || txt.includes('close') || aria.includes('close') || aria.includes('collapse') || title.includes('close')) {
-            fireToggleExitClick(b);
-            triggered = true;
-            break;
-          }
-        }
-      }
-
-      // Click checked <flow-agent-mode-toggle-chip> or its inner button to exit Agent Mode
-      if (checkedChip) {
-        const innerBtn = checkedChip.querySelector('button, [role="button"], [role="switch"]') || checkedChip;
-        fireToggleExitClick(innerBtn);
-        if (innerBtn !== checkedChip) fireToggleExitClick(checkedChip);
-        triggered = true;
-      }
-
-      // Also check any complementary/aside Agent panel with close button
-      const sidePanels = document.querySelectorAll('[role="complementary"], aside, [aria-label*="Agent" i]');
-      for (const panel of sidePanels) {
-        const pText = (panel.textContent || '').toUpperCase();
-        if (pText.includes('AGENT') && (pText.includes('SESSION') || pText.includes('CHAT') || pText.includes('HISTORY') || pText.includes('PLAN'))) {
-          const cBtn = panel.querySelector('button[aria-label*="close" i], button[aria-label*="collapse" i], button[title*="close" i]');
-          if (cBtn) {
-            fireToggleExitClick(cBtn);
-            triggered = true;
-          }
-        }
-      }
-
-      if (triggered) {
-        lastAgentDeactivateAt = now;
-        sanitizePakflowAgentStorage();
-      }
-    }
-
-    // 2. Scan Agent toggle buttons: if active or if agentPanel is still in DOM, turn OFF first before hiding!
-    const agentCandidates = [];
-    document.querySelectorAll('flow-agent-mode-toggle-chip, button, a, [role="button"], [role="tab"], [role="switch"]').forEach((el) => {
-      const rawTxt = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      const aria = (el.getAttribute('aria-label') || '').trim();
-      if (
-        el.tagName.toLowerCase() === 'flow-agent-mode-toggle-chip' ||
-        rawTxt === 'Agent' ||
-        /^spark\s*Agent$/i.test(rawTxt) ||
-        /^auto_awesome\s*Agent$/i.test(rawTxt) ||
-        aria.toLowerCase() === 'agent' ||
-        aria.toLowerCase() === 'agent mode'
-      ) {
-        const targetBtn = el.tagName.toLowerCase() === 'flow-agent-mode-toggle-chip' ? el : (el.closest('button') || el);
-        if (!agentCandidates.includes(targetBtn)) agentCandidates.push(targetBtn);
-      }
-    });
-
-    document.querySelectorAll('span.content').forEach((sp) => {
-      if ((sp.textContent || '').trim() === 'Agent') {
-        const btn = sp.closest('button') || sp.parentElement;
-        if (btn && !agentCandidates.includes(btn)) agentCandidates.push(btn);
-      }
-    });
-
-    const isAgentPanelStillOpen = Boolean(document.querySelector('flow-agent-panel'));
-
-    agentCandidates.forEach((btn) => {
-      const active = isAgentToggleActive(btn) || isAgentPanelStillOpen;
-      if (active) {
-        // Un-hide temporarily if needed and click to exit Agent Mode
-        if (Date.now() - lastAgentDeactivateAt > 550) {
-          lastAgentDeactivateAt = Date.now();
-          const innerClickable = btn.querySelector('button') || btn;
-          fireToggleExitClick(innerClickable);
-          if (innerClickable !== btn) fireToggleExitClick(btn);
-          sanitizePakflowAgentStorage();
-        }
-      }
-      // Hide visually once processed
-      if (btn.getAttribute('data-hide-agent') !== 'true') {
-        btn.setAttribute('data-hide-agent', 'true');
-      }
-      const hostChip = btn.closest && btn.closest('flow-agent-mode-toggle-chip');
-      if (hostChip && hostChip.getAttribute('data-hide-agent') !== 'true') {
-        hostChip.setAttribute('data-hide-agent', 'true');
-      }
-    });
-  }
-
-  sanitizePakflowAgentStorage();
-  cleanAgentUrlParams();
-
-  // PakFlow Core Loop (fast for model menu spoofing, throttled for heavy DOM scans)
+  // Core Loop (fast for Lower Priority model enforcement, throttled for heavy DOM scans)
   setInterval(() => {
     const now = Date.now();
     if (isGeminiHost()) {
@@ -2589,10 +2386,38 @@ loadSavedProjectsFromDevice();
       syncFlowPromptBoxLocalStorage();
       setupState = 6;
       setupStartTime = 0;
-      if (!initPakflowDomEngine._userExplicitlyPickedModel) {
-        fakeModelName = 'Veo 3.1 - Lite';
-      }
     }
+
+    const isToggleBtnActive = (b) => {
+      if (!b) return false;
+      const toggleParent = b.closest ? b.closest('mat-button-toggle, .mat-button-toggle') : null;
+      return (
+        b.getAttribute('aria-selected') === 'true' ||
+        b.getAttribute('aria-pressed') === 'true' ||
+        b.getAttribute('aria-checked') === 'true' ||
+        b.getAttribute('data-state') === 'active' ||
+        b.getAttribute('data-state') === 'on' ||
+        b.classList.contains('active') ||
+        b.classList.contains('selected') ||
+        b.classList.contains('mat-button-toggle-checked') ||
+        !!(toggleParent && (toggleParent.classList.contains('mat-button-toggle-checked') || toggleParent.getAttribute('aria-checked') === 'true'))
+      );
+    };
+
+    // Always hide Agent toggle chips and .add-clip-button-container immediately on every tick
+    document.querySelectorAll('flow-agent-mode-toggle-chip, .agent-mode-chip, .add-clip-button-container').forEach((el) => {
+      const btn = el.tagName === 'BUTTON' ? el : el.querySelector('button.agent-mode-chip, button');
+      if (btn && btn.getAttribute('aria-pressed') === 'true') {
+        try { btn.click(); } catch (e) {}
+      }
+      el.setAttribute('data-flow-agent-blocked', 'true');
+      el.style.setProperty('display', 'none', 'important');
+      el.style.setProperty('visibility', 'hidden', 'important');
+      el.style.setProperty('pointer-events', 'none', 'important');
+      el.style.setProperty('width', '0', 'important');
+      el.style.setProperty('height', '0', 'important');
+      el.style.setProperty('overflow', 'hidden', 'important');
+    });
 
     const runHeavyDomPass = now - (initPakflowDomEngine._lastHeavyDomPass || 0) >= 600;
     if (runHeavyDomPass) {
@@ -2601,7 +2426,6 @@ loadSavedProjectsFromDevice();
       spoofAccountIdentityInDom();
       ensureProfileIconVisible();
       updateMyProjectsUI();
-      ensureExitAgentModeAndHideToggle();
 
       // Request database credits periodically until synced
       if (!hasDatabaseCredits && now - (initPakflowDomEngine._lastCredReq || 0) > 2000) {
@@ -2622,7 +2446,6 @@ loadSavedProjectsFromDevice();
       document.querySelectorAll('button, a').forEach((el) => {
         const tc = el.textContent || '';
         if (tc.includes('Manage subscription')) el.style.pointerEvents = 'none';
-        if (tc.trim() === 'Agent') el.setAttribute('data-hide-agent', 'true');
         if (tc.includes('Add AI credits')) el.style.display = 'none';
       });
     }
@@ -2657,49 +2480,11 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      // Elevate "New project" button with #ct-blur-overlay on home page (also allow Tools tab & Create tool on all servers)
-      if (!initPakflowDomEngine._toolsTabListenerBound) {
-        initPakflowDomEngine._toolsTabListenerBound = true;
-        document.addEventListener('click', (ev) => {
-          const tEl = ev.target && ev.target.closest ? ev.target.closest('button, [role="tab"], [role="button"], a, span') : null;
-          if (!tEl) return;
-          const raw = (tEl.textContent || '').trim().toLowerCase();
-          if (raw === 'tools' || raw === 'apps' || raw.includes('create tool')) {
-            initPakflowDomEngine._toolsTabClicked = true;
-            const ov = document.getElementById('ct-blur-overlay');
-            if (ov) ov.remove();
-          } else if (raw === 'projects') {
-            initPakflowDomEngine._toolsTabClicked = false;
-          }
-        }, true);
-      }
+      // Elevate "New project" button with #ct-blur-overlay on home page (hide tools/create-tool/agent)
       const newProjBtn = Array.from(document.querySelectorAll('button')).find(
         (b) => b.textContent && b.textContent.includes('New project')
       );
-      const hasCreateToolBtnOnPage = Array.from(document.querySelectorAll('button, a, [role="button"]')).some((el) => {
-        if (!isElementVisible(el)) return false;
-        const txt = (el.textContent || '').trim().toLowerCase();
-        return txt.includes('create tool');
-      });
-      const toolsTabActive = (
-        Boolean(initPakflowDomEngine._toolsTabClicked) ||
-        hasCreateToolBtnOnPage ||
-        /tools|apps/i.test(window.location.pathname + window.location.search + window.location.hash) ||
-        Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"], span')).some((el) => {
-          const txt = (el.textContent || '').trim();
-          if (txt !== 'Tools' && txt !== 'Apps') return false;
-          const btn = el.closest('button, [role="tab"], [role="radio"]') || el.parentElement || el;
-          return (
-            btn.getAttribute('aria-selected') === 'true' ||
-            btn.getAttribute('aria-pressed') === 'true' ||
-            btn.getAttribute('data-state') === 'active' ||
-            btn.classList.contains('active') ||
-            btn.classList.contains('selected') ||
-            btn.classList.contains('mat-button-toggle-checked')
-          );
-        })
-      );
-      if (newProjBtn && !toolsTabActive) {
+      if (newProjBtn) {
         let overlay = document.getElementById('ct-blur-overlay');
         if (!overlay && newProjBtn.parentNode) {
           overlay = document.createElement('div');
@@ -2709,77 +2494,39 @@ loadSavedProjectsFromDevice();
         if (newProjBtn.getAttribute('data-elevate-btn') !== 'true') {
           newProjBtn.setAttribute('data-elevate-btn', 'true');
         }
-        document.querySelectorAll('button, [role="tab"], [role="button"], span').forEach((el) => {
-          const t = (el.textContent || '').trim().toLowerCase();
-          if (t === 'tools' || t === 'apps' || t === 'projects' || t.includes('create tool')) {
-            const btn = el.closest('button, [role="tab"], [role="button"]') || el.parentElement || el;
-            if (btn) {
-              if (btn.getAttribute('data-elevate-btn') !== 'true') {
-                btn.setAttribute('data-elevate-btn', 'true');
-              }
-              btn.style.setProperty('position', 'relative', 'important');
-              btn.style.setProperty('z-index', '2147483641', 'important');
-              // Also elevate compact header/tablist ancestors so no parent stacking context traps Tools below #ct-blur-overlay
-              let anc = btn.parentElement;
-              for (let depth = 0; depth < 6 && anc && anc !== document.body; depth++) {
-                const rect = anc.getBoundingClientRect ? anc.getBoundingClientRect() : null;
-                if (rect && rect.height > 0 && rect.height < 140) {
-                  if (window.getComputedStyle(anc).position === 'static') {
-                    anc.style.setProperty('position', 'relative', 'important');
-                  }
-                  anc.style.setProperty('z-index', '2147483641', 'important');
-                }
-                anc = anc.parentElement;
-              }
-            }
-          }
-        });
       } else {
         const overlay = document.getElementById('ct-blur-overlay');
         if (overlay) overlay.remove();
       }
 
-      // Hide Agent span.content buttons
-      document.querySelectorAll('span.content').forEach((sp) => {
-        if ((sp.textContent || '').trim() === 'Agent') {
-          const btn = sp.closest('button');
-          if (btn && btn.getAttribute('data-hide-agent') !== 'true') {
-            btn.setAttribute('data-hide-agent', 'true');
-          }
+      // Hide Tools & Apps buttons/tabs across all servers
+      document.querySelectorAll('span, button, a, [role="tab"], [role="button"]').forEach((el) => {
+        const st = (el.textContent || '').trim().toLowerCase();
+        const al = (el.getAttribute('aria-label') || '').toLowerCase();
+        if (st === 'tools' || st === 'apps' || al === 'tools' || al === 'apps') {
+          const target = el.closest('button, [role="tab"], [role="button"]') || el;
+          target.style.setProperty('display', 'none', 'important');
+          target.style.setProperty('visibility', 'hidden', 'important');
+          target.style.setProperty('pointer-events', 'none', 'important');
+          target.setAttribute('data-flow-tools-btn', '1');
         }
       });
 
-      // Keep Tools / Apps tab enabled on all servers (both Video and Image-Only)
-      document.querySelectorAll('span').forEach((sp) => {
-        const st = (sp.textContent || '').trim();
-        if (st === 'Tools' || st === 'Apps') {
-          const parent = sp.parentElement;
-          const tabBtn = sp.closest('button, [role="tab"], [role="button"]');
-          if (!parent) return;
-          [parent, tabBtn].forEach((node) => {
-            if (node && node.classList.contains('force-hide-radix')) {
-              node.classList.remove('force-hide-radix');
-              node.style.removeProperty('display');
-              node.style.removeProperty('pointer-events');
-            }
-          });
-        }
-      });
-
-      // Hide Extend (Veo / Omni), pen_magic Omni, keep Create tool enabled on all servers, and enable 4K Upscaled menuitem
-      document.querySelectorAll('button, a, [role="button"], [role="menuitem"]').forEach((el) => {
-        if (!el.textContent) return;
-        const t = el.textContent.trim();
+      // Hide Create tool and Extend (Veo / Omni), pen_magic Omni, and enable 4K Upscaled menuitem
+      document.querySelectorAll('button, a, [role="button"], [role="menuitem"], flow-project-card').forEach((el) => {
+        if (!el.textContent && !el.getAttribute('aria-label')) return;
+        const t = (el.textContent || '').trim();
         const tl = t.toLowerCase();
-        if (tl.includes('create tool')) {
-          if (el.classList.contains('force-hide-radix')) {
-            el.classList.remove('force-hide-radix');
-            el.style.removeProperty('display');
-            el.style.removeProperty('pointer-events');
-            const prev = el.previousElementSibling;
-            if (prev && (prev.tagName === 'HR' || prev.getAttribute('role') === 'separator' || (prev.textContent || '').trim() === '')) {
-              prev.style.removeProperty('display');
-            }
+        const al = (el.getAttribute('aria-label') || '').toLowerCase();
+        if (tl.includes('create tool') || al.includes('create tool')) {
+          el.classList.add('force-hide-radix');
+          el.style.setProperty('display', 'none', 'important');
+          el.style.setProperty('visibility', 'hidden', 'important');
+          el.style.setProperty('pointer-events', 'none', 'important');
+          el.setAttribute('data-flow-create-tool', '1');
+          const prev = el.previousElementSibling;
+          if (prev && (prev.tagName === 'HR' || prev.getAttribute('role') === 'separator' || (prev.textContent || '').trim() === '')) {
+            prev.style.setProperty('display', 'none', 'important');
           }
           return;
         }
@@ -2802,6 +2549,40 @@ loadSavedProjectsFromDevice();
               child.style.setProperty('display', 'none', 'important');
             }
           });
+        }
+      });
+
+      // Hide and block Agent mode across all controls
+      document.querySelectorAll('button, [role="tab"], [role="radio"], [role="button"], [role="menuitem"], flow-menu-item').forEach((b) => {
+        const cleanLbl = getButtonCleanLabel(b).toLowerCase();
+        const rawLbl = (b.textContent || '').trim().toLowerCase();
+        const ariaLbl = (b.getAttribute('aria-label') || '').toLowerCase();
+        const isAgent = /^(?:use\s+|flow\s+)?agent(?:\b|$)/i.test(cleanLbl) ||
+                        /^(?:use\s+|flow\s+)?agent(?:\b|$)/i.test(rawLbl) ||
+                        ariaLbl.includes('agent');
+        if (isAgent) {
+          if (isToggleBtnActive(b)) {
+            const container = b.parentElement;
+            if (container) {
+              const videoBtn = Array.from(container.querySelectorAll('button, [role="tab"], [role="radio"]')).find(
+                (btn) => btn !== b && /video/i.test(getButtonCleanLabel(btn) || btn.textContent || '')
+              );
+              if (videoBtn) {
+                try { videoBtn.click(); } catch (e) { simulateClick(videoBtn); }
+              }
+            }
+          }
+          b.setAttribute('data-flow-agent-blocked', 'true');
+          b.style.setProperty('display', 'none', 'important');
+          b.style.setProperty('visibility', 'hidden', 'important');
+          b.style.setProperty('pointer-events', 'none', 'important');
+          const chipHost = b.closest && b.closest('flow-agent-mode-toggle-chip');
+          if (chipHost) {
+            chipHost.setAttribute('data-flow-agent-blocked', 'true');
+            chipHost.style.setProperty('display', 'none', 'important');
+            chipHost.style.setProperty('visibility', 'hidden', 'important');
+            chipHost.style.setProperty('pointer-events', 'none', 'important');
+          }
         }
       });
 
@@ -2831,18 +2612,6 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      // Hide stray model labels on canvas cards (outside buttons/menus)
-      document.querySelectorAll('div, span, p').forEach((el) => {
-        if (el.childNodes.length === 1 && el.childNodes[0].nodeType === 3) {
-          const txt = el.textContent || '';
-          if (txt.includes('Veo 3.1') || txt.includes('Omni') || txt.includes('[Lower Priority]')) {
-            if (!el.closest('button') && !el.closest('flow-menu-item') && !el.closest('[role="menuitem"]') && !el.closest('[role="menu"]')) {
-              el.style.setProperty('display', 'none', 'important');
-            }
-          }
-        }
-      });
-
       // Hide "Not enough AI credits to upscale" tooltip
       document.querySelectorAll('div[role="tooltip"], div, span').forEach((el) => {
         if (el.textContent && el.textContent.trim() === 'Not enough AI credits to upscale') {
@@ -2857,22 +2626,6 @@ loadSavedProjectsFromDevice();
     }
 
     isLockedBySubmission = false;
-
-    const isToggleBtnActive = (b) => {
-      if (!b) return false;
-      const toggleParent = b.closest ? b.closest('mat-button-toggle, .mat-button-toggle') : null;
-      return (
-        b.getAttribute('aria-selected') === 'true' ||
-        b.getAttribute('aria-pressed') === 'true' ||
-        b.getAttribute('aria-checked') === 'true' ||
-        b.getAttribute('data-state') === 'active' ||
-        b.getAttribute('data-state') === 'on' ||
-        b.classList.contains('active') ||
-        b.classList.contains('selected') ||
-        b.classList.contains('mat-button-toggle-checked') ||
-        !!(toggleParent && (toggleParent.classList.contains('mat-button-toggle-checked') || toggleParent.getAttribute('aria-checked') === 'true'))
-      );
-    };
 
     // Hide sign-out buttons & x2/x3/x4 batch multiplier tabs, and auto-select x1 ONLY if non-x1 is actually active
     const allButtons = document.querySelectorAll('button, [role="tab"], [role="radio"]');
@@ -2928,17 +2681,9 @@ loadSavedProjectsFromDevice();
       if (document.body && document.body.getAttribute('data-flow-image-only') !== 'true') {
         document.body.setAttribute('data-flow-image-only', 'true');
       }
-      // Hide Video tab, Frames tab, Video models, Durations (4s/6s/8s/10s), Agent, and credit cost line (keep Tools / Apps / Create tool enabled!)
+      // Hide Video tab, Frames tab, Video models, Durations (4s/6s/8s/10s), Tools, Create tool, Agent, and credit cost line
       document.querySelectorAll('button, [role="tab"], [role="radio"], [role="combobox"]').forEach((b) => {
         const cleanLbl = getButtonCleanLabel(b).toLowerCase();
-        if (cleanLbl === 'tools' || cleanLbl === 'apps' || cleanLbl.includes('create tool')) {
-          if (b.getAttribute('data-hide-image-only') === 'true') {
-            b.removeAttribute('data-hide-image-only');
-            b.style.removeProperty('display');
-            b.style.removeProperty('pointer-events');
-          }
-          return;
-        }
         if (
           cleanLbl === 'video' ||
           cleanLbl === 'videos' ||
@@ -2947,11 +2692,17 @@ loadSavedProjectsFromDevice();
           cleanLbl === '6s' ||
           cleanLbl === '8s' ||
           cleanLbl === '10s' ||
-          cleanLbl === 'agent'
+          cleanLbl === 'tools' ||
+          cleanLbl === 'apps' ||
+          cleanLbl.includes('create tool') ||
+          /^(?:use\s+|flow\s+)?agent(?:\b|$)/i.test(cleanLbl)
         ) {
           if (b.getAttribute('data-hide-image-only') !== 'true') {
             b.setAttribute('data-hide-image-only', 'true');
           }
+          b.style.setProperty('display', 'none', 'important');
+          b.style.setProperty('visibility', 'hidden', 'important');
+          b.style.setProperty('pointer-events', 'none', 'important');
         }
         const bt = (b.textContent || '').trim();
         if (bt.length < 70 && !bt.includes('Extend (') && (bt.includes('Veo') || bt.includes('Omni') || bt.includes('Lower Priority'))) {
@@ -2961,8 +2712,8 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      // Hide "Generating will use X credits" in Image-Only mode (0 cost)
-      syncCreditCostInDom(true);
+      // Show "Generating will use 10 credits" in Image-Only mode
+      syncCreditCostInDom(false);
 
       // Ensure Flow is switched to Image tab and x1
       const allModeBtns = Array.from(document.querySelectorAll('button, [role="tab"], [role="radio"]'));
@@ -2996,7 +2747,6 @@ loadSavedProjectsFromDevice();
       }
 
       isImageModeActive = true;
-      document.querySelectorAll('[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
       return;
     }
 
@@ -3023,9 +2773,8 @@ loadSavedProjectsFromDevice();
       if (document.body && document.body.getAttribute('data-pakflow-boot-hide') === 'true') {
         document.body.removeAttribute('data-pakflow-boot-hide');
       }
-      document.querySelectorAll('[data-fake-model]').forEach((b) => b.removeAttribute('data-fake-model'));
-      // Hide credit cost line in Image mode since Image generation is 0 cost
-      syncCreditCostInDom(true);
+      // Show "Generating will use 10 credits" in Image mode
+      syncCreditCostInDom(false);
       const subBtn = Array.from(document.querySelectorAll('button')).find(
         (b) => b.textContent && b.textContent.includes('arrow_forward')
       );
@@ -3042,19 +2791,19 @@ loadSavedProjectsFromDevice();
       submitBtn.removeAttribute('data-hide-submit');
     }
 
-    if (!fakeModelName) {
-      fakeModelName = 'Veo 3.1 - Lite';
-    }
-
-    // Passive settings-popover model sync: if the user opens <flow-prompt-box-settings> and the backend model button still says Omni/Abra (not Lower Priority), silently switch it once
+    // Force Low Priority Model inside <flow-prompt-box-settings>: if the model button shows any non-Lower-Priority video model, switch it to [Lower Priority]
     const settingsPanelEl = document.querySelector('flow-prompt-box-settings');
-    if (settingsPanelEl && modelMenuBtn && !anyMenuOpen && !settingsPanelEl.__pakflowModelSynced) {
-      settingsPanelEl.__pakflowModelSynced = true;
+    if (settingsPanelEl && modelMenuBtn && !anyMenuOpen) {
       const rawModelBtnTxt = (modelMenuBtn.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!/Lower Priority/i.test(rawModelBtnTxt) && /Omni|Abra/i.test(rawModelBtnTxt)) {
+      if (
+        (isBlockedModelLabel(rawModelBtnTxt) || (!/Lower Priority/i.test(rawModelBtnTxt) && /Veo|Omni|Abra/i.test(rawModelBtnTxt))) &&
+        now - (initPakflowDomEngine._lastLpForceAt || 0) > 1200
+      ) {
+        initPakflowDomEngine._lastLpForceAt = now;
         try {
           modelMenuBtn.click();
           setTimeout(() => {
+            enforceModelRestrictions();
             const menuItems = document.querySelectorAll('.cdk-overlay-container flow-menu-item, .cdk-overlay-container [role="menuitem"], flow-menu-item, [role="menuitem"], [role="option"]');
             if (menuItems.length > 0) {
               triggerLowerPrioritySelection(menuItems);
@@ -3064,39 +2813,8 @@ loadSavedProjectsFromDevice();
       }
     }
 
-    // Spoof modelMenuBtn with fakeModelName, hide [Lower Priority] & Omni 1.2 menu items, and spoof credits line
-    if (modelMenuBtn) {
-      try {
-        const btnRect = modelMenuBtn.getBoundingClientRect();
-        const iconEl = modelMenuBtn.querySelector('i, .google-symbols, mat-icon, svg');
-        const hasLeftIcon = iconEl && btnRect.width > 0 && (iconEl.getBoundingClientRect().left - btnRect.left < 32);
-        modelMenuBtn.style.setProperty('--fake-model-left', hasLeftIcon ? '34px' : '14px');
-      } catch (e) {}
-      if (modelMenuBtn.getAttribute('data-fake-model') !== fakeModelName) {
-        modelMenuBtn.setAttribute('data-fake-model', fakeModelName);
-      }
-    }
-
-    document.querySelectorAll('flow-menu-item, [role="menuitem"], [role="option"]').forEach((mi) => {
-      const txt = cleanText(mi.textContent);
-      if (txt.includes('Lower Priority') || isHiddenNewModelText(txt)) {
-        mi.setAttribute('data-hide-lp', 'true');
-        mi.removeAttribute('data-fake-active');
-        mi.removeAttribute('data-fake-inactive');
-      } else {
-        const matchedName = matchKnownModelName(txt);
-        if (matchedName && matchedName === fakeModelName) {
-          mi.setAttribute('data-fake-active', 'true');
-          mi.removeAttribute('data-fake-inactive');
-        } else if (matchedName) {
-          mi.removeAttribute('data-fake-active');
-          mi.setAttribute('data-fake-inactive', 'true');
-        } else {
-          mi.removeAttribute('data-fake-active');
-          mi.removeAttribute('data-fake-inactive');
-        }
-      }
-    });
+    // Hide all blocked (non-Lower-Priority) video models in open dropdown menus; keep [Lower Priority] visible!
+    enforceModelRestrictions();
 
     syncCreditCostInDom(false);
 
@@ -3106,12 +2824,115 @@ loadSavedProjectsFromDevice();
   }, 50);
 })();
 
+function modelLabelFromEl(el) {
+  if (!el) return '';
+  const inner = el.querySelector('.label, .item-text .label, .item-text, .mat-mdc-menu-item-text, .model-select-trigger-content');
+  return normalizeModelLabel(
+    (inner && (inner.innerText || inner.textContent)) ||
+    el.innerText ||
+    el.textContent ||
+    el.getAttribute('aria-label') ||
+    ''
+  );
+}
+
+function hideBlockedModelNode(el) {
+  if (!el) return;
+  const row = el.closest('flow-menu-item') || el;
+  try { row.setAttribute('data-flow-blocked-model', '1'); } catch (e) {}
+  try {
+    row.style.setProperty('display', 'none', 'important');
+    row.style.setProperty('visibility', 'hidden', 'important');
+    row.style.setProperty('pointer-events', 'none', 'important');
+    row.style.setProperty('opacity', '0', 'important');
+    row.style.setProperty('height', '0px', 'important');
+    row.style.setProperty('max-height', '0px', 'important');
+    row.style.setProperty('overflow', 'hidden', 'important');
+    row.setAttribute('aria-hidden', 'true');
+  } catch (e) {}
+  try {
+    row.querySelectorAll('button, [role="menuitem"]').forEach((btn) => {
+      btn.style.setProperty('display', 'none', 'important');
+      btn.setAttribute('aria-hidden', 'true');
+      try { btn.disabled = true; } catch (e2) {}
+    });
+  } catch (e) {}
+}
+
 function enforceModelRestrictions() {
-  // Handled by PakFlow 50ms loop (data-hide-lp="true" hides [Lower Priority] while keeping standard models visible)
+  try {
+    const host = (location.hostname || '').toLowerCase();
+    if (!host.includes('flow.google.com') && !host.includes('labs.google')) return;
+    const checkNode = (el) => {
+      if (!el) return;
+      if (el.getAttribute('data-flow-blocked-model') === '1') {
+        hideBlockedModelNode(el);
+        return;
+      }
+      const lbl = modelLabelFromEl(el);
+      if (!lbl || lbl.length > 120) return;
+      if (!isBlockedModelLabel(lbl)) return;
+      hideBlockedModelNode(el);
+    };
+    document
+      .querySelectorAll('flow-menu-item, button.mat-mdc-menu-item, button[mat-menu-item], button.flow-internal-menu-item, [role="menuitem"], [role="option"], .flow-internal-menu-item')
+      .forEach(checkNode);
+    document
+      .querySelectorAll('.mat-mdc-menu-content flow-menu-item, .mat-mdc-menu-panel [role="menuitem"], .cdk-overlay-container flow-menu-item, .cdk-overlay-container [role="menuitem"], .cdk-overlay-container [role="option"]')
+      .forEach(checkNode);
+  } catch (e) {}
 }
 
 function autoSelectLowerPriorityModel() {
-  // Handled by PakFlow setupState (0 -> 6) state machine & click redirection
+  try {
+    const host = (location.hostname || '').toLowerCase();
+    if (!host.includes('flow.google.com') && !host.includes('labs.google')) return;
+    if (isImageOnlyAccount()) return;
+    if (!window.__flowBlockedModelKickAt) window.__flowBlockedModelKickAt = 0;
+    const now = Date.now();
+    if (now - window.__flowBlockedModelKickAt < 1800) return;
+    const triggers = Array.from(
+      document.querySelectorAll('button[aria-label="Select model family"], button.mat-mdc-menu-trigger .model-select-trigger-content, .model-select-trigger-content, flow-prompt-box-settings button, flow-prompt-box-settings [role="combobox"]')
+    );
+    let blockedTrigger = null;
+    for (const t of triggers) {
+      const lbl = modelLabelFromEl(t);
+      if (isBlockedModelLabel(lbl)) {
+        blockedTrigger = t.closest('button, [role="combobox"]') || t;
+        break;
+      }
+    }
+    if (!blockedTrigger) return;
+    window.__flowBlockedModelKickAt = now;
+    const cands = Array.from(
+      document.querySelectorAll('flow-menu-item button, button.mat-mdc-menu-item, [role="menuitem"], [role="option"], button.flow-internal-menu-item')
+    ).filter((el) => {
+      if (!isElementVisible(el)) return false;
+      if (el.getAttribute('data-flow-blocked-model') === '1') return false;
+      if (el.closest('[data-flow-blocked-model="1"]')) return false;
+      const lbl = modelLabelFromEl(el);
+      if (!lbl || lbl.length > 120) return false;
+      if (isBlockedModelLabel(lbl)) return false;
+      return /veo|omni|banana|nano|flash|lite|fast|quality|priority/i.test(lbl);
+    });
+    cands.sort((a, b) => {
+      const score = (el) => {
+        const l = modelLabelFromEl(el).toLowerCase();
+        if (/lower\s*priority/.test(l)) return 0;
+        if (/banana|nano/.test(l)) return 1;
+        return 2;
+      };
+      return score(a) - score(b);
+    });
+    if (cands[0]) {
+      hardClick(cands[0]);
+      return;
+    }
+    const openBtn = document.querySelector('button[aria-label="Select model family"]') || blockedTrigger;
+    if (openBtn && isElementVisible(openBtn)) {
+      hardClick(openBtn);
+    }
+  } catch (e) {}
 }
 
 function renameLowerPriorityText(_element) {}
@@ -4582,7 +4403,7 @@ function hideExistingProjects() {
   ensureNewProjectClickable();
   document.querySelectorAll('.projects-grid, flow-project-card').forEach((card) => {
     const t = (card.innerText || card.textContent || '').replace(/\s+/g, ' ').trim();
-    if (/new project|create tool/i.test(t) || card.querySelector('[data-flow-new-project="1"]')) {
+    if ((/new project/i.test(t) && !/create tool/i.test(t)) || (card.querySelector('[data-flow-new-project="1"]') && !/create tool/i.test(t))) {
       ensureClickableTree(card);
       return;
     }

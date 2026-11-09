@@ -104,11 +104,11 @@ function requireAppDeviceAttestation(req) {
   const isWindows = /^windows-exe$/i.test(platform);
   const isAndroid = /^android$/i.test(platform);
 
-  if (isWindows && compareSemver(versionRaw, '8.0.15') < 0) {
+  if (isWindows && compareSemver(versionRaw, '8.0.18') < 0) {
     return {
       ok: false,
       code: 'FORCE_UPDATE',
-      error: 'Please download the latest Flow Browser (v8.0.15+).',
+      error: 'Please download the latest Flow Browser (v8.0.18+).',
       deviceId,
       client,
     };
@@ -196,12 +196,19 @@ function requireAppDeviceAttestation(req) {
   }
 
   const signingKey = isWindows ? WIN_SIGNING_KEY : ANDROID_SIGNING_KEY;
-  const payload = `v11|${client}|${deviceId}|${binHash}|${ts}|${nonce}`;
-  const expectedSig = crypto.createHmac('sha256', signingKey).update(payload, 'utf8').digest('base64url');
+  const payloadV12 = `v12|${client}|${deviceId}|${binHash}|${ts}|${nonce}`;
+  const payloadV11 = `v11|${client}|${deviceId}|${binHash}|${ts}|${nonce}`;
+  const expectedSigV12 = crypto.createHmac('sha256', signingKey).update(payloadV12, 'utf8').digest('base64url');
+  const expectedSigV11 = crypto.createHmac('sha256', signingKey).update(payloadV11, 'utf8').digest('base64url');
 
   const sigBuf = Buffer.from(signature, 'utf8');
-  const expBuf = Buffer.from(expectedSig, 'utf8');
-  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+  const expBuf12 = Buffer.from(expectedSigV12, 'utf8');
+  const expBuf11 = Buffer.from(expectedSigV11, 'utf8');
+
+  const matchV12 = sigBuf.length === expBuf12.length && crypto.timingSafeEqual(sigBuf, expBuf12);
+  const matchV11 = sigBuf.length === expBuf11.length && crypto.timingSafeEqual(sigBuf, expBuf11);
+
+  if (!matchV12 && !matchV11) {
     return {
       ok: false,
       code: 'TAMPERED_CLIENT',

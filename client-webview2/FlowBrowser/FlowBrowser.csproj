@@ -10,7 +10,7 @@
     <RootNamespace>FlowBrowser</RootNamespace>
     <ApplicationTitle>Flow Browser</ApplicationTitle>
     <ApplicationIcon>FlowBrowser.ico</ApplicationIcon>
-    <Version>8.0.15</Version>
+    <Version>8.0.18</Version>
     <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
     <DebugSymbols Condition="'$(Configuration)' == 'Release'">false</DebugSymbols>
   </PropertyGroup>
@@ -40,7 +40,7 @@
       <_PackScript>$(MSBuildProjectDirectory)\tools\pack-www.ps1</_PackScript>
       <_EncryptScript>$(MSBuildProjectDirectory)\tools\encrypt-www.cjs</_EncryptScript>
     </PropertyGroup>
-    <Exec Condition="'$(Configuration)' == 'Release'"
+    <Exec Condition="'$(Configuration)' == 'Release' and '$(SkipPackWww)' != 'true'"
           Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(_PackScript)&quot;" />
     <Exec Condition="'$(Configuration)' != 'Release'"
           Command="powershell -NoProfile -Command &quot;if (Test-Path '$(_WwwZip)') { Remove-Item '$(_WwwZip)' -Force }; if (Test-Path '$(_WwwVault)') { Remove-Item '$(_WwwVault)' -Force }; Compress-Archive -Path '$(MSBuildProjectDirectory)\www\*' -DestinationPath '$(_WwwZip)' -Force; node '$(_EncryptScript)'&quot;" />
@@ -54,6 +54,11 @@
   <Target Name="CleanWwwZip" AfterTargets="Clean">
     <Delete Files="$(MSBuildProjectDirectory)\www.zip;$(MSBuildProjectDirectory)\www.vault" TreatErrorsAsWarnings="true" />
     <RemoveDir Directories="$(MSBuildProjectDirectory)\www-packed" />
+  </Target>
+
+  <!-- Obfuscate Flow Browser.dll IL & strings with Obfuscar before signing and single-file bundling -->
+  <Target Name="ObfuscateAssemblyWithObfuscar" AfterTargets="CopyFilesToOutputDirectory" BeforeTargets="SignBinariesAfterBuild;ComputeResolvedFilesToPublishList;GenerateSingleFileBundle" Condition="'$(Configuration)' == 'Release'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\tools\run-obfuscar.ps1&quot; -TargetDir &quot;$(TargetDir.TrimEnd('\'))&quot; -IntermediateDir &quot;$(MSBuildProjectDirectory)\$(IntermediateOutputPath.TrimEnd('\'))&quot; -ProjectDir &quot;$(MSBuildProjectDirectory)&quot;" />
   </Target>
 
   <!-- Automatically sign Flow Browser.dll and Flow Browser.exe with SHA-256 Authenticode on Release build & Publish -->

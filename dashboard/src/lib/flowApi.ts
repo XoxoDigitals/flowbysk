@@ -5,7 +5,7 @@ const STORAGE_KEY = 'flowbro_session';
 const CLIENT_API_VERSION_KEY = 'flowbro_client_api_version';
 
 export type FlowRole = 'admin' | 'reseller' | 'user';
-export type ClientApiVersion = 'v11';
+export type ClientApiVersion = 'v12';
 
 export type FlowSession = {
   token: string;
@@ -44,15 +44,15 @@ export function downloadFlowAndroidUrl() {
 
 function normalizeClientApiVersion(value: unknown): ClientApiVersion {
   void value;
-  return 'v11';
+  return 'v12';
 }
 
 function readCachedClientApiVersion(): ClientApiVersion {
-  if (typeof window === 'undefined') return 'v11';
+  if (typeof window === 'undefined') return 'v12';
   try {
-    return normalizeClientApiVersion(localStorage.getItem(CLIENT_API_VERSION_KEY) || 'v11');
+    return normalizeClientApiVersion(localStorage.getItem(CLIENT_API_VERSION_KEY) || 'v12');
   } catch {
-    return 'v11';
+    return 'v12';
   }
 }
 
