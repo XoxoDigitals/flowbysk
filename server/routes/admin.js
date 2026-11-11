@@ -609,6 +609,13 @@ function applyUserFilters(users, query) {
     out = out.filter((u) => String(u.country || '').toUpperCase() === country);
   }
 
+  const payment = String(query.payment || query.paymentStatus || 'all').toLowerCase();
+  if (payment === 'paid') {
+    out = out.filter((u) => !!u.isPaid);
+  } else if (payment === 'unpaid' || payment === 'due') {
+    out = out.filter((u) => !u.isPaid);
+  }
+
   return out;
 }
 
@@ -637,6 +644,11 @@ async function buildFilterOptions(actor) {
       { id: 'active', label: 'Active' },
       { id: 'banned', label: 'Banned' },
       { id: 'expired', label: 'Expired' },
+    ],
+    payments: [
+      { id: 'all', label: 'All Payments' },
+      { id: 'paid', label: 'Paid' },
+      { id: 'unpaid', label: 'Due / Unpaid' },
     ],
     owners: [{ id: 'all', label: 'All' }, ...owners],
     plans: [
@@ -796,6 +808,39 @@ router.put('/users/:id', requireAdminAuth, async (req, res) => {
   }
 });
 
+router.post('/users/:id/mark-paid', requireAdminAuth, async (req, res) => {
+  try {
+    const owned = await ownedUserOr404(req, res);
+    if (!owned) return;
+    const amount = req.body?.amount !== undefined ? Number(req.body.amount) : undefined;
+    const updated = await db.updateUser(req.params.id, {
+      markPaid: true,
+      ...(amount !== undefined && !Number.isNaN(amount) ? { paymentAmount: amount } : {}),
+      adminId: owned.actor.id,
+      actorId: owned.actor.id,
+    });
+    if (!updated) return res.status(404).json({ success: false, error: 'User not found' });
+    await db.addLog(owned.actor.id, owned.actor.username, 'mark_user_paid', {
+      targetUserId: req.params.id,
+      targetUsername: updated.username,
+      amount: updated.paymentAmount,
+    });
+    res.json({ success: true, user: await publicEndUser(updated) });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/detailed-analytics', requireAdminAuth, async (req, res) => {
+  try {
+    const data = await db.getDetailedAdminAnalytics();
+    res.json({ success: true, ...data });
+  } catch (err) {
+    console.error('[admin] /detailed-analytics error:', err);
+    res.status(500).json({ success: false, error: err.message || 'Failed to fetch detailed analytics' });
+  }
+});
+
 /** Clear the 60 min Google login lock (for a single serverId or all servers) so the user can sign in right away. */
 router.post('/users/:id/reset-google-lock', requireAdminAuth, async (req, res) => {
   const owned = await ownedUserOr404(req, res);
@@ -917,7 +962,7 @@ router.post('/users/bulk-delete', requireAdminAuth, async (req, res) => {
       skipped.push({ id, username: user.username, reason: block });
       continue;
     }
-    const ok = await db.deleteUser(id);
+    const ok = await db.deleteUser(id, actor.id);
     if (!ok) {
       skipped.push({ id, username: user.username, reason: 'delete_failed' });
       continue;
@@ -960,7 +1005,7 @@ router.delete('/users/:id', requireAdminAuth, async (req, res) => {
   if (!owned) return;
   const block = await endUserDeleteBlockReason(owned.actor, owned.user);
   if (block) return res.status(400).json({ success: false, error: block });
-  const ok = await db.deleteUser(req.params.id);
+  const ok = await db.deleteUser(req.params.id, owned.actor.id);
   if (!ok) return res.status(404).json({ success: false, error: 'User not found' });
   await db.addLog(owned.actor.id, owned.actor.username, 'delete_user', {
     targetUserId: req.params.id,

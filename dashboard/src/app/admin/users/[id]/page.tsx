@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, Trash2 } from 'lucide-react';
+import { ArrowLeft, Trash2, CreditCard, CheckCircle2 } from 'lucide-react';
 import { flowFetch } from '@/lib/flowApi';
 import { HARDCODED_STD_CREDITS } from '@/lib/plans';
 import { formatLogDetails } from '@/lib/adminLogFormat';
@@ -61,6 +61,10 @@ type FlowUser = {
   googleServerLocks?: Record<string, string>;
   googleAccountLocks?: GoogleAccountLockRow[];
   serverTime?: string;
+  paymentAmount?: number;
+  paymentStatus?: 'PAID' | 'UNPAID';
+  isPaid?: boolean;
+  paidAt?: string | null;
 };
 
 type PlanRow = { id: string; name: string; maxParallel?: number; standardCreditsCycle?: number };
@@ -197,6 +201,9 @@ export default function AdminUserDetailPage() {
     planId: '',
     isActive: true,
   });
+  const [paymentAmount, setPaymentAmount] = useState<string>('0');
+  const [paymentBusy, setPaymentBusy] = useState(false);
+  const [paymentFeedback, setPaymentFeedback] = useState('');
 
   const syncLockMonotonic = (u: FlowUser) => {
     const nowMono = performance.now();
@@ -222,6 +229,7 @@ export default function AdminUserDetailPage() {
     if (!userRes.ok || !data.success) throw new Error(data.error || 'Failed to load user');
     const u = data.user as FlowUser;
     setUser(u);
+    setPaymentAmount(String(u.paymentAmount ?? 0));
     syncLockMonotonic(u);
     setCreditHistory(data.creditHistory || []);
     setActivity(data.activity || []);
@@ -257,6 +265,7 @@ export default function AdminUserDetailPage() {
       if (!res.ok || !data.success) return;
       const u = data.user as FlowUser;
       setUser(u);
+      setPaymentAmount(String(u.paymentAmount ?? 0));
       setCreditHistory(data.creditHistory || []);
       setActivity(data.activity || []);
       setLoginSessions(data.loginSessions || []);
@@ -368,6 +377,28 @@ export default function AdminUserDetailPage() {
     }));
   };
 
+  const markPaid = async () => {
+    if (!user) return;
+    setPaymentBusy(true);
+    setError('');
+    setPaymentFeedback('');
+    try {
+      const amt = Number(paymentAmount) || 0;
+      const res = await flowFetch(`/api/admin/users/${user.id}/mark-paid`, {
+        method: 'POST',
+        body: JSON.stringify({ amount: amt }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Failed to mark as paid');
+      setPaymentFeedback(`Payment of $${amt} successfully marked as paid!`);
+      await refresh();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Mark paid failed');
+    } finally {
+      setPaymentBusy(false);
+    }
+  };
+
   const save = async (e: FormEvent) => {
     e.preventDefault();
     if (!user) return;
@@ -382,6 +413,7 @@ export default function AdminUserDetailPage() {
         maxParallel: Number(form.maxParallel) || 1,
         isActive: form.isActive,
         planId: form.planId || null,
+        paymentAmount: Number(paymentAmount) || 0,
       };
       if (form.password.trim()) payload.password = form.password;
       const res = await flowFetch(`/api/admin/users/${user.id}`, {
@@ -734,6 +766,91 @@ export default function AdminUserDetailPage() {
                   </table>
                 )}
               </div>
+            </section>
+
+            <section className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-5">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-semibold flex items-center gap-2">
+                    <CreditCard className="h-4 w-4 text-[var(--a1)]" />
+                    Payment Tracking
+                  </h3>
+                  <p className="mt-0.5 text-[12px] text-[var(--ink3)]">
+                    Track user payment status. &quot;Mark as Paid&quot; is disabled while paid and automatically re-enables when the plan expires or credits end.
+                  </p>
+                </div>
+                <div>
+                  {user.isPaid ? (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                      <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                      Paid (${user.paymentAmount || 0})
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/30">
+                      <span className="h-2 w-2 rounded-full bg-rose-400" />
+                      Payment Due {user.paymentAmount ? `($${user.paymentAmount})` : ''}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-3 items-end">
+                <div>
+                  <label className="text-xs text-[var(--ink3)] block mb-1.5 font-medium">
+                    Payment Amount ($)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    placeholder="e.g. 50"
+                    className={inputClass}
+                    value={paymentAmount}
+                    onChange={(e) => setPaymentAmount(e.target.value)}
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <span className="text-[11px] text-[var(--ink3)] truncate">
+                    {user.isPaid && user.paidAt ? `Paid on ${formatWhen(user.paidAt)}` : 'Status: Unpaid / Renewal Required'}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={user.isPaid || paymentBusy}
+                    onClick={markPaid}
+                    className={`btn-primary !px-4 !py-2 !text-xs flex items-center justify-center gap-2 ${
+                      user.isPaid
+                        ? '!bg-emerald-950/60 !text-emerald-400/60 border border-emerald-500/30 cursor-not-allowed opacity-60'
+                        : '!bg-emerald-600 hover:!bg-emerald-500 text-white'
+                    }`}
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    {paymentBusy ? 'Saving…' : user.isPaid ? 'Paid (Locked)' : 'Mark as Paid'}
+                  </button>
+                </div>
+
+                <div className="text-xs text-[var(--ink3)] leading-relaxed">
+                  {user.isPaid ? (
+                    <span className="text-emerald-400/90">
+                      ✓ Marked as Paid. This button will automatically re-enable when the user&apos;s plan expires or credits drop to 0.
+                    </span>
+                  ) : (
+                    <span className="text-amber-400/90">
+                      {(user.credits || 0) <= 0
+                        ? '⚠ Credits ended (0 credits remaining) — payment renewal required.'
+                        : expired
+                        ? '⚠ Plan expired — payment renewal required.'
+                        : 'Payment is due. Set the amount and click "Mark as Paid".'}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {paymentFeedback && (
+                <p className="mt-3 text-xs text-emerald-400 font-medium">
+                  {paymentFeedback}
+                </p>
+              )}
             </section>
 
             <section className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-5">

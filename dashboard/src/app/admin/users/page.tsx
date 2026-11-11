@@ -37,6 +37,10 @@ type FlowUser = {
   lastIp?: string | null;
   googleSessionLockUntil?: string | null;
   googleAccountLocks?: GoogleAccountLockRow[];
+  paymentAmount?: number;
+  paymentStatus?: 'PAID' | 'UNPAID';
+  isPaid?: boolean;
+  paidAt?: string | null;
 };
 
 type PlanRow = {
@@ -66,6 +70,7 @@ export default function AdminUsersPage() {
   const [plan, setPlan] = useState('all');
   const [source, setSource] = useState('all');
   const [country, setCountry] = useState('all');
+  const [payment, setPayment] = useState('all');
   const [filterOpts, setFilterOpts] = useState<{
     statuses: FilterOpt[];
     owners: FilterOpt[];
@@ -106,6 +111,7 @@ export default function AdminUsersPage() {
       if (plan !== 'all') params.set('plan', plan);
       if (source !== 'all') params.set('source', source);
       if (country !== 'all') params.set('country', country);
+      if (payment !== 'all') params.set('payment', payment);
       const qs = params.toString();
       const [usersRes, plansRes] = await Promise.all([
         flowFetch(`/api/admin/users${qs ? `?${qs}` : ''}`),
@@ -147,7 +153,7 @@ export default function AdminUsersPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, owner, plan, source, country]);
+  }, [status, owner, plan, source, country, payment]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -410,6 +416,11 @@ export default function AdminUsersPage() {
             </option>
           ))}
         </select>
+        <select className={selectClass} value={payment} onChange={(e) => setPayment(e.target.value)}>
+          <option value="all">Payment: All</option>
+          <option value="paid">Payment: Paid</option>
+          <option value="unpaid">Payment: Due / Unpaid</option>
+        </select>
       </div>
 
       {error && (
@@ -565,19 +576,20 @@ export default function AdminUsersPage() {
               <th className="px-4 py-3 font-medium">Expiry</th>
               <th className="px-4 py-3 font-medium">Server</th>
               <th className="px-4 py-3 font-medium">Status</th>
+              <th className="px-4 py-3 font-medium">Payment</th>
               <th className="px-4 py-3 font-medium" />
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={9} className="px-4 py-8 text-center text-[var(--ink3)]">
+                <td colSpan={10} className="px-4 py-8 text-center text-[var(--ink3)]">
                   Loading…
                 </td>
               </tr>
             ) : users.length === 0 ? (
               <tr>
-                <td colSpan={9} className="px-4 py-8 text-center text-[var(--ink3)]">
+                <td colSpan={10} className="px-4 py-8 text-center text-[var(--ink3)]">
                   No users
                 </td>
               </tr>
@@ -663,6 +675,17 @@ export default function AdminUsersPage() {
                         <span className="text-amber-400">Expired</span>
                       ) : (
                         <span className="text-emerald-400">Active</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {u.isPaid ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                          Paid (${u.paymentAmount || 0})
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/30">
+                          Due {u.paymentAmount ? `($${u.paymentAmount})` : ''}
+                        </span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-right whitespace-nowrap">

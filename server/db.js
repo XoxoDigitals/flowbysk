@@ -8,6 +8,7 @@ const { sealForStorage, openFromStorage, isEncrypted } = require('./secretsCrypt
 const RUNTIME_KEY = 'flow_browser_runtime';
 const USER_META_KEY = 'flow_browser_user_meta';
 const SERVER_META_KEY = 'flow_browser_server_meta';
+const DELETED_USERS_KEY = 'flow_browser_deleted_users_history';
 const DATA_JSON = path.join(__dirname, 'data.json');
 const DATA_BAK = path.join(__dirname, 'data.json.bak');
 
@@ -97,6 +98,18 @@ async function getUserMetaMap() {
 
 async function getServerMetaMap() {
   return (await getJsonSetting(SERVER_META_KEY, {})) || {};
+}
+
+async function getDeletedUsersList() {
+  const list = await getJsonSetting(DELETED_USERS_KEY, []);
+  return Array.isArray(list) ? list : [];
+}
+
+async function recordDeletedUser(entry) {
+  const current = await getDeletedUsersList();
+  current.unshift(entry);
+  if (current.length > 2000) current.length = 2000;
+  await setJsonSetting(DELETED_USERS_KEY, current);
 }
 
 let serverMetaQueue = Promise.resolve();
@@ -215,6 +228,21 @@ async function mapCustomer(user, metaMap, ownerLookup) {
 
   const acquiredVia = user.acquiredVia || (ownerResellerId ? 'RESELLER' : ownerAdminId ? 'ADMIN_MANUAL' : 'SIGNUP');
 
+  const planExpiryIso = sub?.currentPeriodEnd
+    ? new Date(sub.currentPeriodEnd).toISOString()
+    : new Date(Date.now() + 365 * 86400000).toISOString();
+  const planExpiryTime = new Date(planExpiryIso).getTime();
+  const isPlanExpired = Number.isFinite(planExpiryTime) && planExpiryTime <= Date.now();
+  const isCreditsEnded = (credits || 0) <= 0;
+  const rawPaymentStatus = String(meta.paymentStatus || 'UNPAID').toUpperCase();
+  const paymentAmount = Number(meta.paymentAmount || 0);
+  const paidAt = meta.paidAt || null;
+
+  // The button re-enables when the plan expires or credits end (or if unpaid).
+  // Therefore, isPaid is true ONLY when paymentStatus is 'PAID', plan is not expired, and credits > 0.
+  const isPaid = rawPaymentStatus === 'PAID' && !isPlanExpired && !isCreditsEnded;
+  const paymentStatus = isPaid ? 'PAID' : 'UNPAID';
+
   return {
     id: user.id,
     username: usernameFromEmail(user.email),
@@ -222,9 +250,12 @@ async function mapCustomer(user, metaMap, ownerLookup) {
     passwordHash: user.passwordHash,
     displayName: user.name || '',
     credits,
-    planExpiry: sub?.currentPeriodEnd
-      ? new Date(sub.currentPeriodEnd).toISOString()
-      : new Date(Date.now() + 365 * 86400000).toISOString(),
+    planExpiry: planExpiryIso,
+    paymentAmount,
+    paymentStatus,
+    rawPaymentStatus,
+    isPaid,
+    paidAt,
     isActive: user.status !== 'BANNED' && !user.isLocked,
     banned: user.status === 'BANNED',
     banReason: meta.banReason || '',
@@ -704,6 +735,9 @@ class Database {
       activeServerId: null,
       maxParallel: clampParallel(userData.maxParallel),
       displayPrice: Number(userData.displayPrice) || 0,
+      paymentAmount: Number(userData.paymentAmount) || 0,
+      paymentStatus: userData.paymentStatus ? String(userData.paymentStatus).toUpperCase() : (userData.isPaid ? 'PAID' : 'UNPAID'),
+      paidAt: (userData.paymentStatus === 'PAID' || userData.isPaid) ? new Date().toISOString() : null,
       banReason: '',
     });
 
@@ -773,6 +807,14 @@ class Database {
 
     const metaPatch = {};
     if (updates.notes !== undefined) metaPatch.notes = updates.notes;
+    if (updates.paymentAmount !== undefined) metaPatch.paymentAmount = Number(updates.paymentAmount) || 0;
+    if (updates.paymentStatus !== undefined) metaPatch.paymentStatus = String(updates.paymentStatus).toUpperCase();
+    if (updates.paidAt !== undefined) metaPatch.paidAt = updates.paidAt || null;
+    if (updates.markPaid) {
+      metaPatch.paymentStatus = 'PAID';
+      metaPatch.paidAt = new Date().toISOString();
+      if (updates.paymentAmount !== undefined) metaPatch.paymentAmount = Number(updates.paymentAmount) || 0;
+    }
     if (updates.allowedServerIds !== undefined) metaPatch.allowedServerIds = updates.allowedServerIds;
     if (updates.activeServerId !== undefined) metaPatch.activeServerId = updates.activeServerId || null;
     if (updates.maxParallel !== undefined) metaPatch.maxParallel = clampParallel(updates.maxParallel);
@@ -925,9 +967,49 @@ class Database {
     return { sessionVersion: sv, pendingGoogleWipe: true };
   }
 
-  async deleteUser(id) {
+  async deleteUser(id, actorId = null) {
     await this.ready();
     try {
+      const user = await prisma.user.findFirst({
+        where: { id },
+        include: { subscriptions: true },
+      });
+      if (user) {
+        const createdAt = user.createdAt ? new Date(user.createdAt) : new Date();
+        const deletedAt = new Date();
+        const diffMs = deletedAt.getTime() - createdAt.getTime();
+        const daysUsed = Math.max(1, Math.round(diffMs / (1000 * 60 * 60 * 24)));
+
+        let creditsUsed = 0;
+        try {
+          const ledger = await prisma.creditLedger.findMany({ where: { userId: id } });
+          for (const row of ledger) {
+            if (row.amount < 0) {
+              creditsUsed += Math.abs(row.amount);
+            }
+          }
+        } catch (e) {
+          console.warn('[db] calculate creditsUsed for deleted user error:', e.message);
+        }
+
+        const lastCredits = (await getStdBalance(id)) || 0;
+        const adminId = user.ownedByAdminId || user.createdByAdminId || actorId || null;
+
+        await recordDeletedUser({
+          id: user.id,
+          username: usernameFromEmail(user.email),
+          email: user.email,
+          displayName: user.name || '',
+          adminId: adminId || 'unassigned',
+          deletedByAdminId: actorId || null,
+          createdAt: createdAt.toISOString(),
+          deletedAt: deletedAt.toISOString(),
+          daysUsed,
+          creditsUsed,
+          lastCredits,
+        });
+      }
+
       await prisma.user.delete({ where: { id } });
       const meta = await getUserMetaMap();
       if (meta[id]) {
@@ -2537,6 +2619,104 @@ class Database {
     }
     if (client) patch.lastClient = client;
     return this.updateUser(userId, patch);
+  }
+
+  async getDeletedUsers() {
+    await this.ready();
+    return getDeletedUsersList();
+  }
+
+  async getDetailedAdminAnalytics() {
+    await this.ready();
+    const { periodWindow10th } = require('./deviceSecurity');
+    const { from, to } = periodWindow10th(new Date());
+
+    const adminRows = await prisma.user.findMany({
+      where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] } },
+      select: { id: true, email: true, name: true, role: true, createdAt: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const adminIds = adminRows.map((a) => a.id);
+    const periodStats = await this.adminPeriodStats(adminIds);
+    const periodByAdmin = new Map((periodStats.byAdmin || []).map((b) => [b.id, b]));
+
+    const allCustomers = await this.getUsers();
+    const allDeleted = await getDeletedUsersList();
+
+    const admins = [];
+    for (const a of adminRows) {
+      const pStat = periodByAdmin.get(a.id) || { newUsers: 0, renewals: 0, total: 0 };
+      const assignedUsers = allCustomers
+        .filter((u) => {
+          return u.ownerAdminId === a.id || u.ownerId === a.id || u.createdByAdminId === a.id;
+        })
+        .map((u) => ({
+          id: u.id,
+          username: u.username,
+          email: u.email,
+          displayName: u.displayName || u.username,
+          credits: u.credits ?? 0,
+          createdAt: u.createdAt,
+          planExpiry: u.planExpiry,
+          paymentAmount: u.paymentAmount || 0,
+          paymentStatus: u.paymentStatus || 'UNPAID',
+          isPaid: !!u.isPaid,
+          paidAt: u.paidAt || null,
+          isActive: u.isActive,
+          banned: u.banned,
+          planName: u.planName || 'Standard',
+        }));
+
+      const deletedUsers = allDeleted.filter((d) => {
+        return d.adminId === a.id || d.deletedByAdminId === a.id;
+      });
+
+      admins.push({
+        id: a.id,
+        username: a.email ? usernameFromEmail(a.email) : (a.name || 'Admin'),
+        email: a.email,
+        displayName: a.name || (a.email ? usernameFromEmail(a.email) : 'Admin'),
+        role: a.role,
+        periodStats: {
+          newUsers: pStat.newUsers,
+          renewals: pStat.renewals,
+          total: pStat.total,
+        },
+        totalManagedUsers: assignedUsers.length,
+        users: assignedUsers,
+        deletedUsers,
+      });
+    }
+
+    return {
+      period: {
+        periodStart: periodStats.periodStart,
+        periodEnd: periodStats.periodEnd,
+        newUsers: periodStats.newUsers,
+        renewals: periodStats.renewals,
+        total: periodStats.total,
+      },
+      admins,
+      allUsers: allCustomers.map((u) => ({
+        id: u.id,
+        username: u.username,
+        email: u.email,
+        displayName: u.displayName || u.username,
+        credits: u.credits ?? 0,
+        createdAt: u.createdAt,
+        planExpiry: u.planExpiry,
+        paymentAmount: u.paymentAmount || 0,
+        paymentStatus: u.paymentStatus || 'UNPAID',
+        isPaid: !!u.isPaid,
+        paidAt: u.paidAt || null,
+        ownerLabel: u.ownerLabel || null,
+        isActive: u.isActive,
+        banned: u.banned,
+        planName: u.planName || 'Standard',
+      })),
+      allDeleted,
+    };
   }
 }
 

@@ -15,6 +15,7 @@ import {
   Menu,
   X,
   ScrollText,
+  BarChart3,
 } from 'lucide-react';
 import { useTheme } from '@/components/ThemeProvider';
 import { clearSession, flowFetch, readSession } from '@/lib/flowApi';
@@ -32,6 +33,7 @@ const BLOCKED_PREFIXES = [
 const TITLES: Record<string, string> = {
   '/admin': 'Overview',
   '/admin/users': 'Users',
+  '/admin/analytics': 'Admin Analytics',
   '/admin/accounts': 'Accounts',
   '/admin/resellers': 'Resellers',
   '/admin/system-users': 'System Users',
@@ -49,6 +51,7 @@ function pageTitle(pathname: string | null) {
 const NAV = [
   { name: 'Overview', href: '/admin', icon: Activity },
   { name: 'Users', href: '/admin/users', icon: Users },
+  { name: 'Admin Analytics', href: '/admin/analytics', icon: BarChart3 },
   { name: 'Accounts', href: '/admin/accounts', icon: Server },
   { name: 'Resellers', href: '/admin/resellers', icon: ShoppingBag },
   { name: 'System Users', href: '/admin/system-users', icon: ShieldAlert },
