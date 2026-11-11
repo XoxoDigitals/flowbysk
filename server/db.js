@@ -2521,10 +2521,10 @@ class Database {
     return peers.some((p) => p.banned && p.id !== exceptUserId);
   }
 
-  async adminPeriodStats(adminIds = []) {
+  async adminPeriodStats(adminIds = [], cycleOffset = 0) {
     await this.ready();
     const { periodWindow10th } = require('./deviceSecurity');
-    const { from, to } = periodWindow10th(new Date());
+    const { from, to } = periodWindow10th(new Date(), cycleOffset);
     const createGrants = await prisma.creditLedger.findMany({
       where: {
         OR: [
@@ -2596,6 +2596,8 @@ class Database {
       newUsers: createdInPeriod,
       renewals,
       total: createdInPeriod + renewals,
+      createUserIds: [...createUserIds],
+      renewalUserIds: [...renewalUserIds],
       byAdmin,
     };
   }
@@ -2626,10 +2628,12 @@ class Database {
     return getDeletedUsersList();
   }
 
-  async getDetailedAdminAnalytics() {
+  async getDetailedAdminAnalytics(cycleOffset = 0) {
     await this.ready();
     const { periodWindow10th } = require('./deviceSecurity');
-    const { from, to } = periodWindow10th(new Date());
+    const now = new Date();
+    const parsedOffset = Math.max(0, parseInt(cycleOffset, 10) || 0);
+    const { from, to } = periodWindow10th(now, parsedOffset);
 
     const adminRows = await prisma.user.findMany({
       where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] } },
@@ -2638,18 +2642,40 @@ class Database {
     });
 
     const adminIds = adminRows.map((a) => a.id);
-    const periodStats = await this.adminPeriodStats(adminIds);
+    const periodStats = await this.adminPeriodStats(adminIds, parsedOffset);
     const periodByAdmin = new Map((periodStats.byAdmin || []).map((b) => [b.id, b]));
+
+    const createUserIdsSet = new Set(periodStats.createUserIds || []);
+    const renewalUserIdsSet = new Set(periodStats.renewalUserIds || []);
+    const cycleUserIds = new Set([...createUserIdsSet, ...renewalUserIdsSet]);
 
     const allCustomers = await this.getUsers();
     const allDeleted = await getDeletedUsersList();
+
+    // 12 10-to-10 cycles for selection
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const availableCycles = [];
+    for (let i = 0; i <= 11; i++) {
+      const w = periodWindow10th(now, i);
+      const startLabel = `${monthNames[w.from.getUTCMonth()]} ${w.from.getUTCDate()}, ${w.from.getUTCFullYear()}`;
+      const endLabel = `${monthNames[w.to.getUTCMonth()]} ${w.to.getUTCDate()}, ${w.to.getUTCFullYear()}`;
+      availableCycles.push({
+        offset: i,
+        label: `${startLabel} – ${endLabel}${i === 0 ? ' (Current)' : ''}`,
+        shortLabel: `${startLabel} – ${endLabel}`,
+        periodStart: w.from.toISOString(),
+        periodEnd: w.to.toISOString(),
+        isCurrent: i === 0,
+      });
+    }
 
     const admins = [];
     for (const a of adminRows) {
       const pStat = periodByAdmin.get(a.id) || { newUsers: 0, renewals: 0, total: 0 };
       const assignedUsers = allCustomers
         .filter((u) => {
-          return u.ownerAdminId === a.id || u.ownerId === a.id || u.createdByAdminId === a.id;
+          const isOwned = u.ownerAdminId === a.id || u.ownerId === a.id || u.createdByAdminId === a.id;
+          return isOwned && cycleUserIds.has(u.id);
         })
         .map((u) => ({
           id: u.id,
@@ -2666,10 +2692,14 @@ class Database {
           isActive: u.isActive,
           banned: u.banned,
           planName: u.planName || 'Standard',
+          cycleType: createUserIdsSet.has(u.id) ? 'NEW' : 'RENEWAL',
         }));
 
       const deletedUsers = allDeleted.filter((d) => {
-        return d.adminId === a.id || d.deletedByAdminId === a.id;
+        const isOwned = d.adminId === a.id || d.deletedByAdminId === a.id;
+        if (!isOwned) return false;
+        const dDate = new Date(d.deletedAt);
+        return dDate >= from && dDate < to;
       });
 
       admins.push({
@@ -2689,16 +2719,9 @@ class Database {
       });
     }
 
-    return {
-      period: {
-        periodStart: periodStats.periodStart,
-        periodEnd: periodStats.periodEnd,
-        newUsers: periodStats.newUsers,
-        renewals: periodStats.renewals,
-        total: periodStats.total,
-      },
-      admins,
-      allUsers: allCustomers.map((u) => ({
+    const cycleAllUsers = allCustomers
+      .filter((u) => cycleUserIds.has(u.id))
+      .map((u) => ({
         id: u.id,
         username: u.username,
         email: u.email,
@@ -2714,8 +2737,29 @@ class Database {
         isActive: u.isActive,
         banned: u.banned,
         planName: u.planName || 'Standard',
-      })),
-      allDeleted,
+        cycleType: createUserIdsSet.has(u.id) ? 'NEW' : 'RENEWAL',
+      }));
+
+    const cycleDeletedUsers = allDeleted.filter((d) => {
+      const dDate = new Date(d.deletedAt);
+      return dDate >= from && dDate < to;
+    });
+
+    return {
+      success: true,
+      cycleOffset: parsedOffset,
+      period: {
+        periodStart: periodStats.periodStart,
+        periodEnd: periodStats.periodEnd,
+        newUsers: periodStats.newUsers,
+        renewals: periodStats.renewals,
+        total: periodStats.total,
+        isCurrent: parsedOffset === 0,
+      },
+      availableCycles,
+      admins,
+      allUsers: cycleAllUsers,
+      allDeleted: cycleDeletedUsers,
     };
   }
 }

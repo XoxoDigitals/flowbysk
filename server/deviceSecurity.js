@@ -235,20 +235,15 @@ function requireClientIntegrityMiddleware(req, res, next) {
   next();
 }
 
-/** Billing window: 10th 00:00 UTC → next month 10th 00:00 UTC. */
-function periodWindow10th(now = new Date()) {
+/** Billing window: 10th 00:00 UTC → next month 10th 00:00 UTC. Supports cycleOffset (0 = current, 1 = previous month, etc.). */
+function periodWindow10th(now = new Date(), cycleOffset = 0) {
   const y = now.getUTCFullYear();
   const m = now.getUTCMonth(); // 0-11
   const this10 = new Date(Date.UTC(y, m, 10, 0, 0, 0, 0));
-  let from;
-  let to;
-  if (now >= this10) {
-    from = this10;
-    to = new Date(Date.UTC(y, m + 1, 10, 0, 0, 0, 0));
-  } else {
-    from = new Date(Date.UTC(y, m - 1, 10, 0, 0, 0, 0));
-    to = this10;
-  }
+  const baseFromM = now >= this10 ? m : m - 1;
+  const startM = baseFromM - (Number(cycleOffset) || 0);
+  const from = new Date(Date.UTC(y, startM, 10, 0, 0, 0, 0));
+  const to = new Date(Date.UTC(y, startM + 1, 10, 0, 0, 0, 0));
   return { from, to };
 }
 

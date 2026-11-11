@@ -833,7 +833,8 @@ router.post('/users/:id/mark-paid', requireAdminAuth, async (req, res) => {
 
 router.get('/detailed-analytics', requireAdminAuth, async (req, res) => {
   try {
-    const data = await db.getDetailedAdminAnalytics();
+    const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
+    const data = await db.getDetailedAdminAnalytics(offset);
     res.json({ success: true, ...data });
   } catch (err) {
     console.error('[admin] /detailed-analytics error:', err);

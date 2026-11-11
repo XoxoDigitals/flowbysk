@@ -25,6 +25,16 @@ type PeriodStats = {
   newUsers: number;
   renewals: number;
   total: number;
+  isCurrent?: boolean;
+};
+
+type AvailableCycle = {
+  offset: number;
+  label: string;
+  shortLabel: string;
+  periodStart: string;
+  periodEnd: string;
+  isCurrent: boolean;
 };
 
 type ActiveUser = {
@@ -43,6 +53,7 @@ type ActiveUser = {
   planName?: string;
   isActive: boolean;
   banned: boolean;
+  cycleType?: 'NEW' | 'RENEWAL';
 };
 
 type DeletedUser = {
@@ -77,7 +88,9 @@ type AdminDetail = {
 
 type DetailedAnalyticsResponse = {
   success: boolean;
+  cycleOffset?: number;
   period: PeriodStats;
+  availableCycles?: AvailableCycle[];
   admins: AdminDetail[];
   allUsers: ActiveUser[];
   allDeleted: DeletedUser[];
@@ -115,31 +128,40 @@ function formatDateTime(iso?: string | null) {
 export default function AdminAnalyticsPage() {
   const [data, setData] = useState<DetailedAnalyticsResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [cycleLoading, setCycleLoading] = useState(false);
+  const [cycleOffset, setCycleOffset] = useState(0);
   const [error, setError] = useState('');
   const [activeSlide, setActiveSlide] = useState(0); // 0 = Overview / All Admins, 1..N = Admin slides
   const [userQuery, setUserQuery] = useState('');
   const [deletedQuery, setDeletedQuery] = useState('');
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (offset = 0) => {
+    setCycleLoading(true);
     setError('');
     try {
-      const res = await flowFetch('/api/admin/detailed-analytics');
+      const res = await flowFetch(`/api/admin/detailed-analytics?offset=${offset}`);
       const d = await res.json();
       if (!res.ok || !d.success) {
         throw new Error(d.error || 'Failed to load admin analytics');
       }
       setData(d);
+      setCycleOffset(offset);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load analytics');
     } finally {
       setLoading(false);
+      setCycleLoading(false);
     }
   };
 
   useEffect(() => {
-    load();
+    load(0);
   }, []);
+
+  const handleCycleChange = (newOffset: number) => {
+    const validOffset = Math.max(0, newOffset);
+    load(validOffset);
+  };
 
   if (loading) {
     return (
@@ -156,14 +178,14 @@ export default function AdminAnalyticsPage() {
         <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-400">
           {error || 'Failed to load analytics.'}
         </div>
-        <button onClick={load} className="btn-secondary !w-fit !text-xs">
+        <button onClick={() => load(cycleOffset)} className="btn-secondary !w-fit !text-xs">
           Try Again
         </button>
       </div>
     );
   }
 
-  const { period, admins, allUsers, allDeleted } = data;
+  const { period, availableCycles = [], admins, allUsers, allDeleted } = data;
   const totalSlides = 1 + admins.length; // Slide 0 = All, Slides 1..N = individual admins
 
   const prevSlide = () => setActiveSlide((curr) => (curr > 0 ? curr - 1 : totalSlides - 1));
@@ -172,7 +194,7 @@ export default function AdminAnalyticsPage() {
   const isOverview = activeSlide === 0;
   const currentAdmin = !isOverview ? admins[activeSlide - 1] : null;
 
-  // Active users to display
+  // Active users to display (strictly users added or renewed in this cycle)
   const rawActiveUsers = isOverview ? allUsers : currentAdmin?.users || [];
   const filteredActiveUsers = rawActiveUsers.filter((u) => {
     if (!userQuery.trim()) return true;
@@ -184,7 +206,7 @@ export default function AdminAnalyticsPage() {
     );
   });
 
-  // Deleted users to display
+  // Deleted users to display (strictly users removed in this cycle)
   const rawDeletedUsers = isOverview ? allDeleted : currentAdmin?.deletedUsers || [];
   const filteredDeletedUsers = rawDeletedUsers.filter((d) => {
     if (!deletedQuery.trim()) return true;
@@ -199,7 +221,7 @@ export default function AdminAnalyticsPage() {
   return (
     <div className="flex flex-col gap-6">
       {/* Header & Cycle Info */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <Link href="/admin" className="btn-secondary !px-3 !py-2 !text-xs">
             <ArrowLeft className="h-3.5 w-3.5" />
@@ -213,14 +235,61 @@ export default function AdminAnalyticsPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--card)] px-3 py-1.5 text-xs">
-          <Calendar className="h-3.5 w-3.5 text-[var(--a1)]" />
-          <span className="text-[var(--ink2)] font-mono">
-            {formatDate(period.periodStart)} – {formatDate(period.periodEnd)}
+        {/* 10-to-10 Cycle Selector & Controls */}
+        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-[var(--line)] bg-[var(--card)] p-2">
+          <div className="flex items-center gap-1.5 px-2 text-xs text-[var(--ink3)]">
+            <Calendar className="h-4 w-4 text-[var(--a1)]" />
+            <span className="font-semibold uppercase tracking-wider text-[11px]">10-to-10 Cycle:</span>
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => handleCycleChange(cycleOffset + 1)}
+              disabled={cycleOffset >= (availableCycles.length - 1) || cycleLoading}
+              className="rounded-lg border border-[var(--line)] bg-[var(--bg2)] px-2.5 py-1 text-xs font-medium text-[var(--ink2)] hover:bg-[var(--line)] disabled:opacity-40 disabled:pointer-events-none transition flex items-center gap-1"
+              title="Previous 10-to-10 Cycle"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              <span>Prev Cycle</span>
+            </button>
+
+            <select
+              value={cycleOffset}
+              disabled={cycleLoading}
+              onChange={(e) => handleCycleChange(Number(e.target.value))}
+              className="rounded-lg border border-[var(--line)] bg-[var(--bg2)] px-3 py-1 text-xs font-semibold text-[var(--ink)] outline-none focus:border-[var(--a1)] cursor-pointer"
+            >
+              {availableCycles.map((c) => (
+                <option key={c.offset} value={c.offset}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+
+            <button
+              type="button"
+              onClick={() => handleCycleChange(Math.max(0, cycleOffset - 1))}
+              disabled={cycleOffset <= 0 || cycleLoading}
+              className="rounded-lg border border-[var(--line)] bg-[var(--bg2)] px-2.5 py-1 text-xs font-medium text-[var(--ink2)] hover:bg-[var(--line)] disabled:opacity-40 disabled:pointer-events-none transition flex items-center gap-1"
+              title="Next 10-to-10 Cycle"
+            >
+              <span>Next Cycle</span>
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <span
+            className={`rounded-md px-2 py-0.5 text-[11px] font-semibold ${
+              cycleOffset === 0
+                ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+            }`}
+          >
+            {cycleOffset === 0 ? 'Current 10-to-10 Cycle' : 'Past Cycle'}
           </span>
-          <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-400">
-            Current 10-to-10 Cycle
-          </span>
+
+          {cycleLoading && <RefreshCw className="h-3.5 w-3.5 animate-spin text-[var(--a1)]" />}
         </div>
       </div>
 
@@ -258,35 +327,49 @@ export default function AdminAnalyticsPage() {
           </div>
         </div>
 
-        {/* Slider Pills */}
-        <div className="flex flex-wrap gap-1.5 pt-1">
+        {/* Slider pill selector */}
+        <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-thin">
           <button
             type="button"
             onClick={() => setActiveSlide(0)}
-            className={`rounded-xl px-3 py-1.5 text-xs font-medium transition ${
+            className={`flex shrink-0 items-center gap-2 rounded-xl px-3 py-2 text-xs font-medium transition ${
               activeSlide === 0
                 ? 'bg-[var(--a1)] text-white shadow-sm'
-                : 'border border-[var(--line)] bg-[var(--bg2)] text-[var(--ink2)] hover:border-[var(--ink3)]'
+                : 'bg-[var(--bg2)] text-[var(--ink2)] hover:bg-[var(--line)]'
             }`}
           >
-            ★ All Admins Overview
+            <Users className="h-3.5 w-3.5" />
+            <span>All Admins Overview</span>
+            <span
+              className={`rounded-full px-1.5 py-0.2 text-[10px] ${
+                activeSlide === 0 ? 'bg-white/20 text-white' : 'bg-[var(--line)] text-[var(--ink3)]'
+              }`}
+            >
+              {allUsers.length}
+            </span>
           </button>
-          {admins.map((adm, idx) => {
-            const slideIdx = idx + 1;
-            const isActive = activeSlide === slideIdx;
+
+          {admins.map((adm, i) => {
+            const slideIdx = i + 1;
+            const isCurrent = activeSlide === slideIdx;
             return (
               <button
                 key={adm.id}
                 type="button"
                 onClick={() => setActiveSlide(slideIdx)}
-                className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
-                  isActive
+                className={`flex shrink-0 items-center gap-2 rounded-xl px-3 py-2 text-xs font-medium transition ${
+                  isCurrent
                     ? 'bg-[var(--a1)] text-white shadow-sm'
-                    : 'border border-[var(--line)] bg-[var(--bg2)] text-[var(--ink2)] hover:border-[var(--ink3)]'
+                    : 'bg-[var(--bg2)] text-[var(--ink2)] hover:bg-[var(--line)]'
                 }`}
               >
+                <Shield className="h-3.5 w-3.5" />
                 <span>{adm.displayName || adm.username}</span>
-                <span className={`text-[10px] rounded px-1 ${isActive ? 'bg-white/20' : 'bg-[var(--line)]'}`}>
+                <span
+                  className={`rounded-full px-1.5 py-0.2 text-[10px] ${
+                    isCurrent ? 'bg-white/20 text-white' : 'bg-[var(--line)] text-[var(--ink3)]'
+                  }`}
+                >
                   {adm.periodStats.total}
                 </span>
               </button>
@@ -308,7 +391,7 @@ export default function AdminAnalyticsPage() {
               <div className="mt-2 text-2xl font-bold tracking-tight text-emerald-400">
                 {period.newUsers.toLocaleString()}
               </div>
-              <p className="mt-1 text-[11px] text-[var(--ink3)]">Created in current cycle</p>
+              <p className="mt-1 text-[11px] text-[var(--ink3)]">Created in selected cycle</p>
             </div>
 
             <div className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-4">
@@ -319,7 +402,7 @@ export default function AdminAnalyticsPage() {
               <div className="mt-2 text-2xl font-bold tracking-tight text-cyan-400">
                 {period.renewals.toLocaleString()}
               </div>
-              <p className="mt-1 text-[11px] text-[var(--ink3)]">Renewed in current cycle</p>
+              <p className="mt-1 text-[11px] text-[var(--ink3)]">Renewed in selected cycle</p>
             </div>
 
             <div className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-4">
@@ -335,13 +418,13 @@ export default function AdminAnalyticsPage() {
 
             <div className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-4">
               <div className="flex items-center justify-between text-xs text-[var(--ink3)]">
-                <span className="font-mono uppercase tracking-wider">Total Managed Users</span>
-                <Users className="h-4 w-4 text-[var(--a1)]" />
+                <span className="font-mono uppercase tracking-wider">Removed Users</span>
+                <UserMinus className="h-4 w-4 text-rose-400" />
               </div>
-              <div className="mt-2 text-2xl font-bold tracking-tight text-[var(--ink)]">
-                {allUsers.length.toLocaleString()}
+              <div className="mt-2 text-2xl font-bold tracking-tight text-rose-400">
+                {allDeleted.length.toLocaleString()}
               </div>
-              <p className="mt-1 text-[11px] text-[var(--ink3)]">Active system customers</p>
+              <p className="mt-1 text-[11px] text-[var(--ink3)]">Deleted in selected cycle</p>
             </div>
           </div>
 
@@ -357,8 +440,8 @@ export default function AdminAnalyticsPage() {
                     <th className="px-4 py-3 font-medium text-emerald-400">New Users (10-to-10)</th>
                     <th className="px-4 py-3 font-medium text-cyan-400">Renewals (10-to-10)</th>
                     <th className="px-4 py-3 font-medium text-purple-400">Total Cycle</th>
-                    <th className="px-4 py-3 font-medium">Active Managed</th>
-                    <th className="px-4 py-3 font-medium text-rose-400">Deleted Users</th>
+                    <th className="px-4 py-3 font-medium">Active In-Cycle</th>
+                    <th className="px-4 py-3 font-medium text-rose-400">Deleted in Cycle</th>
                     <th className="px-4 py-3 font-medium text-right">Action</th>
                   </tr>
                 </thead>
@@ -454,10 +537,10 @@ export default function AdminAnalyticsPage() {
                 </div>
                 <div className="rounded-xl border border-[var(--line)] bg-[var(--bg2)] px-3.5 py-2 text-center">
                   <span className="block text-[10px] uppercase font-mono tracking-wider text-[var(--ink3)]">
-                    Managed Users
+                    Deleted in Cycle
                   </span>
-                  <span className="text-lg font-bold text-[var(--ink)]">
-                    {currentAdmin.totalManagedUsers}
+                  <span className="text-lg font-bold text-rose-400">
+                    {currentAdmin.deletedUsers.length}
                   </span>
                 </div>
               </div>
@@ -466,19 +549,19 @@ export default function AdminAnalyticsPage() {
         )
       )}
 
-      {/* Active Users Table Section */}
+      {/* Active Users Table Section (Strictly users added or renewed in this cycle) */}
       <section className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-semibold flex items-center gap-2">
               <Users className="h-4 w-4 text-[var(--a1)]" />
-              {isOverview ? 'All Managed Users' : `Users Managed by ${currentAdmin?.displayName || currentAdmin?.username}`}
+              {isOverview ? 'Cycle Users (All Admins)' : `Cycle Users for ${currentAdmin?.displayName || currentAdmin?.username}`}
               <span className="text-xs font-normal text-[var(--ink3)]">
                 ({filteredActiveUsers.length} user{filteredActiveUsers.length === 1 ? '' : 's'})
               </span>
             </h3>
             <p className="mt-0.5 text-xs text-[var(--ink3)]">
-              Shows credits, add date, expiry date, and payment status for each user.
+              Showing only users added or renewed in this 10-to-10 cycle ({formatDate(period.periodStart)} – {formatDate(period.periodEnd)}).
             </p>
           </div>
 
@@ -500,6 +583,7 @@ export default function AdminAnalyticsPage() {
               <tr>
                 <th className="px-4 py-3 font-medium">User Name</th>
                 <th className="px-4 py-3 font-medium">Email</th>
+                <th className="px-4 py-3 font-medium">Cycle Status</th>
                 <th className="px-4 py-3 font-medium">Credits</th>
                 <th className="px-4 py-3 font-medium">Add Date</th>
                 <th className="px-4 py-3 font-medium">Expiry Date</th>
@@ -510,8 +594,8 @@ export default function AdminAnalyticsPage() {
             <tbody className="divide-y divide-[var(--line)]">
               {filteredActiveUsers.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-xs text-[var(--ink3)]">
-                    No active users found.
+                  <td colSpan={8} className="px-4 py-8 text-center text-xs text-[var(--ink3)]">
+                    No users added or renewed in this cycle ({formatDate(period.periodStart)} – {formatDate(period.periodEnd)}).
                   </td>
                 </tr>
               ) : (
@@ -527,6 +611,17 @@ export default function AdminAnalyticsPage() {
                     </td>
                     <td className="px-4 py-3 text-xs font-mono text-[var(--ink2)]">
                       {u.email}
+                    </td>
+                    <td className="px-4 py-3">
+                      {u.cycleType === 'NEW' ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                          ✨ Added (New)
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-cyan-500/15 text-cyan-400 border border-cyan-500/30">
+                          🔄 Renewed
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs font-semibold text-[var(--a1)]">
                       {(u.credits ?? 0).toLocaleString()}
@@ -564,19 +659,19 @@ export default function AdminAnalyticsPage() {
         </div>
       </section>
 
-      {/* Deleted Users Table Section */}
+      {/* Deleted Users Table Section (Strictly users removed during this cycle) */}
       <section className="rounded-2xl border border-rose-500/25 bg-[var(--card)] p-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-semibold flex items-center gap-2 text-rose-400">
               <UserMinus className="h-4 w-4" />
-              {isOverview ? 'Deleted Users History' : `Deleted Users for ${currentAdmin?.displayName || currentAdmin?.username}`}
+              {isOverview ? 'Deleted Users in Cycle' : `Deleted Users for ${currentAdmin?.displayName || currentAdmin?.username}`}
               <span className="text-xs font-normal text-[var(--ink3)]">
                 ({filteredDeletedUsers.length} user{filteredDeletedUsers.length === 1 ? '' : 's'})
               </span>
             </h3>
             <p className="mt-0.5 text-xs text-[var(--ink3)]">
-              Tracks users removed by admins, including removal timestamp, total days used, and total credits used.
+              Users removed by admins during this 10-to-10 cycle ({formatDate(period.periodStart)} – {formatDate(period.periodEnd)}), including days and credits used before removal.
             </p>
           </div>
 
@@ -608,7 +703,7 @@ export default function AdminAnalyticsPage() {
               {filteredDeletedUsers.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-8 text-center text-xs text-[var(--ink3)]">
-                    No deleted users recorded.
+                    No users deleted during this cycle ({formatDate(period.periodStart)} – {formatDate(period.periodEnd)}).
                   </td>
                 </tr>
               ) : (
