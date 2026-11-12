@@ -671,7 +671,7 @@ export default function AdminAnalyticsPage() {
               </span>
             </h3>
             <p className="mt-0.5 text-xs text-[var(--ink3)]">
-              Users removed by admins during this 10-to-10 cycle ({formatDate(period.periodStart)} – {formatDate(period.periodEnd)}), including days and credits used before removal.
+              Users added AND removed within this same 10-to-10 cycle ({formatDate(period.periodStart)} – {formatDate(period.periodEnd)}), including days and credits used before removal.
             </p>
           </div>
 
@@ -703,7 +703,7 @@ export default function AdminAnalyticsPage() {
               {filteredDeletedUsers.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-8 text-center text-xs text-[var(--ink3)]">
-                    No users deleted during this cycle ({formatDate(period.periodStart)} – {formatDate(period.periodEnd)}).
+                    No users added and deleted within this cycle ({formatDate(period.periodStart)} – {formatDate(period.periodEnd)}).
                   </td>
                 </tr>
               ) : (

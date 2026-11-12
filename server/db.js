@@ -2699,7 +2699,9 @@ class Database {
         const isOwned = d.adminId === a.id || d.deletedByAdminId === a.id;
         if (!isOwned) return false;
         const dDate = new Date(d.deletedAt);
-        return dDate >= from && dDate < to;
+        const cDate = new Date(d.createdAt);
+        // Only users added in this cycle AND deleted in the same cycle
+        return dDate >= from && dDate < to && cDate >= from && cDate < to;
       });
 
       admins.push({
@@ -2742,7 +2744,9 @@ class Database {
 
     const cycleDeletedUsers = allDeleted.filter((d) => {
       const dDate = new Date(d.deletedAt);
-      return dDate >= from && dDate < to;
+      const cDate = new Date(d.createdAt);
+      // Only users added in this cycle AND deleted in the same cycle
+      return dDate >= from && dDate < to && cDate >= from && cDate < to;
     });
 
     return {
