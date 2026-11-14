@@ -612,11 +612,19 @@ function selectVoice(id) {
   state.selectedVoice = id;
   const voice = findVoice(id);
   const meta = voice ? voiceMeta(voice) : null;
-  $("selectedVoiceName").textContent = meta ? meta.given : "No voice";
-  $("selectedVoiceLabel").textContent = meta
+  const nameTxt = meta ? meta.given : "No voice";
+  const labelTxt = meta
     ? `${meta.language}${meta.country ? ` · ${meta.country}` : ""}${meta.gender ? ` · ${meta.gender}` : ""}`
     : "Select a voice below";
-  $("selectedVoiceAvatar").querySelector("span").textContent = meta ? meta.given.slice(0, 1).toUpperCase() : "V";
+  const initialTxt = meta ? meta.given.slice(0, 1).toUpperCase() : "V";
+  $("selectedVoiceName").textContent = nameTxt;
+  $("selectedVoiceLabel").textContent = labelTxt;
+  $("selectedVoiceAvatar").querySelector("span").textContent = initialTxt;
+  if ($("mobileSelectedVoiceName")) $("mobileSelectedVoiceName").textContent = nameTxt;
+  if ($("mobileSelectedVoiceLabel")) $("mobileSelectedVoiceLabel").textContent = labelTxt;
+  if ($("mobileVoiceAvatar") && $("mobileVoiceAvatar").querySelector("span")) {
+    $("mobileVoiceAvatar").querySelector("span").textContent = initialTxt;
+  }
   renderVoiceSelect();
   renderVoices();
   renderChars();
@@ -1059,8 +1067,14 @@ function openTab(id) {
   document.querySelectorAll(".pane").forEach((pane) => pane.classList.toggle("active", pane.id === `pane-${id}`));
   $("pageTitle").textContent = TAB_TITLES[id] || id;
   $("pageEyebrow").textContent = TAB_EYEBROWS[id] || "";
-  document.querySelector(".workspace").classList.toggle("wide-mode", id === "voices" || id === "settings");
-  document.querySelector(".canvas").scrollTop = 0;
+  const ws = document.querySelector(".workspace");
+  if (ws) {
+    ws.classList.toggle("wide-mode", id === "voices" || id === "settings");
+    ws.dataset.tab = id;
+  }
+  const canvas = document.querySelector(".canvas");
+  if (canvas) canvas.scrollTop = 0;
+  try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch {}
 }
 
 function bindFilterControl(id, key) {
@@ -1104,6 +1118,12 @@ function bindEvents() {
   $("btnRefreshVoices").addEventListener("click", refreshVoices);
   $("btnLibraryRefresh").addEventListener("click", refreshVoices);
   $("btnOpenLibrary").addEventListener("click", () => openTab("voices"));
+  if ($("mobileVoiceBar")) {
+    $("mobileVoiceBar").addEventListener("click", () => {
+      const insp = document.querySelector(".inspector");
+      if (insp) insp.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
   $("btnChooseOutput").addEventListener("click", chooseOutputFolder);
   $("btnContact").addEventListener("click", openContactPage);
   $("btnAccessContact").addEventListener("click", () => openContactPage($("btnAccessContact")));

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>TTS STUDIO — AI Voice Studio</title>
   <link rel="icon" type="image/png" href="assets/zextts-favicon.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -80,7 +80,7 @@
         </div>
       </header>
 
-      <div class="workspace">
+      <div class="workspace" data-tab="studio">
         <main class="canvas">
           <div class="pane active" id="pane-studio">
             <section class="intro">
@@ -90,6 +90,18 @@
               </div>
               <p>Write your script, choose a voice, and shape every detail. TTS STUDIO turns text into natural speech in seconds.</p>
             </section>
+
+            <div class="mobile-voice-bar" id="mobileVoiceBar" role="button" tabindex="0" aria-label="Change voice and settings">
+              <div class="mobile-voice-bar-left">
+                <div class="voice-avatar mobile-voice-avatar" id="mobileVoiceAvatar"><span>A</span><i></i></div>
+                <div class="selected-copy">
+                  <span>ACTIVE VOICE</span>
+                  <strong id="mobileSelectedVoiceName">Loading voices…</strong>
+                  <small id="mobileSelectedVoiceLabel">Tap to change voice, speed, or pitch</small>
+                </div>
+              </div>
+              <span class="mobile-voice-bar-cta">Voice &amp; speed ↓</span>
+            </div>
 
             <section class="card script-card grow">
               <div class="card-bar">

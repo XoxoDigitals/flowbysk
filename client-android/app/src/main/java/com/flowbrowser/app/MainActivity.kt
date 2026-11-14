@@ -278,7 +278,12 @@ class MainActivity : AppCompatActivity() {
     private var flowCredTarget: String? = null
     private var flowCredImageOnly: Boolean = false
     private var activeFlowServerId: String = ""
+    private var flowCredServerId: String = ""
     private var activeCookieServerId: String = ""
+    @Volatile
+    private var switchingCookieProfile: Boolean = false
+    @Volatile
+    private var lastTargetFlowUrl: String = ""
     private val serverCookieSnapshots = ConcurrentHashMap<String, Map<String, List<String>>>()
     private val workspaceReadyGeneration = AtomicInteger(0)
     private val autofillGeneration = AtomicInteger(0)
@@ -541,6 +546,10 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 val u = url ?: ""
+                if (u.isNotBlank() && !u.equals("about:blank", ignoreCase = true)) {
+                    lastTargetFlowUrl = u
+                }
+                applyFlowViewport(u)
                 // Never inject bridge/automation into Google auth — triggers secure-browser blocks
                 if (!isGoogleAuthRelatedUrl(u) && !isGoogleRecaptchaChallengeUrl(u)) {
                     injectPolyfill(flowView, "FlowHost")
@@ -553,6 +562,9 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 val u = flowView.url ?: url ?: view?.url ?: ""
+                if (u.isNotBlank() && !u.equals("about:blank", ignoreCase = true)) {
+                    lastTargetFlowUrl = u
+                }
                 if (!isGoogleAuthRelatedUrl(u) && !isGoogleRecaptchaChallengeUrl(u)) {
                     injectPolyfill(flowView, "FlowHost")
                     pushImageOnlyModeToFlow()
@@ -564,6 +576,10 @@ class MainActivity : AppCompatActivity() {
                 updateAuthOverlayFromUrl(u)
                 if (isFlowWorkspaceUrl(u) && !isGoogleAuthRelatedUrl(u)) {
                     verifyAndCompleteWorkspaceLoad(u, workspaceReadyGeneration.incrementAndGet())
+                    val curSid = activeCookieServerId.ifBlank { activeFlowServerId }
+                    if (curSid.isNotBlank() && !switchingCookieProfile) {
+                        snapshotLiveCookiesForServer(curSid)
+                    }
                 }
                 ensureCaptchaProbeTimer()
                 probeGoogleCaptcha()
@@ -762,8 +778,13 @@ class MainActivity : AppCompatActivity() {
 
     /** Flow workspace only — lock CSS layout width to 538px and scale to fill the WebView; reset scale on Gemini & ZexTTS. */
     private fun applyFlowViewport(url: String) {
-        val u = url.lowercase()
+        val u = url.ifBlank { lastTargetFlowUrl.ifBlank { flowView.url ?: "" } }.lowercase()
+        val s = flowView.settings
         if (u.contains("flow.google.com") || u.contains("labs.google")) {
+            s.useWideViewPort = true
+            s.loadWithOverviewMode = true
+            s.builtInZoomControls = true
+            s.setSupportZoom(true)
             flowView.evaluateJavascript(FLOW_VIEWPORT_JS, null)
             applyFlowLayoutScale()
         } else if (
@@ -772,17 +793,26 @@ class MainActivity : AppCompatActivity() {
                 u.contains("aistudio.google.com") ||
                 u.contains("app.flowbrowser.localhost") ||
                 u.contains("flowbrowser.local") ||
+                u.contains("/zextts/") ||
                 u.contains("127.0.0.1")
         ) {
-            if (lastFlowScalePct != 0) {
-                lastFlowScalePct = 0
-                flowView.setInitialScale(0)
+            s.useWideViewPort = false
+            s.loadWithOverviewMode = false
+            s.builtInZoomControls = false
+            s.setSupportZoom(false)
+            lastFlowScalePct = 0
+            flowView.setInitialScale(0)
+            if (u.contains("zextts") || u.contains("app.flowbrowser.localhost") || u.contains("flowbrowser.local")) {
+                flowView.evaluateJavascript(
+                    "(function(){try{var m=document.querySelector('meta[name=\"viewport\"]');if(!m){m=document.createElement('meta');m.name='viewport';document.head.appendChild(m);}m.setAttribute('content','width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no');}catch(e){}})();",
+                    null
+                )
             }
         }
     }
 
     private fun applyFlowLayoutScale() {
-        val u = (flowView.url ?: "").lowercase()
+        val u = (lastTargetFlowUrl.ifBlank { flowView.url ?: "" }).lowercase()
         if (!u.contains("flow.google.com") && !u.contains("labs.google")) {
             if (
                 u.contains("gemini.google.com") ||
@@ -790,8 +820,11 @@ class MainActivity : AppCompatActivity() {
                     u.contains("aistudio.google.com") ||
                     u.contains("app.flowbrowser.localhost") ||
                     u.contains("flowbrowser.local") ||
+                    u.contains("/zextts/") ||
                     u.contains("127.0.0.1")
             ) {
+                flowView.settings.useWideViewPort = false
+                flowView.settings.loadWithOverviewMode = false
                 if (lastFlowScalePct != 0) {
                     lastFlowScalePct = 0
                     flowView.setInitialScale(0)
@@ -877,6 +910,9 @@ class MainActivity : AppCompatActivity() {
         flowHeaderLoadActive = true
         try {
             val resolvedUrl = url.trim()
+            if (resolvedUrl.isNotBlank() && !resolvedUrl.equals("about:blank", ignoreCase = true)) {
+                lastTargetFlowUrl = resolvedUrl
+            }
             applyFlowViewport(resolvedUrl)
             // Strip WebView APK id on the initial navigation into Google / Flow / Gemini
             flowView.loadUrl(resolvedUrl, FLOW_EXTRA_HEADERS)
@@ -1166,12 +1202,13 @@ class MainActivity : AppCompatActivity() {
     private fun pushCredentialsToFlow() {
         val email = flowCredEmail
         if (email.isNullOrBlank()) return
+        val effSid = flowCredServerId.ifBlank { activeFlowServerId }
         val payload = JSONObject()
             .put("email", email)
             .put("password", flowCredPassword ?: "")
             .put("targetUrl", flowCredTarget ?: "https://flow.google.com/")
             .put("imageOnly", flowCredImageOnly)
-            .put("serverId", activeFlowServerId)
+            .put("serverId", effSid)
         postToFlow(
             JSONObject()
                 .put("type", "toGuest")
@@ -1181,7 +1218,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun pushImageOnlyModeToFlow() {
-        val sidLit = JSONObject.quote(activeFlowServerId)
+        val sidLit = JSONObject.quote(flowCredServerId.ifBlank { activeFlowServerId })
         val targetLit = JSONObject.quote(flowCredTarget ?: "https://flow.google.com/")
         flowView.evaluateJavascript(
             "(function(){try{window.__flowCredTarget=$targetLit;if(typeof window.__flowSetImageOnlyMode==='function')window.__flowSetImageOnlyMode($flowCredImageOnly,$sidLit);}catch(e){}})();",
@@ -1234,9 +1271,12 @@ class MainActivity : AppCompatActivity() {
                     if (tg.isNotBlank()) flowCredTarget = tg
                     if (data.has("imageOnly")) flowCredImageOnly = data.optBoolean("imageOnly", false)
                     val sid = data.optString("serverId")
-                    if (sid.isNotBlank()) activeFlowServerId = sid
+                    if (sid.isNotBlank()) {
+                        flowCredServerId = sid
+                        if (activeFlowServerId.isBlank()) activeFlowServerId = sid
+                    }
                     data.put("imageOnly", flowCredImageOnly)
-                    data.put("serverId", activeFlowServerId)
+                    data.put("serverId", flowCredServerId.ifBlank { activeFlowServerId })
                     pushImageOnlyModeToFlow()
                     tryHostGoogleAutofill(flowView.url)
                 }
@@ -1256,7 +1296,10 @@ class MainActivity : AppCompatActivity() {
                 if (tg.isNotBlank()) flowCredTarget = tg
                 if (root.has("imageOnly")) flowCredImageOnly = root.optBoolean("imageOnly", false)
                 val sid = root.optString("serverId")
-                if (sid.isNotBlank()) activeFlowServerId = sid
+                if (sid.isNotBlank()) {
+                    flowCredServerId = sid
+                    if (activeFlowServerId.isBlank()) activeFlowServerId = sid
+                }
                 pushCredentialsToFlow()
                 pushImageOnlyModeToFlow()
                 tryHostGoogleAutofill(flowView.url)
@@ -1460,24 +1503,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun switchFlowCookieProfileImpl(payload: JSONObject): JSONObject {
-        val toServerId = payload.optString("toServerId", payload.optString("serverId", "")).trim()
-        val fromServerId = payload.optString("fromServerId", activeCookieServerId).trim()
-            .ifBlank { activeCookieServerId }
-        val cm = CookieManager.getInstance()
-
-        if (toServerId.isNotEmpty() && toServerId == activeCookieServerId) {
-            val liveAuth = cookieProfileUrls.any { u ->
-                val c = cm.getCookie(u) ?: ""
-                c.contains("SID=") || c.contains("__Secure-1PSID=")
-            }
-            if (liveAuth) {
-                return JSONObject().put("success", true).put("restored", true).put("sameServer", true)
-            }
-        }
-
-        // 1. Snapshot outgoing server's cookies if it has an active Google session
-        if (fromServerId.isNotEmpty()) {
+    private fun snapshotLiveCookiesForServer(serverId: String) {
+        if (serverId.isBlank() || switchingCookieProfile) return
+        try {
+            val cm = CookieManager.getInstance()
             val snap = mutableMapOf<String, List<String>>()
             for (u in cookieProfileUrls) {
                 val raw = cm.getCookie(u) ?: continue
@@ -1489,56 +1518,100 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             if (hasGoogleAuthSessionCookies(snap)) {
-                serverCookieSnapshots[fromServerId] = snap
-                saveCookieSnapshotToPrefs(fromServerId, snap)
-                Log.i(TAG, "Saved Google cookie snapshot for server=$fromServerId (${snap.size} origins)")
+                serverCookieSnapshots[serverId] = snap
+                saveCookieSnapshotToPrefs(serverId, snap)
             }
+        } catch (_: Exception) {
         }
+    }
 
-        // 2. Clear all live cookies in WebView before switching to target server
-        kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
-            runOnUiThread {
-                try {
-                    cm.removeAllCookies {
-                        try { cm.flush() } catch (_: Exception) {}
+    private suspend fun switchFlowCookieProfileImpl(payload: JSONObject): JSONObject {
+        switchingCookieProfile = true
+        try {
+            val toServerId = payload.optString("toServerId", payload.optString("serverId", "")).trim()
+            val fromServerId = payload.optString("fromServerId", activeCookieServerId).trim()
+                .ifBlank { activeCookieServerId.ifBlank { activeFlowServerId } }
+            val cm = CookieManager.getInstance()
+
+            if (toServerId.isNotEmpty() && toServerId == activeCookieServerId) {
+                val liveAuth = cookieProfileUrls.any { u ->
+                    val c = cm.getCookie(u) ?: ""
+                    c.contains("SID=") || c.contains("__Secure-1PSID=")
+                }
+                if (liveAuth) {
+                    activeFlowServerId = toServerId
+                    flowCredServerId = toServerId
+                    return JSONObject().put("success", true).put("restored", true).put("sameServer", true)
+                }
+            }
+
+            // 1. Snapshot outgoing server's cookies if it has an active Google session
+            if (fromServerId.isNotEmpty()) {
+                val snap = mutableMapOf<String, List<String>>()
+                for (u in cookieProfileUrls) {
+                    val raw = cm.getCookie(u) ?: continue
+                    val parts = raw.split(";")
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() && it.contains("=") }
+                    if (parts.isNotEmpty()) {
+                        snap[u] = parts
+                    }
+                }
+                if (hasGoogleAuthSessionCookies(snap)) {
+                    serverCookieSnapshots[fromServerId] = snap
+                    saveCookieSnapshotToPrefs(fromServerId, snap)
+                    Log.i(TAG, "Saved Google cookie snapshot for server=$fromServerId (${snap.size} origins)")
+                }
+            }
+
+            // 2. Clear all live cookies in WebView before switching to target server
+            kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
+                runOnUiThread {
+                    try {
+                        cm.removeAllCookies {
+                            try { cm.flush() } catch (_: Exception) {}
+                            if (cont.isActive) cont.resume(Unit, null)
+                        }
+                    } catch (_: Exception) {
                         if (cont.isActive) cont.resume(Unit, null)
                     }
-                } catch (_: Exception) {
-                    if (cont.isActive) cont.resume(Unit, null)
                 }
             }
-        }
 
-        activeCookieServerId = toServerId
-        activeFlowServerId = toServerId
+            activeCookieServerId = toServerId
+            activeFlowServerId = toServerId
+            flowCredServerId = toServerId
 
-        // 3. Restore target server's cookie snapshot if available
-        val targetSnap = if (toServerId.isNotEmpty()) {
-            serverCookieSnapshots[toServerId] ?: loadCookieSnapshotFromPrefs(toServerId)?.also {
-                serverCookieSnapshots[toServerId] = it
-            }
-        } else null
+            // 3. Restore target server's cookie snapshot if available
+            val targetSnap = if (toServerId.isNotEmpty()) {
+                serverCookieSnapshots[toServerId] ?: loadCookieSnapshotFromPrefs(toServerId)?.also {
+                    serverCookieSnapshots[toServerId] = it
+                }
+            } else null
 
-        if (hasGoogleAuthSessionCookies(targetSnap) && targetSnap != null) {
-            for ((u, pairs) in targetSnap) {
-                val host = try { Uri.parse(u).host ?: ".google.com" } catch (_: Exception) { ".google.com" }
-                val domainAttr = if (host.startsWith(".")) host else if (host == "google.com") ".google.com" else host
-                for (pair in pairs) {
-                    val setCookieStr = if (domainAttr.startsWith(".")) {
-                        "$pair; Domain=$domainAttr; Path=/; Secure"
-                    } else {
-                        "$pair; Path=/; Secure"
+            if (hasGoogleAuthSessionCookies(targetSnap) && targetSnap != null) {
+                for ((u, pairs) in targetSnap) {
+                    val host = try { Uri.parse(u).host ?: ".google.com" } catch (_: Exception) { ".google.com" }
+                    val domainAttr = if (host.startsWith(".")) host else if (host == "google.com") ".google.com" else host
+                    for (pair in pairs) {
+                        val setCookieStr = if (domainAttr.startsWith(".")) {
+                            "$pair; Domain=$domainAttr; Path=/; Secure"
+                        } else {
+                            "$pair; Path=/; Secure"
+                        }
+                        cm.setCookie(u, setCookieStr)
                     }
-                    cm.setCookie(u, setCookieStr)
                 }
+                try { cm.flush() } catch (_: Exception) {}
+                Log.i(TAG, "Restored Google cookie snapshot for server=$toServerId")
+                return JSONObject().put("success", true).put("restored", true)
             }
-            try { cm.flush() } catch (_: Exception) {}
-            Log.i(TAG, "Restored Google cookie snapshot for server=$toServerId")
-            return JSONObject().put("success", true).put("restored", true)
-        }
 
-        Log.i(TAG, "No saved cookie snapshot for server=$toServerId — clean Google sign-in required")
-        return JSONObject().put("success", true).put("restored", false)
+            Log.i(TAG, "No saved cookie snapshot for server=$toServerId — clean Google sign-in required")
+            return JSONObject().put("success", true).put("restored", false)
+        } finally {
+            switchingCookieProfile = false
+        }
     }
 
     @Volatile
@@ -1611,7 +1684,7 @@ class MainActivity : AppCompatActivity() {
         System.arraycopy(suffix, 0, combined, seed.size, suffix.size)
         val signingKey = java.security.MessageDigest.getInstance("SHA-256").digest(combined)
 
-        val payloadStr = "v11|$client|$deviceId|$binHash|$ts|$nonce"
+        val payloadStr = "v12|$client|$deviceId|$binHash|$ts|$nonce"
         val mac = javax.crypto.Mac.getInstance("HmacSHA256")
         mac.init(javax.crypto.spec.SecretKeySpec(signingKey, "HmacSHA256"))
         val sigBytes = mac.doFinal(payloadStr.toByteArray(Charsets.UTF_8))
@@ -1701,12 +1774,28 @@ class MainActivity : AppCompatActivity() {
         captchaProbeJob = null
         captchaProbeHits = 0
         captchaProbeMisses = 0
+        serverCookieSnapshots.clear()
+        activeCookieServerId = ""
+        activeFlowServerId = ""
+        flowCredServerId = ""
+        try {
+            getSharedPreferences("flow_cookie_profiles", MODE_PRIVATE).edit().clear().apply()
+        } catch (_: Exception) {
+        }
         clearGoogleCredsInMemory()
-        authLoginActive = false
-        onGoogleAuth = false
+        // Keep sticky Google auth cover pinned during wipe if in workspace/login mode
+        // so the browser/login page is never exposed for a few seconds during cookie clearing.
+        val keepCoverDuringWipe = shellMode != "full" || authLoginActive || onGoogleAuth
         captchaActive = false
         totpAutoActive = false
         lastHistoryUrl = ""
+        if (keepCoverDuringWipe) {
+            authLoginActive = true
+            onGoogleAuth = true
+        } else {
+            authLoginActive = false
+            onGoogleAuth = false
+        }
         applyAuthOverlayState()
         flowView.stopLoading()
         flowView.loadUrl("about:blank")
@@ -1714,6 +1803,12 @@ class MainActivity : AppCompatActivity() {
         flowView.clearCache(true)
         flowView.clearFormData()
         CookieManager.getInstance().apply {
+            try {
+                removeAllCookies {
+                    try { flush() } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {
+            }
             // Remove Google-related cookies best-effort
             for (host in listOf(
                 "https://accounts.google.com",

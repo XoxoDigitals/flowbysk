@@ -2,13 +2,13 @@
 
 /** Active client API base � v7 traditional login only. */
 (function () {
-let CLIENT_API = '/api/v11/client';
+let CLIENT_API = '/api/v12/client';
 
 function normalizeClientApiVersion(value) {
   const v = String(value || '').trim().toLowerCase();
   if (v === 'v12') return 'v12';
   if (v === 'v11') return 'v11';
-  return 'v11';
+  return 'v12';
 }
 
 const _nativeFetch = window.fetch.bind(window);
