@@ -307,8 +307,21 @@ if (document.documentElement) {
   });
 }
 
-// Disable context menu
+// Disable context menu (except inside editable fields / inputs / Gemini prompt editor so mobile long-press Paste works)
 window.addEventListener('contextmenu', (e) => {
+  try {
+    const t = e.target;
+    if (t && t.closest) {
+      const editable = t.closest(
+        'input, textarea, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"], .ql-editor, rich-textarea, [role="textbox"]'
+      );
+      if (editable || t.isContentEditable) return;
+    }
+    const sel = window.getSelection && window.getSelection();
+    if (sel && String(sel.toString() || '').trim().length > 0 && isGeminiHostUrl()) {
+      return;
+    }
+  } catch (err) {}
   e.preventDefault();
 }, true);
 

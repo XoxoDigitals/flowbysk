@@ -398,6 +398,28 @@ class MainActivity : AppCompatActivity() {
             config.serverUrl = BuildConfig.DEFAULT_SERVER_URL
             config.save()
         }
+        val persistedOwner = getSharedPreferences("flow_cookie_profiles", MODE_PRIVATE)
+            .getString("active_owner_server_id", null)
+            ?.trim()
+            .orEmpty()
+        if (persistedOwner.isNotBlank()) {
+            activeCookieServerId = persistedOwner
+            activeFlowServerId = persistedOwner
+            flowCredServerId = persistedOwner
+        } else {
+            try {
+                val srvJson = config.activeServerJson
+                if (!srvJson.isNullOrBlank()) {
+                    val sid = JSONObject(srvJson).optString("id", "").trim()
+                    if (sid.isNotBlank()) {
+                        activeCookieServerId = sid
+                        activeFlowServerId = sid
+                        flowCredServerId = sid
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
 
         wwwServer = WwwServer(assets)
         wwwServer.start()
@@ -575,11 +597,13 @@ class MainActivity : AppCompatActivity() {
                 postFlowUrl(u, "dom-ready")
                 updateAuthOverlayFromUrl(u)
                 if (isFlowWorkspaceUrl(u) && !isGoogleAuthRelatedUrl(u)) {
+                    googleCookieMismatchRecoveries = 0
                     verifyAndCompleteWorkspaceLoad(u, workspaceReadyGeneration.incrementAndGet())
                     val curSid = activeCookieServerId.ifBlank { activeFlowServerId }
                     if (curSid.isNotBlank() && !switchingCookieProfile) {
                         snapshotLiveCookiesForServer(curSid)
                     }
+                    flushWebViewCookies("workspace-loaded")
                 }
                 ensureCaptchaProbeTimer()
                 probeGoogleCaptcha()
@@ -992,9 +1016,56 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var googleCookieMismatchRecoveries = 0
+
     private fun maybeRecoverGoogleSecureBrowserBlock(url: String) {
         val u = url.lowercase()
-        if (!u.contains("accounts.google.com")) return
+        if (!u.contains("accounts.google.com") && !u.contains("support.google.com/accounts")) return
+
+        val urlIsCookieMismatch =
+            u.contains("cookiemismatch") ||
+                u.contains("nocookies") ||
+                u.contains("enable_cookies") ||
+                (u.contains("support.google.com/accounts") && u.contains("32050"))
+
+        fun recoverCookieMismatch() {
+            if (googleCookieMismatchRecoveries >= 2) return
+            googleCookieMismatchRecoveries++
+            Log.w(TAG, "Google CookieMismatch detected — clearing corrupted cookies and restarting clean login (try #$googleCookieMismatchRecoveries)")
+            authLoginActive = true
+            onGoogleAuth = true
+            applyAuthOverlayState()
+            val cm = CookieManager.getInstance()
+            try {
+                cm.removeAllCookies {
+                    try { cm.flush() } catch (_: Exception) {}
+                    val target = flowCredTarget?.ifBlank { null }
+                        ?: lastTargetFlowUrl.takeIf { isFlowWorkspaceUrl(it) && !isGoogleAuthRelatedUrl(it) }
+                        ?: "https://flow.google.com/"
+                    val continueUrl = Uri.encode(target)
+                    runOnUiThread {
+                        postToShell(
+                            JSONObject()
+                                .put("type", "flow-event")
+                                .put("event", "ipc-message")
+                                .put("channel", "request-credentials")
+                                .put("args", JSONArray())
+                        )
+                        loadFlowUrl("https://accounts.google.com/ServiceLogin?hl=en&continue=$continueUrl")
+                    }
+                }
+            } catch (_: Exception) {
+                val target = flowCredTarget?.ifBlank { null } ?: "https://flow.google.com/"
+                val continueUrl = Uri.encode(target)
+                loadFlowUrl("https://accounts.google.com/ServiceLogin?hl=en&continue=$continueUrl")
+            }
+        }
+
+        if (urlIsCookieMismatch) {
+            recoverCookieMismatch()
+            return
+        }
+
         val urlLooksBlocked = u.contains("signin/rejected") || u.contains("disallowed_useragent") ||
             u.contains("autherror") || u.contains("browser-not-secure")
 
@@ -1022,11 +1093,15 @@ class MainActivity : AppCompatActivity() {
             """
             (function(){
               var t = (document.body && document.body.innerText) || '';
+              if (/problem with your browser.?s cookies|cookie.?mismatch|cookies are enabled|enable cookies/i.test(t)) return 'cookiemismatch';
               return /may not be secure|Couldn't sign you in|disallowed_useragent/i.test(t) ? 'blocked' : 'ok';
             })()
             """.trimIndent()
         ) { result ->
-            if (result?.contains("blocked") == true) retryWithAltUa()
+            when {
+                result?.contains("cookiemismatch") == true -> recoverCookieMismatch()
+                result?.contains("blocked") == true -> retryWithAltUa()
+            }
         }
     }
 
@@ -1464,6 +1539,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun saveActiveCookieOwnerToPrefs(serverId: String) {
+        try {
+            getSharedPreferences("flow_cookie_profiles", MODE_PRIVATE)
+                .edit()
+                .putString("active_owner_server_id", serverId.trim())
+                .apply()
+        } catch (_: Exception) {
+        }
+    }
+
     private fun saveCookieSnapshotToPrefs(serverId: String, snapshot: Map<String, List<String>>) {
         try {
             val root = JSONObject()
@@ -1475,6 +1560,7 @@ class MainActivity : AppCompatActivity() {
             getSharedPreferences("flow_cookie_profiles", MODE_PRIVATE)
                 .edit()
                 .putString("srv_$serverId", root.toString())
+                .putString("active_owner_server_id", serverId.trim())
                 .apply()
         } catch (_: Exception) {
         }
@@ -1533,14 +1619,21 @@ class MainActivity : AppCompatActivity() {
                 .ifBlank { activeCookieServerId.ifBlank { activeFlowServerId } }
             val cm = CookieManager.getInstance()
 
-            if (toServerId.isNotEmpty() && toServerId == activeCookieServerId) {
+            // When staying on the same server (including cold app restart where activeCookieServerId was empty
+            // or loaded from prefs/activeServer), NEVER wipe or re-synthesize the live native WebView cookie jar!
+            // Synthesizing cm.setCookie() from cm.getCookie() strips HttpOnly/SameSite/exact Domain/Expires and
+            // triggers Google's "We've detected a problem with your browser's cookies" (CookieMismatch) error.
+            if (toServerId.isNotEmpty() && (toServerId == activeCookieServerId || activeCookieServerId.isBlank() || toServerId == fromServerId)) {
                 val liveAuth = cookieProfileUrls.any { u ->
                     val c = cm.getCookie(u) ?: ""
-                    c.contains("SID=") || c.contains("__Secure-1PSID=")
+                    c.contains("SID=") || c.contains("__Secure-1PSID=") || c.contains("__Secure-3PSID=")
                 }
                 if (liveAuth) {
+                    activeCookieServerId = toServerId
                     activeFlowServerId = toServerId
                     flowCredServerId = toServerId
+                    saveActiveCookieOwnerToPrefs(toServerId)
+                    try { cm.flush() } catch (_: Exception) {}
                     return JSONObject().put("success", true).put("restored", true).put("sameServer", true)
                 }
             }
@@ -1564,7 +1657,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // 2. Clear all live cookies in WebView before switching to target server
+            // 2. Clear all live cookies in WebView before switching to a different server
             kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
                 runOnUiThread {
                     try {
@@ -1581,33 +1674,15 @@ class MainActivity : AppCompatActivity() {
             activeCookieServerId = toServerId
             activeFlowServerId = toServerId
             flowCredServerId = toServerId
-
-            // 3. Restore target server's cookie snapshot if available
-            val targetSnap = if (toServerId.isNotEmpty()) {
-                serverCookieSnapshots[toServerId] ?: loadCookieSnapshotFromPrefs(toServerId)?.also {
-                    serverCookieSnapshots[toServerId] = it
-                }
-            } else null
-
-            if (hasGoogleAuthSessionCookies(targetSnap) && targetSnap != null) {
-                for ((u, pairs) in targetSnap) {
-                    val host = try { Uri.parse(u).host ?: ".google.com" } catch (_: Exception) { ".google.com" }
-                    val domainAttr = if (host.startsWith(".")) host else if (host == "google.com") ".google.com" else host
-                    for (pair in pairs) {
-                        val setCookieStr = if (domainAttr.startsWith(".")) {
-                            "$pair; Domain=$domainAttr; Path=/; Secure"
-                        } else {
-                            "$pair; Path=/; Secure"
-                        }
-                        cm.setCookie(u, setCookieStr)
-                    }
-                }
-                try { cm.flush() } catch (_: Exception) {}
-                Log.i(TAG, "Restored Google cookie snapshot for server=$toServerId")
-                return JSONObject().put("success", true).put("restored", true)
+            if (toServerId.isNotEmpty()) {
+                saveActiveCookieOwnerToPrefs(toServerId)
             }
 
-            Log.i(TAG, "No saved cookie snapshot for server=$toServerId — clean Google sign-in required")
+            // 3. Do NOT restore lossy cm.getCookie() string snapshots on Android WebView —
+            // cm.getCookie() strips HttpOnly, SameSite, and host-only vs domain-cookie flags,
+            // which causes Google Accounts to fail with CookieMismatch. Instead, perform a clean
+            // automated Google sign-in when switching to a different server account.
+            Log.i(TAG, "Clean WebView cookie jar ready for server=$toServerId — starting clean Google sign-in")
             return JSONObject().put("success", true).put("restored", false)
         } finally {
             switchingCookieProfile = false
