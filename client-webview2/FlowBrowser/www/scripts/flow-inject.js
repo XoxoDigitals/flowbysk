@@ -2039,7 +2039,7 @@ loadSavedProjectsFromDevice();
         "#flow-my-projects-dock{position:fixed!important;bottom:18px!important;right:22px!important;left:auto!important;z-index:2147483645!important;display:flex!important;align-items:center!important;gap:10px!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
         "#flow-my-projects-btn,#flow-save-current-project-btn{display:inline-flex!important;align-items:center!important;gap:8px!important;background:rgba(22,19,36,0.94)!important;border:1px solid rgba(139,92,246,0.45)!important;color:#f3f4f6!important;padding:8px 16px!important;border-radius:999px!important;font-size:13px!important;font-weight:600!important;cursor:pointer!important;box-shadow:0 8px 24px rgba(0,0,0,0.6)!important;transition:all .18s ease!important;}" +
         "#flow-my-projects-btn:hover,#flow-save-current-project-btn:hover{background:rgba(38,31,64,0.98)!important;border-color:rgba(167,139,250,0.8)!important;transform:translateY(-1px)!important;}" +
-        "flow-agent-mode-toggle-chip,flow-agent-mode-toggle-chip *,button.agent-mode-chip,.agent-mode-chip,.agent-mode-chip-label,.add-clip-button-container,[class*='add-clip-button-container'],button[aria-label*='agent' i],[role='tab'][aria-label*='agent' i],[role='button'][aria-label*='agent' i],[data-flow-agent-blocked='true'],button[aria-label*='create tool' i],[role='button'][aria-label*='create tool' i],a[aria-label*='create tool' i],[data-flow-create-tool='1'],button[aria-label='Tools' i],[role='tab'][aria-label='Tools' i],a[href*='/tools' i],[data-flow-tools-btn='1']{display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;min-width:0!important;min-height:0!important;max-width:0!important;max-height:0!important;margin:0!important;padding:0!important;border:0!important;overflow:hidden!important;opacity:0!important;}" +
+        "flow-agent-mode-toggle-chip,flow-agent-mode-toggle-chip *,button.agent-mode-chip,.agent-mode-chip,.agent-mode-chip-label,.add-clip-button-container,[class*='add-clip-button-container'],button[aria-label*='agent' i],[role='tab'][aria-label*='agent' i],[role='button'][aria-label*='agent' i],[data-flow-agent-blocked='true'],button[aria-label*='create tool' i],[role='button'][aria-label*='create tool' i],a[aria-label*='create tool' i],[data-flow-create-tool='1'],button[aria-label='Tools' i],[role='tab'][aria-label='Tools' i],a[href*='/tools' i],[data-flow-tools-btn='1'],[data-flow-hide-menu='1'],flow-menu-item[data-flow-hide-menu='1'],flow-menu-item:has(flow-menu-item-actions),flow-menu-item-actions,flow-menu-item:has(a[href*='one.google.com/ai/credits']),flow-menu-item:has(a[href*='flow_insufficient_credits']),flow-menu-item:has(a[href*='support.google.com/flow']),flow-menu-item:has(a[href*='/changelogs']),flow-menu-item:has(a[href*='flowmusic.app']),flow-menu-item:has(a[href*='labs.google/flow/tv']),flow-menu-item:has(a[href='/flow']),flow-menu-item:has(a[href*='youtube.com']),flow-menu-item:has(a[href*='support.google.com/legal']),flow-menu-item:has(a[href*='/privacy']){display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;min-width:0!important;min-height:0!important;max-width:0!important;max-height:0!important;margin:0!important;padding:0!important;border:0!important;overflow:hidden!important;opacity:0!important;}" +
         "#flow-my-projects-count{background:rgba(139,92,246,0.35)!important;color:#ddd6fe!important;padding:1px 8px!important;border-radius:999px!important;font-size:11px!important;font-weight:700!important;}" +
         "#flow-saved-projects-backdrop{position:fixed!important;inset:0!important;background:rgba(0,0,0,0.72)!important;backdrop-filter:blur(6px)!important;z-index:2147483646!important;display:none;align-items:center!important;justify-content:center!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
         "#flow-saved-projects-modal{width:92vw!important;max-width:960px!important;max-height:82vh!important;background:rgba(19,17,28,0.97)!important;border:1px solid rgba(139,92,246,0.38)!important;border-radius:16px!important;padding:22px!important;display:flex!important;flex-direction:column!important;gap:18px!important;box-shadow:0 24px 64px rgba(0,0,0,0.85)!important;}" +
@@ -2512,8 +2512,8 @@ loadSavedProjectsFromDevice();
         }
       });
 
-      // Hide Create tool and Extend (Veo / Omni), pen_magic Omni, and enable 4K Upscaled menuitem
-      document.querySelectorAll('button, a, [role="button"], [role="menuitem"], flow-project-card').forEach((el) => {
+      // Hide Create tool and Extend (Veo / Omni), pen_magic Omni, help/extra menu items (keep Download project), and 4K Upscaled menuitem
+      document.querySelectorAll('flow-menu-item, button, a, [role="button"], [role="menuitem"], flow-project-card').forEach((el) => {
         if (!el.textContent && !el.getAttribute('aria-label')) return;
         const t = (el.textContent || '').trim();
         const tl = t.toLowerCase();
@@ -2538,17 +2538,43 @@ loadSavedProjectsFromDevice();
           el.classList.add('force-hide-radix');
           el.style.setProperty('display', 'none', 'important');
         }
-        if (el.getAttribute('role') === 'menuitem' && t.includes('4K') && t.includes('Upscaled')) {
-          el.style.setProperty('pointer-events', 'auto', 'important');
-          el.style.setProperty('opacity', '1', 'important');
-          el.style.setProperty('cursor', 'pointer', 'important');
-          el.removeAttribute('aria-disabled');
-          el.removeAttribute('disabled');
-          el.querySelectorAll('*').forEach((child) => {
-            if (child.textContent && child.textContent.trim() === 'Get more AI credits') {
-              child.style.setProperty('display', 'none', 'important');
-            }
-          });
+        if (el.tagName === 'FLOW-MENU-ITEM' || el.getAttribute('role') === 'menuitem' || (el.closest && el.closest('flow-menu-item'))) {
+          const itemHost = (el.closest && el.closest('flow-menu-item')) || el;
+          const labelNode = itemHost.querySelector && itemHost.querySelector('.label');
+          const labelTxt = ((labelNode ? labelNode.textContent : '') || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const itemTxt = (itemHost.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const is4k = (labelTxt === '4k' || /\b4k\b/i.test(itemTxt)) && (itemTxt.includes('upscaled') || itemTxt.includes('50 credits') || itemTxt.includes('add ai credits'));
+          const isBlockedMenuRow =
+            labelTxt === 'product help' ||
+            labelTxt === 'flow help center' ||
+            labelTxt === 'view all changelogs' ||
+            labelTxt === 'flow music' ||
+            labelTxt === 'flow tv' ||
+            labelTxt === 'about flow' ||
+            labelTxt === 'learn flow' ||
+            labelTxt === 'send app feedback' ||
+            labelTxt === 'report legal issue' ||
+            labelTxt === 'privacy notice' ||
+            itemTxt.includes('product help') ||
+            itemTxt.includes('flow help center') ||
+            itemTxt.includes('view all changelogs') ||
+            itemTxt.includes('flow music') ||
+            itemTxt.includes('flow tv') ||
+            itemTxt.includes('about flow') ||
+            itemTxt.includes('learn flow') ||
+            itemTxt.includes('send app feedback') ||
+            itemTxt.includes('report legal issue') ||
+            itemTxt.includes('privacy notice');
+          if (is4k || isBlockedMenuRow) {
+            itemHost.setAttribute('data-flow-hide-menu', '1');
+            itemHost.style.setProperty('display', 'none', 'important');
+            itemHost.style.setProperty('visibility', 'hidden', 'important');
+            itemHost.style.setProperty('pointer-events', 'none', 'important');
+            itemHost.style.setProperty('height', '0', 'important');
+            itemHost.style.setProperty('max-height', '0', 'important');
+            itemHost.style.setProperty('overflow', 'hidden', 'important');
+            itemHost.style.setProperty('opacity', '0', 'important');
+          }
         }
       });
 
@@ -4329,15 +4355,47 @@ function hideFlowChromeTargets() {
       'flow-menu-item.delete-button',
       'flow-credit-banner',
       '.credit-banner',
-      '.credit-banner-container'
+      '.credit-banner-container',
+      'flow-menu-item-actions',
+      'flow-menu-item:has(flow-menu-item-actions)'
     ];
     sels.forEach((sel) => {
       document.querySelectorAll(sel).forEach((el) => hideEl(el));
     });
-    // Menu row by label
+    // Menu row by label (keep "Download project" and 270p/720p/1080p visible, hide all help/extra items and 4K)
     document.querySelectorAll('flow-menu-item, button[mat-menu-item], [role="menuitem"]').forEach((el) => {
-      const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (/delete all projects/i.test(t)) hideEl(el.closest('flow-menu-item') || el);
+      const host = el.closest('flow-menu-item') || el;
+      const labelNode = host.querySelector && host.querySelector('.label');
+      const labelTxt = ((labelNode ? labelNode.textContent : '') || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const t = (host.innerText || host.textContent || '').replace(/\s+/g, ' ').trim();
+      const tl = t.toLowerCase();
+      const is4k = (labelTxt === '4k' || /\b4k\b/i.test(tl)) && (tl.includes('upscaled') || tl.includes('50 credits') || tl.includes('add ai credits'));
+      const isBlockedRow =
+        /delete all projects/i.test(t) ||
+        labelTxt === 'product help' ||
+        labelTxt === 'flow help center' ||
+        labelTxt === 'view all changelogs' ||
+        labelTxt === 'flow music' ||
+        labelTxt === 'flow tv' ||
+        labelTxt === 'about flow' ||
+        labelTxt === 'learn flow' ||
+        labelTxt === 'send app feedback' ||
+        labelTxt === 'report legal issue' ||
+        labelTxt === 'privacy notice' ||
+        tl.includes('product help') ||
+        tl.includes('flow help center') ||
+        tl.includes('view all changelogs') ||
+        tl.includes('flow music') ||
+        tl.includes('flow tv') ||
+        tl.includes('about flow') ||
+        tl.includes('learn flow') ||
+        tl.includes('send app feedback') ||
+        tl.includes('report legal issue') ||
+        tl.includes('privacy notice');
+      if (is4k || isBlockedRow) {
+        host.setAttribute('data-flow-hide-menu', '1');
+        hideEl(host);
+      }
     });
   } catch (e) {}
 }
@@ -4589,14 +4647,28 @@ function applyCssRules() {
       opacity: 0 !important;
     }
 
-    /* Delete all projects menu row + blocked model picker rows */
+    /* Delete all projects menu row + blocked model picker rows + non-download project menu items & 4K option */
     flow-menu-item.delete-button,
     flow-menu-item.delete-button button,
     flow-menu-item[data-flow-blocked-model="1"],
     flow-menu-item[data-flow-blocked-model="1"] button,
     button[data-flow-blocked-model="1"],
     [role="menuitem"][data-flow-blocked-model="1"],
-    .flow-internal-menu-item[data-flow-blocked-model="1"] {
+    .flow-internal-menu-item[data-flow-blocked-model="1"],
+    [data-flow-hide-menu="1"],
+    flow-menu-item[data-flow-hide-menu="1"],
+    flow-menu-item:has(flow-menu-item-actions),
+    flow-menu-item-actions,
+    flow-menu-item:has(a[href*="one.google.com/ai/credits"]),
+    flow-menu-item:has(a[href*="flow_insufficient_credits"]),
+    flow-menu-item:has(a[href*="support.google.com/flow"]),
+    flow-menu-item:has(a[href*="/changelogs"]),
+    flow-menu-item:has(a[href*="flowmusic.app"]),
+    flow-menu-item:has(a[href*="labs.google/flow/tv"]),
+    flow-menu-item:has(a[href="/flow"]),
+    flow-menu-item:has(a[href*="youtube.com"]),
+    flow-menu-item:has(a[href*="support.google.com/legal"]),
+    flow-menu-item:has(a[href*="/privacy"]) {
       display: none !important;
       visibility: hidden !important;
       pointer-events: none !important;
