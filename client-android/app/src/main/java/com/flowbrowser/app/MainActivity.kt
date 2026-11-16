@@ -434,8 +434,10 @@ class MainActivity : AppCompatActivity() {
 
         configureShellWebView()
         configureFlowWebView()
-        flowView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            applyFlowLayoutScale()
+        flowView.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (right - left != oldRight - oldLeft) {
+                applyFlowLayoutScale()
+            }
         }
         setShellMode("full")
 
@@ -820,12 +822,14 @@ class MainActivity : AppCompatActivity() {
                 u.contains("/zextts/") ||
                 u.contains("127.0.0.1")
         ) {
-            s.useWideViewPort = false
-            s.loadWithOverviewMode = false
-            s.builtInZoomControls = false
-            s.setSupportZoom(false)
-            lastFlowScalePct = 0
-            flowView.setInitialScale(0)
+            if (s.useWideViewPort) s.useWideViewPort = false
+            if (s.loadWithOverviewMode) s.loadWithOverviewMode = false
+            if (s.builtInZoomControls) s.builtInZoomControls = false
+            if (s.supportZoom()) s.setSupportZoom(false)
+            if (lastFlowScalePct != 0) {
+                lastFlowScalePct = 0
+                flowView.setInitialScale(0)
+            }
             if (u.contains("zextts") || u.contains("app.flowbrowser.localhost") || u.contains("flowbrowser.local")) {
                 flowView.evaluateJavascript(
                     "(function(){try{var m=document.querySelector('meta[name=\"viewport\"]');if(!m){m=document.createElement('meta');m.name='viewport';document.head.appendChild(m);}m.setAttribute('content','width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no');}catch(e){}})();",
@@ -847,8 +851,9 @@ class MainActivity : AppCompatActivity() {
                     u.contains("/zextts/") ||
                     u.contains("127.0.0.1")
             ) {
-                flowView.settings.useWideViewPort = false
-                flowView.settings.loadWithOverviewMode = false
+                val s = flowView.settings
+                if (s.useWideViewPort) s.useWideViewPort = false
+                if (s.loadWithOverviewMode) s.loadWithOverviewMode = false
                 if (lastFlowScalePct != 0) {
                     lastFlowScalePct = 0
                     flowView.setInitialScale(0)

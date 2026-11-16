@@ -307,20 +307,22 @@ if (document.documentElement) {
   });
 }
 
-// Disable context menu (except inside editable fields / inputs / Gemini prompt editor so mobile long-press Paste works)
+// Disable context menu (except on Gemini or inside editable fields / inputs so mobile long-press Paste / Copy works)
 window.addEventListener('contextmenu', (e) => {
   try {
+    if (isGeminiHostUrl()) return;
     const t = e.target;
-    if (t && t.closest) {
-      const editable = t.closest(
-        'input, textarea, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"], .ql-editor, rich-textarea, [role="textbox"]'
-      );
-      if (editable || t.isContentEditable) return;
+    if (t) {
+      if (t.isContentEditable) return;
+      if (t.closest) {
+        const editable = t.closest(
+          'input, textarea, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"], .ql-editor, rich-textarea, [role="textbox"], .input-area, .text-input-field, prompt-box, flow-prompt-box'
+        );
+        if (editable) return;
+      }
     }
-    const sel = window.getSelection && window.getSelection();
-    if (sel && String(sel.toString() || '').trim().length > 0 && isGeminiHostUrl()) {
-      return;
-    }
+    const ae = document.activeElement;
+    if (ae && (ae.isContentEditable || ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
   } catch (err) {}
   e.preventDefault();
 }, true);
@@ -1995,9 +1997,47 @@ function updateMyProjectsUI() {
 
   const countEl = document.getElementById('flow-my-projects-count');
   if (countEl) countEl.textContent = String(scopedCount);
+
+  if (isGem && container) {
+    const ae = document.activeElement;
+    const isEditing = !!(
+      ae &&
+      (ae.isContentEditable ||
+        ae.tagName === 'INPUT' ||
+        ae.tagName === 'TEXTAREA' ||
+        (ae.closest && ae.closest('rich-textarea, .ql-editor, [contenteditable="true"], [role="textbox"]')))
+    );
+    const vv = window.visualViewport;
+    const kbOpen = !!(vv && window.innerHeight && window.innerHeight - vv.height > 110);
+    if (isEditing || kbOpen) {
+      container.style.setProperty('display', 'none', 'important');
+      container.style.setProperty('pointer-events', 'none', 'important');
+    } else {
+      container.style.setProperty('display', 'flex', 'important');
+      container.style.setProperty('pointer-events', 'auto', 'important');
+    }
+  }
 }
 
 loadSavedProjectsFromDevice();
+
+document.addEventListener('focusin', () => {
+  try {
+    if (isGeminiHostUrl()) updateMyProjectsUI();
+  } catch (e) {}
+}, true);
+document.addEventListener('focusout', () => {
+  try {
+    if (isGeminiHostUrl()) setTimeout(() => updateMyProjectsUI(), 120);
+  } catch (e) {}
+}, true);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    try {
+      if (isGeminiHostUrl()) updateMyProjectsUI();
+    } catch (e) {}
+  });
+}
 
 (function initPakflowDomEngine() {
   const isFlowHost = () => {
