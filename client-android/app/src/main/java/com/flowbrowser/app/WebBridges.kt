@@ -44,4 +44,14 @@ class FlowBridge(private val activity: MainActivity) {
     fun downloadFail(id: String, error: String) {
         activity.onBlobDownloadFail(id, "", error)
     }
+
+    @JavascriptInterface
+    fun setClipboardText(text: String) {
+        activity.setClipboardTextFromJs(text)
+    }
+
+    @JavascriptInterface
+    fun getClipboardText(): String {
+        return activity.getClipboardTextForJs()
+    }
 }

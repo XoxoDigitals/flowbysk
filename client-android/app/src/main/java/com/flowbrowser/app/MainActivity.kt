@@ -387,7 +387,19 @@ class MainActivity : AppCompatActivity() {
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime()
             )
-            v.updatePadding(bars.left, bars.top, bars.right, bars.bottom)
+            // Never resize the WebView mid-touch (between ACTION_DOWN and ACTION_UP) when the user
+            // taps or long-presses "Ask Gemini" — yanking the WebView 850px upward while the finger
+            // is still down causes ACTION_UP / long-press to land below the input and blur it!
+            if (activeTouchDown && v.paddingTop > 0) {
+                pendingRootPadding = android.graphics.Rect(bars.left, bars.top, bars.right, bars.bottom)
+            } else {
+                pendingRootPadding = null
+                if (v.paddingLeft != bars.left || v.paddingTop != bars.top ||
+                    v.paddingRight != bars.right || v.paddingBottom != bars.bottom
+                ) {
+                    v.updatePadding(bars.left, bars.top, bars.right, bars.bottom)
+                }
+            }
             insets
         }
         // Ensure resize when keyboard opens (WebView + adjustResize)
@@ -466,6 +478,86 @@ class MainActivity : AppCompatActivity() {
         shellView.destroy()
         flowView.destroy()
         super.onDestroy()
+    }
+
+    @Volatile
+    private var activeTouchDown = false
+    private var pendingRootPadding: android.graphics.Rect? = null
+    private var touchFlushRunnable: Runnable? = null
+    private var touchSafetyRunnable: Runnable? = null
+    private var flowKeyboardBlockedState = false
+    @Volatile
+    private var lastCopiedClipboardText: String = ""
+
+    private fun applyPendingWindowInsetsPadding() {
+        val rect = pendingRootPadding ?: return
+        pendingRootPadding = null
+        if (root.paddingLeft != rect.left ||
+            root.paddingTop != rect.top ||
+            root.paddingRight != rect.right ||
+            root.paddingBottom != rect.bottom
+        ) {
+            root.updatePadding(rect.left, rect.top, rect.right, rect.bottom)
+        }
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                activeTouchDown = true
+                touchFlushRunnable?.let { root.removeCallbacks(it) }
+                val safety = Runnable {
+                    if (activeTouchDown) {
+                        activeTouchDown = false
+                        applyPendingWindowInsetsPadding()
+                    }
+                }
+                touchSafetyRunnable?.let { root.removeCallbacks(it) }
+                touchSafetyRunnable = safety
+                root.postDelayed(safety, 1400L)
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                activeTouchDown = false
+                touchSafetyRunnable?.let { root.removeCallbacks(it) }
+                touchSafetyRunnable = null
+                val flush = Runnable {
+                    if (!activeTouchDown) {
+                        applyPendingWindowInsetsPadding()
+                    }
+                }
+                touchFlushRunnable?.let { root.removeCallbacks(it) }
+                touchFlushRunnable = flush
+                root.postDelayed(flush, 95L)
+            }
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    fun setClipboardTextFromJs(text: String) {
+        lastCopiedClipboardText = text
+        runOnUiThread {
+            try {
+                val cm = getSystemService(CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                cm?.setPrimaryClip(android.content.ClipData.newPlainText("Copied Text", text))
+            } catch (e: Exception) {
+                Log.w(TAG, "setClipboardTextFromJs failed", e)
+            }
+        }
+    }
+
+    fun getClipboardTextForJs(): String {
+        return try {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+            val clip = cm?.primaryClip
+            val sysText = if (clip != null && clip.itemCount > 0) {
+                clip.getItemAt(0)?.coerceToText(this)?.toString() ?: ""
+            } else {
+                ""
+            }
+            sysText.ifEmpty { lastCopiedClipboardText }
+        } catch (e: Exception) {
+            lastCopiedClipboardText
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -1974,6 +2066,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun clearAuthCoverSession() {
+        val wasActive = authLoginActive || onGoogleAuth || captchaActive || totpAutoActive ||
+            authUiMode != AUTH_UI_OFF || flowSettleClearJob != null || captchaProbeJob != null
         flowSettleClearJob?.cancel()
         flowSettleClearJob = null
         captchaProbeJob?.cancel()
@@ -1984,6 +2078,9 @@ class MainActivity : AppCompatActivity() {
         onGoogleAuth = false
         authLoginActive = false
         totpAutoActive = false
+        if (!wasActive && flowCredPassword == null && flowCredEmail == null) {
+            return
+        }
         // Login finished — drop Google email/password from RAM (never persisted)
         clearGoogleCredsInMemory(clearEmail = true)
         applyAuthOverlayState()
@@ -2305,6 +2402,10 @@ class MainActivity : AppCompatActivity() {
      * Captcha / TOTP lift turns this off so the user can type when needed.
      */
     private fun setFlowKeyboardBlocked(blocked: Boolean) {
+        if (!blocked && !flowKeyboardBlockedState) {
+            return
+        }
+        flowKeyboardBlockedState = blocked
         if (blocked) {
             flowView.isFocusable = false
             flowView.isFocusableInTouchMode = false
