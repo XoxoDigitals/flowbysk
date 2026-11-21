@@ -1614,7 +1614,8 @@ class MainActivity : AppCompatActivity() {
                 switchFlowCookieProfileImpl(payload)
             }
             "getDeviceId" -> {
-                createClientAttestation()
+                val apiVer = payload?.optString("apiVersion", "v12") ?: "v12"
+                createClientAttestation(apiVer)
             }
             else -> throw IllegalArgumentException("Unknown command: $cmd")
         }
@@ -1828,7 +1829,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun createClientAttestation(): JSONObject {
+    private fun createClientAttestation(apiVersion: String = "v12"): JSONObject {
         val ver = appVersionName()
         val wireVer = "2.7.0"
         val client = "android/$wireVer"
@@ -1856,7 +1857,8 @@ class MainActivity : AppCompatActivity() {
         System.arraycopy(suffix, 0, combined, seed.size, suffix.size)
         val signingKey = java.security.MessageDigest.getInstance("SHA-256").digest(combined)
 
-        val payloadStr = "v13|$client|$deviceId|$binHash|$ts|$nonce"
+        val prefix = if (apiVersion.equals("v13", ignoreCase = true)) "v13" else "v12"
+        val payloadStr = "$prefix|$client|$deviceId|$binHash|$ts|$nonce"
         val mac = javax.crypto.Mac.getInstance("HmacSHA256")
         mac.init(javax.crypto.spec.SecretKeySpec(signingKey, "HmacSHA256"))
         val sigBytes = mac.doFinal(payloadStr.toByteArray(Charsets.UTF_8))

@@ -401,7 +401,7 @@ internal static class SecurityGuard
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    public static object CreateClientAttestation(string deviceId, string appVersion, long? explicitServerTimeMs = null)
+    public static object CreateClientAttestation(string deviceId, string appVersion, long? explicitServerTimeMs = null, string apiVersion = "v12")
     {
         if (explicitServerTimeMs.HasValue && explicitServerTimeMs.Value > 0)
             SetServerTime(explicitServerTimeMs.Value);
@@ -432,7 +432,8 @@ internal static class SecurityGuard
         CryptographicOperations.ZeroMemory(seed);
         CryptographicOperations.ZeroMemory(keyMaterial);
 
-        var msg = Encoding.UTF8.GetBytes($"v13|{client}|{deviceId}|{binHash}|{ts}|{nonce}");
+        var prefix = string.Equals(apiVersion, "v13", StringComparison.OrdinalIgnoreCase) ? "v13" : "v12";
+        var msg = Encoding.UTF8.GetBytes($"{prefix}|{client}|{deviceId}|{binHash}|{ts}|{nonce}");
         var mac = HMACSHA256.HashData(signingKey, msg);
         CryptographicOperations.ZeroMemory(signingKey);
 

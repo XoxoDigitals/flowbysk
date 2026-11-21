@@ -2634,14 +2634,23 @@ public partial class MainWindow : Window
             case "getDeviceId":
             {
                 long? srvTime = null;
-                if (payload.ValueKind == JsonValueKind.Object &&
-                    payload.TryGetProperty("serverTime", out var stEl) &&
-                    stEl.ValueKind == JsonValueKind.Number &&
-                    stEl.TryGetInt64(out var stMs))
+                string apiVer = "v12";
+                if (payload.ValueKind == JsonValueKind.Object)
                 {
-                    srvTime = stMs;
+                    if (payload.TryGetProperty("serverTime", out var stEl) &&
+                        stEl.ValueKind == JsonValueKind.Number &&
+                        stEl.TryGetInt64(out var stMs))
+                    {
+                        srvTime = stMs;
+                    }
+                    if (payload.TryGetProperty("apiVersion", out var avEl) &&
+                        avEl.ValueKind == JsonValueKind.String)
+                    {
+                        var s = avEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(s)) apiVer = s.Trim().ToLowerInvariant();
+                    }
                 }
-                return SecurityGuard.CreateClientAttestation(GetStableDeviceId(), AppVersion(), srvTime);
+                return SecurityGuard.CreateClientAttestation(GetStableDeviceId(), AppVersion(), srvTime, apiVer);
             }
             default:
                 throw new InvalidOperationException("Unknown command: " + cmd);

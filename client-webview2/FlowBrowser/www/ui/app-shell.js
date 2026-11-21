@@ -2,14 +2,14 @@
 
 /** Active client API base � v7 traditional login only. */
 (function () {
-let CLIENT_API = '/api/v13/client';
+let CLIENT_API = '/api/v12/client';
 
 function normalizeClientApiVersion(value) {
   const v = String(value || '').trim().toLowerCase();
   if (v === 'v13') return 'v13';
   if (v === 'v12') return 'v12';
   if (v === 'v11') return 'v11';
-  return 'v13';
+  return 'v12';
 }
 
 const _nativeFetch = window.fetch.bind(window);
@@ -18,19 +18,24 @@ window.fetch = async function (input, init) {
   if (/\/api\/v\d+\/client\//i.test(urlStr)) {
     init = init ? { ...init } : {};
     const headers = new Headers(init.headers || {});
-    try {
-      if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
-        const att = await window.electronAPI.getDeviceId();
-        if (att && typeof att === 'object') {
-          if (att.client) headers.set('X-Flow-Client', String(att.client));
-          if (att.deviceId) headers.set('X-Flow-Device-Id', String(att.deviceId));
-          if (att.binHash) headers.set('X-Flow-Bin-Hash', String(att.binHash));
-          if (att.ts != null) headers.set('X-Flow-Ts', String(att.ts));
-          if (att.nonce) headers.set('X-Flow-Nonce', String(att.nonce));
-          if (att.signature) headers.set('X-Flow-Signature', String(att.signature));
+    const hasSig = headers.has('X-Flow-Signature') || headers.has('x-flow-signature');
+    if (!hasSig) {
+      try {
+        if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
+          const m = urlStr.match(/\/api\/(v\d+)\/client\//i);
+          const reqVer = m ? m[1].toLowerCase() : ((CLIENT_API && CLIENT_API.includes('v13')) ? 'v13' : 'v12');
+          const att = await window.electronAPI.getDeviceId({ apiVersion: reqVer });
+          if (att && typeof att === 'object') {
+            if (att.client) headers.set('X-Flow-Client', String(att.client));
+            if (att.deviceId) headers.set('X-Flow-Device-Id', String(att.deviceId));
+            if (att.binHash) headers.set('X-Flow-Bin-Hash', String(att.binHash));
+            if (att.ts != null) headers.set('X-Flow-Ts', String(att.ts));
+            if (att.nonce) headers.set('X-Flow-Nonce', String(att.nonce));
+            if (att.signature) headers.set('X-Flow-Signature', String(att.signature));
+          }
         }
-      }
-    } catch (e) {}
+      } catch (e) {}
+    }
     const hObj = {};
     headers.forEach((v, k) => { hObj[k] = v; });
     init.headers = hObj;
@@ -647,7 +652,8 @@ class FlowBrowserApp {
       let signature = '';
       try {
         if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
-          const dev = await window.electronAPI.getDeviceId();
+          const apiVer = (CLIENT_API && CLIENT_API.includes('v12')) ? 'v12' : 'v13';
+          const dev = await window.electronAPI.getDeviceId({ apiVersion: apiVer });
           if (dev && dev.deviceId) deviceId = String(dev.deviceId);
           if (dev && dev.client) flowClient = String(dev.client);
           if (dev && dev.binHash) binHash = String(dev.binHash);
@@ -679,6 +685,24 @@ class FlowBrowserApp {
       if ((!data || !data.success) && data && data.code === 'FORCE_UPDATE') {
         const switched = await maybeSwitchClientApiOnForceUpdate(serverUrl, data);
         if (switched) {
+          const retryApiVer = (CLIENT_API && CLIENT_API.includes('v13')) ? 'v13' : 'v12';
+          try {
+            const reDev = await window.electronAPI?.getDeviceId?.({ apiVersion: retryApiVer });
+            if (reDev) {
+              if (reDev.binHash) binHash = String(reDev.binHash);
+              if (reDev.ts != null) attestTs = Number(reDev.ts) || 0;
+              if (reDev.nonce) attestNonce = String(reDev.nonce);
+              if (reDev.signature) signature = String(reDev.signature);
+              loginBody.binHash = binHash;
+              loginBody.attestTs = attestTs;
+              loginBody.attestNonce = attestNonce;
+              loginBody.signature = signature;
+              loginHeaders['X-Flow-Bin-Hash'] = binHash;
+              loginHeaders['X-Flow-Ts'] = String(attestTs);
+              loginHeaders['X-Flow-Nonce'] = attestNonce;
+              loginHeaders['X-Flow-Signature'] = signature;
+            }
+          } catch (_) {}
           const retry = await fetch(`${serverUrl}${CLIENT_API}/login`, {
             method: 'POST',
             headers: loginHeaders,
