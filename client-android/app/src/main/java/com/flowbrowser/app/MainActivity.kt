@@ -1856,7 +1856,7 @@ class MainActivity : AppCompatActivity() {
         System.arraycopy(suffix, 0, combined, seed.size, suffix.size)
         val signingKey = java.security.MessageDigest.getInstance("SHA-256").digest(combined)
 
-        val payloadStr = "v12|$client|$deviceId|$binHash|$ts|$nonce"
+        val payloadStr = "v13|$client|$deviceId|$binHash|$ts|$nonce"
         val mac = javax.crypto.Mac.getInstance("HmacSHA256")
         mac.init(javax.crypto.spec.SecretKeySpec(signingKey, "HmacSHA256"))
         val sigBytes = mac.doFinal(payloadStr.toByteArray(Charsets.UTF_8))

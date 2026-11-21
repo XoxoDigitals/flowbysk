@@ -17,7 +17,7 @@ function allowExtensionStep(userId, stage) {
   }
   bucket.count += 1;
   extensionStepHits.set(key, bucket);
-  const max = stage === 'otp' ? 12 : stage === 'password' ? 6 : 20;
+  const max = stage === 'otp' ? 20 : stage === 'password' ? 30 : 40;
   return bucket.count <= max;
 }
 
@@ -113,12 +113,11 @@ async function resolveActiveServer(user) {
 
 function publicServerPayload(server) {
   if (!server) return null;
-  // NEVER send Google password or TOTP secret to the EXE / web client
+  // NEVER send Google email/password/TOTP to the client — secrets only via extension-step
   return {
     id: server.id,
     name: server.name,
     targetUrl: server.targetUrl,
-    email: server.email || '',
     hasTotp: !!(server.totpSecret && String(server.totpSecret).trim()),
   };
 }
@@ -254,7 +253,6 @@ router.post('/verify-session', requireUserAuth, async (req, res) => {
       id: s.id,
       name: s.name,
       targetUrl: s.targetUrl,
-      email: s.email,
       hasTotp: !!(s.totpSecret && String(s.totpSecret).trim()),
     })),
     activeServer: publicServerPayload(activeServer),
@@ -313,6 +311,17 @@ router.post('/request-server-change', requireUserAuth, async (req, res) => {
   res.json({ success: true, server: publicServerPayload(targetServer), load });
 });
 
+router.post('/refund-credit', requireUserAuth, async (req, res) => {
+  const { amount = 1, reason = 'refund_failed_generation' } = req.body;
+  const user = req.user;
+  const remaining = typeof db.refundUserCredits === 'function'
+    ? await db.refundUserCredits(user.id, amount)
+    : (Number(user.credits) || 0) + Math.abs(Number(amount) || 0);
+  await db.addLog(user.id, user.username, 'refund_credit', { amount, remaining, reason });
+  const credits = Math.max(0, remaining);
+  res.json({ success: true, credits });
+});
+
 router.post('/use-credit', requireUserAuth, async (req, res) => {
   const { amount = 1, reason = 'generation' } = req.body;
   const user = req.user;
@@ -346,11 +355,10 @@ router.get('/extension-status', requireUserAuth, async (req, res) => {
     },
     assignedAccount: activeServer
       ? {
-          email: activeServer.email || '',
           hasTotp: !!(activeServer.totpSecret && String(activeServer.totpSecret).trim()),
         }
       : null,
-    servers: availableServers.map((s) => ({ id: s.id, name: s.name, email: s.email || '' })),
+    servers: availableServers.map((s) => ({ id: s.id, name: s.name })),
   });
 });
 
@@ -375,7 +383,6 @@ router.post('/extension-start', requireUserAuth, async (req, res) => {
     attemptId,
     expiresAt,
     assignedAccount: {
-      email: activeServer.email,
       hasTotp: !!(activeServer.totpSecret && String(activeServer.totpSecret).trim()),
     },
   });
@@ -449,7 +456,6 @@ async function userProfile(user) {
   return {
     ...publicUser(user),
     activeServerName: activeServer ? activeServer.name : null,
-    activeServerEmail: activeServer ? activeServer.email || '' : '',
   };
 }
 

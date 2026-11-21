@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Obfuscator>
+  <Var name="InPath" value="." />
+  <Var name="OutPath" value=".\obf-out" />
+  <Var name="RenameProperties" value="false" />
+  <Var name="RenameEvents" value="false" />
+  <Var name="RenameFields" value="true" />
+  <Var name="KeepPublicApi" value="true" />
+  <Var name="HidePrivateApi" value="false" />
+  <Var name="HideStrings" value="true" />
+  <Var name="UseUnicodeNames" value="false" />
+  <Var name="ReuseNames" value="true" />
+  <Var name="OptimizeMethods" value="true" />
+  <Var name="SuppressIldasm" value="true" />
+
+  <Module file="$(InPath)\Flow Browser.dll">
+    <SkipType name="*AnonymousType*" skipMethods="true" skipFields="true" skipProperties="true" skipEvents="true" />
+    <SkipType name="FlowBrowser.App" skipMethods="true" skipFields="true" skipProperties="true" skipEvents="true" />
+    <SkipType name="FlowBrowser.AppConfig" skipMethods="false" skipFields="true" skipProperties="true" skipEvents="true" />
+    <SkipType name="FlowBrowser.MainWindow" skipFields="true" skipProperties="true" skipEvents="true" />
+    <SkipType name="*SavedCookieDto*" skipMethods="true" skipFields="true" skipProperties="true" skipEvents="true" />
+    <SkipType name="*VoiceDto*" skipMethods="true" skipFields="true" skipProperties="true" skipEvents="true" />
+  </Module>
+</Obfuscator>

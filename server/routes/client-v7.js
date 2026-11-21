@@ -401,6 +401,17 @@ router.post('/request-server-change', requireUserAuth, async (req, res) => {
   res.json({ success: true, server: publicServerPayload(targetServer), load });
 });
 
+router.post('/refund-credit', requireUserAuth, async (req, res) => {
+  const { amount = 1, reason = 'refund_failed_generation' } = req.body;
+  const user = req.user;
+  const remaining = typeof db.refundUserCredits === 'function'
+    ? await db.refundUserCredits(user.id, amount)
+    : (Number(user.credits) || 0) + Math.abs(Number(amount) || 0);
+  await db.addLog(user.id, user.username, 'refund_credit', { amount, remaining, reason });
+  const credits = Math.max(0, remaining);
+  res.json({ success: true, credits });
+});
+
 router.post('/use-credit', requireUserAuth, async (req, res) => {
   const { amount = 1, reason = 'generation' } = req.body;
   const user = req.user;

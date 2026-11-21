@@ -2,13 +2,14 @@
 
 /** Active client API base � v7 traditional login only. */
 (function () {
-let CLIENT_API = '/api/v12/client';
+let CLIENT_API = '/api/v13/client';
 
 function normalizeClientApiVersion(value) {
   const v = String(value || '').trim().toLowerCase();
+  if (v === 'v13') return 'v13';
   if (v === 'v12') return 'v12';
   if (v === 'v11') return 'v11';
-  return 'v12';
+  return 'v13';
 }
 
 const _nativeFetch = window.fetch.bind(window);
@@ -639,7 +640,7 @@ class FlowBrowserApp {
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
       let deviceId = null;
-      let flowClient = 'windows-exe/8.0.18';
+      let flowClient = 'windows-exe/8.0.19';
       let binHash = '';
       let attestTs = 0;
       let attestNonce = '';

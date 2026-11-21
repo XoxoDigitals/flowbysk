@@ -58,10 +58,10 @@ async function setJsonSetting(key, value) {
 }
 
 function normalizeClientApiVersion(value) {
-  // v12 and v11 are live (SHA-256 Authenticode/Keystore signed binary attestation). Older clients FORCE_UPDATE.
+  // v13 is live (SHA-256 Authenticode/Keystore signed binary attestation). Older clients FORCE_UPDATE.
   const v = String(value || '').trim().toLowerCase();
-  if (v === 'v11') return 'v11';
-  return 'v12';
+  if (v === 'v13') return 'v13';
+  return 'v13';
 }
 
 async function getRuntime() {
@@ -73,7 +73,7 @@ async function getRuntime() {
     cssSelectorsToHide: [],
     customCss: '',
     downloads: { windows: null, android: null },
-    clientApiVersion: 'v12',
+    clientApiVersion: 'v13',
     jwtSecret: process.env.JWT_SECRET || 'flow_super_secret_jwt_key_2026',
   };
   const stored = (await getJsonSetting(RUNTIME_KEY, {})) || {};

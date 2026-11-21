@@ -71,7 +71,52 @@ public partial class MainWindow
         }
     }
 
-    double RightBulkMargin => (_bulkPanelOpen && _shellMode != "full" && IsCurrentPageGoogleFlow) ? BulkPanelWidth : 0;
+    System.Windows.Threading.DispatcherTimer? _bulkPinTimer;
+
+    double RightBulkMargin => 0;
+
+    void PinBulkViewAboveFlowView()
+    {
+        if (!_bulkPanelOpen || _shellMode == "full" || !IsCurrentPageGoogleFlow) return;
+        if (_authUiMode == AuthUiCover) return;
+        try
+        {
+            if (BulkView.Handle != IntPtr.Zero)
+            {
+                SetWindowPos(BulkView.Handle, HwndaTop, 0, 0, 0, 0, SwpNomove | SwpNosize | SwpNoactivate);
+            }
+        }
+        catch { /* ignore */ }
+    }
+
+    void EnsureBulkPinTimer(bool enable)
+    {
+        if (!enable)
+        {
+            _bulkPinTimer?.Stop();
+            return;
+        }
+        if (_bulkPinTimer == null)
+        {
+            _bulkPinTimer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(120)
+            };
+            _bulkPinTimer.Tick += (_, _) =>
+            {
+                if (!_bulkPanelOpen || _shellMode == "full" || !IsCurrentPageGoogleFlow)
+                {
+                    _bulkPinTimer?.Stop();
+                    return;
+                }
+                PinBulkViewAboveFlowView();
+            };
+        }
+        if (!_bulkPinTimer.IsEnabled)
+        {
+            _bulkPinTimer.Start();
+        }
+    }
 
     void CloseBulkPanelIfOpen()
     {
@@ -79,6 +124,7 @@ public partial class MainWindow
         _bulkPanelOpen = false;
         Dispatcher.Invoke(() =>
         {
+            EnsureBulkPinTimer(false);
             BulkView.Visibility = Visibility.Collapsed;
             if (_shellMode != "full")
             {
@@ -206,6 +252,7 @@ public partial class MainWindow
     {
         if (_shellMode == "full" || !IsCurrentPageGoogleFlow)
         {
+            EnsureBulkPinTimer(false);
             BulkView.Visibility = Visibility.Collapsed;
             if (_shellMode != "full")
             {
@@ -218,7 +265,16 @@ public partial class MainWindow
 
         BulkView.Margin = new Thickness(0, _chromeHeight, 0, 0);
         BulkView.Visibility = _bulkPanelOpen ? Visibility.Visible : Visibility.Collapsed;
-        FlowView.Margin = new Thickness(0, _chromeHeight, RightBulkMargin, 0);
+        FlowView.Margin = new Thickness(0, _chromeHeight, 0, 0);
+        if (_bulkPanelOpen)
+        {
+            PinBulkViewAboveFlowView();
+            EnsureBulkPinTimer(true);
+        }
+        else
+        {
+            EnsureBulkPinTimer(false);
+        }
         SyncOverlayMargins();
         SyncAuthCoverBounds();
     }
@@ -931,6 +987,136 @@ public partial class MainWindow
         return _veoFallbackConfig;
     }
 
+    string? _pendingDirectDownloadTarget;
+    TaskCompletionSource<string?>? _pendingDirectDownloadTcs;
+
+    static string NormalizeVeoFileName(string? rawName, string? url)
+    {
+        var origName = (rawName ?? "").Trim();
+        var ext = Path.GetExtension(origName);
+        var hasValidExt = !string.IsNullOrWhiteSpace(ext) && KnownDownloadExtensions.Contains(ext);
+        if (!hasValidExt)
+        {
+            ext = InferExtensionFromMimeOrUrl(null, url)
+                  ?? ((url ?? "").Contains("=mm", StringComparison.OrdinalIgnoreCase) ? ".mp4" : ".mp4");
+        }
+        var stem = hasValidExt ? Path.GetFileNameWithoutExtension(origName) : origName;
+        if (string.IsNullOrWhiteSpace(stem) ||
+            stem.Length > 60 ||
+            stem.StartsWith("ANqvL", StringComparison.Ordinal) ||
+            stem.Contains("=mm,", StringComparison.OrdinalIgnoreCase))
+        {
+            var kind = (ext is ".png" or ".jpg" or ".jpeg" or ".webp" or ".gif") ? "image" : "video";
+            stem = $"flow_{kind}_{DateTime.Now:yyyyMMdd_HHmmss}";
+        }
+        return SanitizeFileName(stem + ext);
+    }
+
+    static bool IsHtmlPayload(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length == 0) return true;
+        int i = 0;
+        while (i < bytes.Length && i < 32 && (bytes[i] == (byte)' ' || bytes[i] == (byte)'\t' || bytes[i] == (byte)'\r' || bytes[i] == (byte)'\n' || bytes[i] == 0xEF || bytes[i] == 0xBB || bytes[i] == 0xBF))
+            i++;
+        var rem = bytes[i..];
+        if (rem.Length >= 9 &&
+            rem[0] == (byte)'<' &&
+            (rem[1] == (byte)'!' || rem[1] == (byte)'h' || rem[1] == (byte)'H'))
+            return true;
+        return false;
+    }
+
+    async Task<byte[]?> DownloadBytesWithFlowCookiesAsync(string url)
+    {
+        try
+        {
+            var jar = new System.Net.CookieContainer();
+            await Dispatcher.InvokeAsync(async () =>
+            {
+                if (FlowView.CoreWebView2?.CookieManager == null) return;
+                var cookies = await FlowView.CoreWebView2.CookieManager.GetCookiesAsync("");
+                foreach (var c in cookies)
+                {
+                    try
+                    {
+                        var dom = string.IsNullOrWhiteSpace(c.Domain) ? "google.com" : c.Domain;
+                        jar.Add(new System.Net.Cookie(c.Name, c.Value, string.IsNullOrWhiteSpace(c.Path) ? "/" : c.Path, dom));
+                    }
+                    catch { /* ignore invalid cookie */ }
+                }
+            }).Task.Unwrap();
+
+            using var handler = new HttpClientHandler
+            {
+                UseCookies = true,
+                CookieContainer = jar,
+                AllowAutoRedirect = true,
+                AutomaticDecompression = System.Net.DecompressionMethods.All
+            };
+            using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(90) };
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+            req.Headers.TryAddWithoutValidation("Referer", "https://labs.google/");
+            using var resp = await client.SendAsync(req);
+            if (!resp.IsSuccessStatusCode) return null;
+            var ct = resp.Content.Headers.ContentType?.MediaType ?? "";
+            if (ct.Contains("text/html", StringComparison.OrdinalIgnoreCase)) return null;
+            var bytes = await resp.Content.ReadAsByteArrayAsync();
+            if (IsHtmlPayload(bytes)) return null;
+            return bytes;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    async Task<string?> DownloadViaFlowWebViewAsync(string url, string targetPath)
+    {
+        try
+        {
+            var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _pendingDirectDownloadTarget = targetPath;
+            _pendingDirectDownloadTcs = tcs;
+
+            await Dispatcher.InvokeAsync(async () =>
+            {
+                if (FlowView.CoreWebView2 == null)
+                {
+                    tcs.TrySetResult(null);
+                    return;
+                }
+                var uJson = JsonSerializer.Serialize(url);
+                var nJson = JsonSerializer.Serialize(Path.GetFileName(targetPath));
+                var js = $@"(() => {{
+                    try {{
+                        const a = document.createElement('a');
+                        a.href = {uJson};
+                        a.download = {nJson};
+                        a.style.display = 'none';
+                        document.body.appendChild(a);
+                        a.click();
+                        setTimeout(() => a.remove(), 2000);
+                    }} catch (e) {{}}
+                }})()";
+                await FlowView.CoreWebView2.ExecuteScriptAsync(js);
+            }).Task.Unwrap();
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var reg = cts.Token.Register(() => tcs.TrySetResult(null));
+            return await tcs.Task;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            _pendingDirectDownloadTarget = null;
+            _pendingDirectDownloadTcs = null;
+        }
+    }
+
     async Task<object> DownloadVeoResourceAsync(string url, string filename, string folder, bool autoChangeFileName)
     {
         if (string.IsNullOrWhiteSpace(url))
@@ -941,7 +1127,7 @@ public partial class MainWindow
         var targetDir = string.IsNullOrWhiteSpace(relFolder) ? downloadsRoot : Path.Combine(downloadsRoot, relFolder);
         Directory.CreateDirectory(targetDir);
 
-        var safeName = SanitizeFileName(string.IsNullOrWhiteSpace(filename) ? $"flow_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.mp4" : filename);
+        var safeName = NormalizeVeoFileName(filename, url);
         var fullPath = GetUniqueFilePath(Path.Combine(targetDir, safeName));
 
         PostToShell(new
@@ -953,7 +1139,7 @@ public partial class MainWindow
 
         try
         {
-            byte[] bytes;
+            byte[]? bytes = null;
             if (url.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
             {
                 var comma = url.IndexOf(',');
@@ -963,7 +1149,30 @@ public partial class MainWindow
             }
             else
             {
-                bytes = await _veoHttp.GetByteArrayAsync(url);
+                bytes = await DownloadBytesWithFlowCookiesAsync(url);
+                if (bytes == null || IsHtmlPayload(bytes))
+                {
+                    var nativeSaved = await DownloadViaFlowWebViewAsync(url, fullPath);
+                    if (!string.IsNullOrEmpty(nativeSaved) && File.Exists(nativeSaved))
+                    {
+                        return new { success = true, downloadId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), path = nativeSaved };
+                    }
+                    throw new IOException("Authenticated media download failed");
+                }
+            }
+
+            var magicExt = DetectExtensionFromBytes(bytes);
+            if (!string.IsNullOrEmpty(magicExt))
+            {
+                var curExt = Path.GetExtension(fullPath);
+                if (string.IsNullOrEmpty(curExt) || !string.Equals(curExt, magicExt, StringComparison.OrdinalIgnoreCase))
+                {
+                    var dir = Path.GetDirectoryName(fullPath) ?? targetDir;
+                    var stem = Path.GetFileNameWithoutExtension(fullPath);
+                    if (string.IsNullOrWhiteSpace(stem) || stem.Length > 60 || stem.StartsWith("ANqvL", StringComparison.Ordinal))
+                        stem = $"flow_{(magicExt is ".mp4" or ".webm" ? "video" : "image")}_{DateTime.Now:yyyyMMdd_HHmmss}";
+                    fullPath = GetUniqueFilePath(Path.Combine(dir, stem + magicExt));
+                }
             }
 
             await File.WriteAllBytesAsync(fullPath, bytes);
@@ -987,26 +1196,145 @@ public partial class MainWindow
         }
     }
 
+    static readonly HashSet<string> KnownDownloadExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mp4", ".webm", ".mov", ".mkv", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp3", ".wav", ".ogg", ".m4a", ".zip", ".json", ".txt", ".csv", ".xlsx", ".pdf"
+    };
+
+    static string? InferExtensionFromMimeOrUrl(string? mime, string? uri)
+    {
+        var m = (mime ?? "").ToLowerInvariant();
+        if (m.Contains("video/mp4")) return ".mp4";
+        if (m.Contains("video/webm")) return ".webm";
+        if (m.Contains("video/quicktime")) return ".mov";
+        if (m.Contains("image/png")) return ".png";
+        if (m.Contains("image/jpeg") || m.Contains("image/jpg")) return ".jpg";
+        if (m.Contains("image/webp")) return ".webp";
+        if (m.Contains("image/gif")) return ".gif";
+        if (m.Contains("audio/mpeg") || m.Contains("audio/mp3")) return ".mp3";
+        if (m.Contains("audio/wav") || m.Contains("audio/x-wav")) return ".wav";
+        if (m.StartsWith("video/")) return ".mp4";
+        if (m.StartsWith("image/")) return ".png";
+
+        var u = (uri ?? "").ToLowerInvariant();
+        if (u.Contains("mime=video") || u.Contains("video_mp4") || u.Contains(".mp4")) return ".mp4";
+        if (u.Contains("mime=image/png") || u.Contains(".png")) return ".png";
+        if (u.Contains("mime=image/jpeg") || u.Contains(".jpg") || u.Contains(".jpeg")) return ".jpg";
+        if (u.Contains("mime=image/webp") || u.Contains(".webp")) return ".webp";
+        return null;
+    }
+
+    static string? DetectExtensionFromBytes(ReadOnlySpan<byte> header)
+    {
+        if (header.Length >= 8 &&
+            header[0] == 0x89 && header[1] == 0x50 && header[2] == 0x4E && header[3] == 0x47)
+            return ".png";
+        if (header.Length >= 3 &&
+            header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF)
+            return ".jpg";
+        if (header.Length >= 12 &&
+            header[0] == (byte)'R' && header[1] == (byte)'I' && header[2] == (byte)'F' && header[3] == (byte)'F' &&
+            header[8] == (byte)'W' && header[9] == (byte)'E' && header[10] == (byte)'B' && header[11] == (byte)'P')
+            return ".webp";
+        if (header.Length >= 4 &&
+            header[0] == (byte)'G' && header[1] == (byte)'I' && header[2] == (byte)'F' && header[3] == (byte)'8')
+            return ".gif";
+        if (header.Length >= 8 &&
+            header[4] == (byte)'f' && header[5] == (byte)'t' && header[6] == (byte)'y' && header[7] == (byte)'p')
+            return ".mp4";
+        if (header.Length >= 4 &&
+            header[0] == 0x1A && header[1] == 0x45 && header[2] == 0xDF && header[3] == 0xA3)
+            return ".webm";
+        if (header.Length >= 12 &&
+            header[0] == (byte)'R' && header[1] == (byte)'I' && header[2] == (byte)'F' && header[3] == (byte)'F' &&
+            header[8] == (byte)'W' && header[9] == (byte)'A' && header[10] == (byte)'V' && header[11] == (byte)'E')
+            return ".wav";
+        if (header.Length >= 3 &&
+            ((header[0] == (byte)'I' && header[1] == (byte)'D' && header[2] == (byte)'3') ||
+             (header[0] == 0xFF && (header[1] & 0xE0) == 0xE0)))
+            return ".mp3";
+        return null;
+    }
+
+    static string EnsureDownloadedFileExtension(string filePath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return filePath;
+            Span<byte> buf = stackalloc byte[16];
+            int read;
+            using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                read = fs.Read(buf);
+            }
+            var detected = DetectExtensionFromBytes(buf[..read]);
+            if (string.IsNullOrEmpty(detected)) return filePath;
+
+            var curExt = Path.GetExtension(filePath);
+            if (!string.IsNullOrEmpty(curExt) && string.Equals(curExt, detected, StringComparison.OrdinalIgnoreCase))
+                return filePath;
+            if (curExt.Equals(".jpeg", StringComparison.OrdinalIgnoreCase) && detected == ".jpg")
+                return filePath;
+
+            var dir = Path.GetDirectoryName(filePath) ?? "";
+            var stem = Path.GetFileNameWithoutExtension(filePath);
+            if (string.IsNullOrWhiteSpace(stem) || stem.Length > 60 || stem.StartsWith("ANqvL", StringComparison.Ordinal))
+            {
+                var kind = (detected is ".mp4" or ".webm" or ".mov") ? "video" : "image";
+                stem = $"flow_{kind}_{DateTime.Now:yyyyMMdd_HHmmss}";
+            }
+            var newPath = GetUniqueFilePath(Path.Combine(dir, stem + detected));
+            File.Move(filePath, newPath);
+            return newPath;
+        }
+        catch
+        {
+            return filePath;
+        }
+    }
+
     void ApplyVeoDownloadPath(CoreWebView2DownloadStartingEventArgs e)
     {
         try
         {
-            if (!_veoAutoChangeFileName) return;
-            if (string.IsNullOrWhiteSpace(_veoDownloadFolder) && string.IsNullOrWhiteSpace(_veoDownloadPrefix)) return;
-
+            if (!string.IsNullOrWhiteSpace(_pendingDirectDownloadTarget))
+            {
+                e.ResultFilePath = _pendingDirectDownloadTarget;
+                return;
+            }
             var downloadsRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
-            var relFolder = SanitizeRelativeFolder(_veoDownloadFolder);
+            var relFolder = _veoAutoChangeFileName ? SanitizeRelativeFolder(_veoDownloadFolder) : "";
             var targetDir = string.IsNullOrWhiteSpace(relFolder) ? downloadsRoot : Path.Combine(downloadsRoot, relFolder);
             Directory.CreateDirectory(targetDir);
 
             var origName = Path.GetFileName(e.ResultFilePath);
-            if (string.IsNullOrWhiteSpace(origName)) origName = "flow_media.mp4";
-            if (!string.IsNullOrWhiteSpace(_veoDownloadPrefix) &&
-                !origName.StartsWith(_veoDownloadPrefix, StringComparison.OrdinalIgnoreCase))
+            var ext = Path.GetExtension(origName);
+            var hasValidExt = !string.IsNullOrWhiteSpace(ext) && KnownDownloadExtensions.Contains(ext);
+            var inferredExt = InferExtensionFromMimeOrUrl(e.DownloadOperation?.MimeType, e.DownloadOperation?.Uri);
+
+            if (!hasValidExt)
             {
-                origName = _veoDownloadPrefix + origName;
+                ext = inferredExt ?? ".mp4";
             }
-            var safeName = SanitizeFileName(origName);
+
+            var stem = hasValidExt ? Path.GetFileNameWithoutExtension(origName) : origName;
+            if (string.IsNullOrWhiteSpace(stem) ||
+                stem.Length > 60 ||
+                stem.StartsWith("ANqvL", StringComparison.Ordinal) ||
+                stem.Contains("=mm,", StringComparison.OrdinalIgnoreCase))
+            {
+                var kind = (ext is ".png" or ".jpg" or ".jpeg" or ".webp" or ".gif") ? "image" : "video";
+                stem = $"flow_{kind}_{DateTime.Now:yyyyMMdd_HHmmss}";
+            }
+
+            if (_veoAutoChangeFileName &&
+                !string.IsNullOrWhiteSpace(_veoDownloadPrefix) &&
+                !stem.StartsWith(_veoDownloadPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                stem = _veoDownloadPrefix + stem;
+            }
+
+            var safeName = SanitizeFileName(stem + ext);
             e.ResultFilePath = GetUniqueFilePath(Path.Combine(targetDir, safeName));
         }
         catch (Exception ex)

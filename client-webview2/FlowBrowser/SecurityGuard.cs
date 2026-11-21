@@ -432,7 +432,7 @@ internal static class SecurityGuard
         CryptographicOperations.ZeroMemory(seed);
         CryptographicOperations.ZeroMemory(keyMaterial);
 
-        var msg = Encoding.UTF8.GetBytes($"v11|{client}|{deviceId}|{binHash}|{ts}|{nonce}");
+        var msg = Encoding.UTF8.GetBytes($"v13|{client}|{deviceId}|{binHash}|{ts}|{nonce}");
         var mac = HMACSHA256.HashData(signingKey, msg);
         CryptographicOperations.ZeroMemory(signingKey);
 

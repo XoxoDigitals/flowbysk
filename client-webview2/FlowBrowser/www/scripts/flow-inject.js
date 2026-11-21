@@ -2596,7 +2596,7 @@ if (window.visualViewport) {
           const labelNode = itemHost.querySelector && itemHost.querySelector('.label');
           const labelTxt = ((labelNode ? labelNode.textContent : '') || '').replace(/\s+/g, ' ').trim().toLowerCase();
           const itemTxt = (itemHost.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-          const is4k = (labelTxt === '4k' || /\b4k\b/i.test(itemTxt)) && (itemTxt.includes('upscaled') || itemTxt.includes('50 credits') || itemTxt.includes('add ai credits'));
+          const is4k = labelTxt === '4k' || /\b4k\b/i.test(itemTxt) || /\b4k\b/i.test(labelTxt) || itemTxt.includes('upscaled');
           const isBlockedMenuRow =
             labelTxt === 'product help' ||
             labelTxt === 'flow help center' ||
@@ -4422,7 +4422,7 @@ function hideFlowChromeTargets() {
       const labelTxt = ((labelNode ? labelNode.textContent : '') || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const t = (host.innerText || host.textContent || '').replace(/\s+/g, ' ').trim();
       const tl = t.toLowerCase();
-      const is4k = (labelTxt === '4k' || /\b4k\b/i.test(tl)) && (tl.includes('upscaled') || tl.includes('50 credits') || tl.includes('add ai credits'));
+      const is4k = labelTxt === '4k' || /\b4k\b/i.test(tl) || /\b4k\b/i.test(labelTxt) || tl.includes('upscaled');
       const isBlockedRow =
         /delete all projects/i.test(t) ||
         labelTxt === 'product help' ||

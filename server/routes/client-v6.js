@@ -11,7 +11,6 @@ const db = require('../db');
 const { openFromStorage } = require('../secretsCrypto');
 const credChannel = require('../credChannel');
 const { allowExtensionStep } = credChannel;
-const { lookupCountry, clientIpFromReq, requestGeo } = require('../geoIp');
 const { requireAppDeviceAttestation } = require('../deviceSecurity');
 
 async function jwtSecret() {
@@ -148,140 +147,29 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
   }
 
   const requireDevice = opts.requireDeviceAttestation !== false;
-  const clientIp = clientIpFromReq(req) || String(ip || '').trim();
-  const country = await lookupCountry(clientIp);
   const attestation = requireDevice
     ? requireAppDeviceAttestation(req || { headers: {}, body: {} })
     : { ok: true, skipped: true, deviceId: null, client: null };
 
-  // App logins without Device ID / X-Flow-Client are blocked + auto-ban.
-  // Web portal (/api/session/login) skips this — browser has no Device ID.
   if (!attestation.ok) {
-    const suspect = await db.getUserByUsername(username);
-    let autoBanned = false;
-    if (suspect && !suspect.banned) {
-      await db.updateUser(suspect.id, {
-        banned: true,
-        banReason: attestation.error || 'Suspicious client login (missing Device ID / X-Flow-Client)',
-      });
-      await db.forceLogoutAndWipe(suspect.id);
-      autoBanned = true;
-    }
-    await db.addLog(suspect?.id || null, username || 'unknown', 'suspicious_login', {
-      ip: clientIp,
-      country,
-      client: attestation.client || req?.headers?.['x-flow-client'] || null,
-      deviceId: attestation.deviceId || null,
-      code: attestation.code,
-      reason: attestation.error,
-      autoBanned,
-      targetUserId: suspect?.id || null,
-      targetUsername: username || null,
-    });
     return {
       status: 403,
       body: {
         success: false,
         code: attestation.code || 'SUSPICIOUS_CLIENT',
-        error: autoBanned
-          ? 'Suspicious client detected. Account has been banned.'
-          : attestation.error || 'Official app client required.',
-        autoBanned,
+        error: attestation.error || 'Official app client required.',
+        autoBanned: false,
       },
     };
   }
 
   const user = await db.getUserByUsername(username);
   if (!user || !bcrypt.compareSync(password, user.passwordHash)) {
-    await db.addLog(user?.id || null, username || 'unknown', 'login_failed', {
-      ip: clientIp,
-      country,
-      client: attestation.client || null,
-      deviceId: attestation.deviceId || null,
-    });
     return { status: 401, body: { success: false, error: 'Invalid username or password' } };
   }
 
-  const deviceId = attestation.deviceId || null;
-
-  // Banned account still reports Device ID → cascade-ban every other account on that device.
-  if (user.banned) {
-    if (deviceId) {
-      await db.recordDeviceTouch(user.id, {
-        deviceId,
-        ip: clientIp,
-        country,
-        client: attestation.client || null,
-      });
-      const cascaded = await db.cascadeBanByDeviceId(deviceId, {
-        reason: `Device ID linked to banned account ${user.username}`,
-        sourceUserId: user.id,
-        sourceUsername: user.username,
-      });
-      if (cascaded.length) {
-        await db.addLog(user.id, user.username, 'banned_login_cascade', {
-          ip: clientIp,
-          country,
-          deviceId,
-          client: attestation.client || null,
-          cascadeCount: cascaded.length,
-          cascaded: cascaded.map((c) => c.username),
-        });
-      }
-    }
-    return {
-      status: 403,
-      body: {
-        success: false,
-        code: 'BANNED',
-        error: 'Your account has been banned by administrator.',
-      },
-    };
-  }
-
-  if (!user.isActive) {
+  if (!user.isActive || user.banned) {
     return { status: 403, body: { success: false, error: 'Your account is deactivated. Contact administrator.' } };
-  }
-
-  // Official app login on a Device ID already tied to a banned account → ban this account too.
-  if (deviceId && (await db.isDeviceLinkedToBannedAccount(deviceId, user.id))) {
-    await db.updateUser(user.id, {
-      banned: true,
-      banReason: `Device ID matches a banned account (${deviceId})`,
-    });
-    await db.forceLogoutAndWipe(user.id);
-    await db.recordDeviceTouch(user.id, {
-      deviceId,
-      ip: clientIp,
-      country,
-      client: attestation.client || null,
-    });
-    const cascaded = await db.cascadeBanByDeviceId(deviceId, {
-      reason: `Device ID matches a banned account (${deviceId})`,
-      sourceUserId: user.id,
-      sourceUsername: user.username,
-    });
-    await db.addLog(user.id, user.username, 'device_ban_match', {
-      ip: clientIp,
-      country,
-      deviceId,
-      client: attestation.client || null,
-      autoBanned: true,
-      cascadeCount: cascaded.length,
-      cascaded: cascaded.map((c) => c.username),
-      targetUserId: user.id,
-      targetUsername: user.username,
-      reason: `Device ID matches a banned account (${deviceId})`,
-    });
-    return {
-      status: 403,
-      body: {
-        success: false,
-        code: 'BANNED',
-        error: 'This device is linked to a banned account. Your account has been banned.',
-        autoBanned: true,
-      },
-    };
   }
 
   const now = new Date();
@@ -308,7 +196,7 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
     };
   }
 
-  // EXE must send clientPublicKey; web dashboard login may omit (no Google secret access).
+  // EXE (attested) must open a sealed credential channel. Web portal may omit.
   let channel = null;
   if (req?.body?.clientPublicKey) {
     try {
@@ -323,24 +211,27 @@ async function loginClientUser(username, password, ip, req, opts = {}) {
         },
       };
     }
+  } else if (requireDevice) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        code: 'CHANNEL_REQUIRED',
+        error: 'Secure channel required. Update Flow Browser.',
+      },
+    };
   }
 
-  await db.recordDeviceTouch(user.id, {
-    deviceId,
-    ip: clientIp,
-    country,
-    client: attestation.client || null,
-  });
+  await db.updateUser(user.id, { lastLoginAt: new Date().toISOString() });
   const sessionVersion = await db.bumpSessionVersion(user.id);
   await db.clearPendingGoogleWipe(user.id);
   let freshUser = await db.getUserById(user.id);
   await db.addLog(user.id, user.username, 'client_login', {
-    ip: clientIp,
-    country,
-    deviceId,
-    client: attestation.client || null,
+    ip: ip || '',
     sessionVersion,
     channelId: channel?.channelId || null,
+    deviceId: attestation.deviceId || null,
+    client: attestation.client || null,
   });
 
   const token = jwt.sign(
@@ -466,11 +357,9 @@ router.post('/switch-server', requireUserAuth, async (req, res) => {
     return res.status(404).json({ success: false, error: 'No active server nodes available.' });
   }
   await db.updateUser(user.id, { activeServerId: targetServer.id });
-  const geo = await requestGeo(req);
   await db.addLog(user.id, user.username, 'switch_server', {
     serverId: targetServer.id,
     serverName: targetServer.name,
-    ...geo,
   });
   res.json({ success: true, server: publicServerPayload(targetServer) });
 });
@@ -502,6 +391,17 @@ router.post('/request-server-change', requireUserAuth, async (req, res) => {
     hasTotp: !!(s.totpSecret && String(s.totpSecret).trim()),
   }));
   res.json({ success: true, server: publicServerPayload(targetServer), load });
+});
+
+router.post('/refund-credit', requireUserAuth, async (req, res) => {
+  const { amount = 1, reason = 'refund_failed_generation' } = req.body;
+  const user = req.user;
+  const remaining = typeof db.refundUserCredits === 'function'
+    ? await db.refundUserCredits(user.id, amount)
+    : (Number(user.credits) || 0) + Math.abs(Number(amount) || 0);
+  await db.addLog(user.id, user.username, 'refund_credit', { amount, remaining, reason });
+  const credits = Math.max(0, remaining);
+  res.json({ success: true, credits });
 });
 
 router.post('/use-credit', requireUserAuth, async (req, res) => {
@@ -569,13 +469,11 @@ router.post('/extension-start', requireUserAuth, async (req, res) => {
     });
   }
   const attempt = credChannel.createAttempt(user.id, activeServer.id, channelId, req);
-  const geoStart = await requestGeo(req);
   await db.addLog(user.id, user.username, 'extension_login_start', {
     serverId: activeServer.id,
     serverName: activeServer.name,
     attemptId: attempt.attemptId,
     channelId,
-    ...geoStart,
   });
   res.json({
     attemptId: attempt.attemptId,
@@ -649,14 +547,13 @@ router.post('/extension-step', requireUserAuth, async (req, res) => {
       error: `No ${stageKey} configured for the active server account.`,
     });
   }
-  const geoStep = await requestGeo(req);
   await db.addLog(user.id, user.username, 'extension_step', {
     attemptId,
     stage: stageKey,
     serverId: activeServer.id,
     channelId,
     sealed: true,
-    ...geoStep,
+    ip: req.ip || null,
   });
   const sealed = credChannel.sealValue(channel.aesKey, value);
   const payload = {
@@ -671,11 +568,9 @@ router.post('/extension-step', requireUserAuth, async (req, res) => {
 
 router.post('/extension-finish', requireUserAuth, async (req, res) => {
   const { attemptId, outcome } = req.body;
-  const geoFinish = await requestGeo(req);
   await db.addLog(req.user.id, req.user.username, 'extension_login_finish', {
     attemptId: attemptId || 'unknown',
     outcome: outcome || 'unknown',
-    ...geoFinish,
   });
   res.json({ success: true });
 });

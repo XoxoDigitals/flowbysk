@@ -84,30 +84,29 @@ function obfuscateFile(rel) {
     console.warn('[obfuscate] skip missing', rel);
     return;
   }
-  // Keep WebCrypto ECDH helper and in-memory Flow scripts clean — heavy string-array passes hoist _0x globals into window/subframes.
   const relNorm = rel.replace(/\\/g, '/').toLowerCase();
-  if (
-    relNorm === 'scripts/cred-channel.js' ||
-    relNorm.endsWith('/scripts/cred-channel.js') ||
-    relNorm === 'scripts/flow-inject.js' ||
-    relNorm.endsWith('/scripts/flow-inject.js') ||
-    relNorm === 'scripts/veo-content-bundle.js' ||
-    relNorm.endsWith('/veo-content-bundle.js') ||
-    relNorm.startsWith('extensions/urban-vpn/')
-  ) {
-    console.log(`[obfuscate] SKIP in-memory/crypto/extension helper ${rel}`);
-    return;
-  }
   const code = fs.readFileSync(full, 'utf8');
   const before = Buffer.byteLength(code, 'utf8');
   if (before >= SKIP_BYTES) {
     console.log(`[obfuscate] SKIP huge (already minified) ${rel}  ${before} bytes`);
     return;
   }
-  const opts = before >= LIGHT_BYTES ? LIGHT_OPTS : HEAVY_OPTS;
-  const mode = before >= LIGHT_BYTES ? 'light' : 'heavy';
+  const isInMemoryOrExt =
+    relNorm === 'scripts/cred-channel.js' ||
+    relNorm.endsWith('/scripts/cred-channel.js') ||
+    relNorm === 'scripts/flow-inject.js' ||
+    relNorm.endsWith('/scripts/flow-inject.js') ||
+    relNorm === 'scripts/veo-content-bundle.js' ||
+    relNorm.endsWith('/veo-content-bundle.js') ||
+    relNorm.startsWith('extensions/urban-vpn/');
+  const useLight = isInMemoryOrExt || before >= LIGHT_BYTES;
+  const opts = useLight ? LIGHT_OPTS : HEAVY_OPTS;
+  const mode = useLight ? 'light' : 'heavy';
   const result = JavaScriptObfuscator.obfuscate(code, opts);
-  const out = result.getObfuscatedCode();
+  let out = result.getObfuscatedCode();
+  if (isInMemoryOrExt) {
+    out = `(()=>{${out}})();`;
+  }
   fs.writeFileSync(full, out, 'utf8');
   const after = Buffer.byteLength(out, 'utf8');
   console.log(`[obfuscate] ${mode} ${rel}  ${before} → ${after} bytes`);

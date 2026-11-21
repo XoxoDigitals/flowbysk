@@ -6,27 +6,27 @@ Native Android host with dual WebViews — same shell + Flow inject architecture
 
 - JDK 17+
 - Android SDK (`compileSdk` / `targetSdk` 35)
-- A reachable Flow API server (`/api/v6/client/*`)
+- A reachable Flow API server (`/api/client/*`)
 
 ## Configure server URL
 
-Default for emulator → host machine:
+Default API:
 
 ```
-http://10.0.2.2:3000
+https://flowcreatorai.site
 ```
 
 Override in `local.properties`:
 
 ```properties
 sdk.dir=C\:\\Android\\Sdk
-default.server.url=https://your-api.example.com
+default.server.url=https://flowcreatorai.site
 ```
 
 Or at build time:
 
 ```bat
-gradlew.bat assembleRelease -PDEFAULT_SERVER_URL=https://your-api.example.com
+gradlew.bat assembleRelease -PDEFAULT_SERVER_URL=https://flowcreatorai.site
 ```
 
 Users can also change the URL in the shell UI (persisted in app storage).
@@ -65,23 +65,19 @@ RELEASE_KEY_PASSWORD=...
 | Shell WebView | `ui/app-shell.html` + `shell-bridge.js` |
 | Flow WebView | Google Flow + `flow-inject.js` |
 | `ShellHost` / `FlowHost` | `chrome.webview` polyfill bridges |
-| `AppConfig` | Keystore `EncryptedSharedPreferences` (JWT / serverUrl only) |
-| `CredChannelHost` | Kotlin X25519 ECDH fallback when WebCrypto is unavailable |
+| `AppConfig` | `serverUrl`, session token, user JSON |
 
-`preBuild` copies `../client-webview2/FlowBrowser/www` → `app/src/main/assets/www` (v6 shell + `cred-channel.js`).
-
-Default server URL: `https://flowcreatorai.site` (override via `local.properties`).
+`preBuild` copies `../client-webview2/FlowBrowser/www` → `app/src/main/assets/www`.
 
 ## Manual test checklist
 
-1. Login against `/api/v6/client/login` (expects `channel` + sealed creds)
-2. Kill/reopen app — session restores via EncryptedSharedPreferences
+1. Login against your API (`/api/client/login`)
+2. Session verify / credits display
 3. Shell switches to chrome mode and loads Flow
-4. Generate image/video → credit deduct (`/api/v6/client/use-credit`)
+4. Generate image/video → credit deduct (`/api/client/use-credit`)
 5. Server switch / OTP path (if used)
 6. Download lands in Downloads and shell gets completed event
-7. Logout clears Flow cookies (`clearPartitionSession`) + encrypted session
-8. Confirm `filesDir` has no plaintext `flow_client_config.json`
+7. Logout clears Flow cookies (`clearPartitionSession`)
 
 ## Notes
 

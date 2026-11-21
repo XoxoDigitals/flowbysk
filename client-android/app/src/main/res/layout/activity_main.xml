@@ -1,14 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#020617">
+    android:background="#07090e"
+    android:orientation="vertical">
+
+    <WebView
+        android:id="@+id/shellView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="#07090e" />
 
     <FrameLayout
         android:id="@+id/flowPane"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="0"
         android:visibility="gone">
 
         <WebView
@@ -72,9 +81,4 @@
             android:textStyle="bold"
             android:visibility="gone" />
     </FrameLayout>
-
-    <WebView
-        android:id="@+id/shellView"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
-</FrameLayout>
+</LinearLayout>

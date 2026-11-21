@@ -31,14 +31,14 @@ const forceUpdatePayload = {
   error: 'Please download the latest Flow Browser.',
 };
 
-/** Only /api/v12/client is live (signed binary attestation). v2–v11 → FORCE_UPDATE. */
-const clientV12Routes = require('./routes/client-v12');
-for (const legacyVer of ['v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', 'v11']) {
+/** Only /api/v13/client is live (signed binary attestation). v2–v12 → FORCE_UPDATE. */
+const clientV13Routes = require('./routes/client-v13');
+for (const legacyVer of ['v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', 'v11', 'v12']) {
   app.use(`/api/${legacyVer}/client`, (req, res) => {
     res.status(410).json(forceUpdatePayload);
   });
 }
-app.use('/api/v12/client', clientV12Routes);
+app.use('/api/v13/client', clientV13Routes);
 app.use('/api/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -70,7 +70,7 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
-        clientApiVersion: 'v12',
+        clientApiVersion: 'v13',
       },
       serverTime: Date.now(),
     });
@@ -146,15 +146,15 @@ app.get('*', (req, res) => {
 
 db.ready()
   .then(async () => {
-    // Lock client API to v12 (v2–v10 always return 410)
+    // Lock client API to v13 (v2–v12 always return 410)
     try {
       const cur = await db.getSettings();
-      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v12') {
-        await db.updateSettings({ clientApiVersion: 'v12' });
-        console.log('[boot] Locked clientApiVersion → v12');
+      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v13') {
+        await db.updateSettings({ clientApiVersion: 'v13' });
+        console.log('[boot] Locked clientApiVersion → v13');
       }
     } catch (err) {
-      console.warn('[boot] could not lock clientApiVersion v12:', err.message);
+      console.warn('[boot] could not lock clientApiVersion v13:', err.message);
     }
     app.listen(PORT, () => {
       console.log(`====================================================`);
