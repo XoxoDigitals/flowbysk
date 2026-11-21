@@ -229,7 +229,7 @@ async function clientSettingsPayload() {
     modelRenames: settings.modelRenames ? settings.modelRenames.filter((m) => m.enabled) : [],
     cssSelectorsToHide: settings.cssSelectorsToHide || [],
     customCss: settings.customCss || '',
-    clientApiVersion: 'v11',
+    clientApiVersion: 'v13',
     authMode: 'credentials',
   };
 }
