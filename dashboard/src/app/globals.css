@@ -1,0 +1,243 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root,
+html.light,
+html.light body,
+body[data-theme="light"] {
+  --bg: #faf9f7;
+  --bg2: #f2f1ed;
+  --card: #ffffff;
+  --card2: #f7f6f3;
+  --line: #e4e2db;
+  --line2: #d3d1c8;
+  --ink: #121218;
+  --ink2: #3f3f4a;
+  --ink3: #5c5c68;
+  --a1: oklch(0.55 0.13 168);
+  --a2: oklch(0.52 0.16 300);
+  --a1soft: oklch(0.55 0.13 168 / 0.1);
+  --a2soft: oklch(0.52 0.16 300 / 0.1);
+  --onA: #ffffff;
+  --background: var(--bg);
+  --foreground: var(--ink);
+  --fg: var(--ink);
+  --fg-muted: var(--ink2);
+  --surface: var(--card);
+  --surface-2: var(--card2);
+  --border: var(--line);
+  --accent: var(--a1);
+  --accent-2: var(--a2);
+  --accent-soft: var(--a1soft);
+  --max: 1550px;
+}
+
+html.dark,
+html.dark body,
+body[data-theme="dark"] {
+  --bg: #08080b;
+  --bg2: #0e0e14;
+  --card: #121219;
+  --card2: #171720;
+  --line: #23232e;
+  --line2: #2f2f3d;
+  --ink: #f4f4f7;
+  --ink2: #a2a2b0;
+  --ink3: #8a8a98;
+  --a1: oklch(0.8 0.14 168);
+  --a2: oklch(0.74 0.16 300);
+  --a1soft: oklch(0.8 0.14 168 / 0.14);
+  --a2soft: oklch(0.74 0.16 300 / 0.14);
+  --onA: #06110d;
+  --background: var(--bg);
+  --foreground: var(--ink);
+  --fg: var(--ink);
+  --fg-muted: var(--ink2);
+  --surface: var(--card);
+  --surface-2: var(--card2);
+  --border: var(--line);
+  --accent: var(--a1);
+  --accent-2: var(--a2);
+  --accent-soft: var(--a1soft);
+  --max: 1550px;
+}
+
+html.light {
+  --bg: #faf9f7;
+  --bg2: #f2f1ed;
+  --card: #ffffff;
+  --card2: #f7f6f3;
+  --line: #e4e2db;
+  --line2: #d3d1c8;
+  --ink: #121218;
+  --ink2: #3f3f4a;
+  --ink3: #5c5c68;
+  --a1: oklch(0.55 0.13 168);
+  --a2: oklch(0.52 0.16 300);
+  --a1soft: oklch(0.55 0.13 168 / 0.1);
+  --a2soft: oklch(0.52 0.16 300 / 0.1);
+  --onA: #ffffff;
+  --background: var(--bg);
+  --foreground: var(--ink);
+  --fg: var(--ink);
+  --fg-muted: var(--ink2);
+  --surface: var(--card);
+  --surface-2: var(--card2);
+  --border: var(--line);
+  --accent: var(--a1);
+  --accent-2: var(--a2);
+  --accent-soft: var(--a1soft);
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  background: var(--bg);
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+.font-display,
+.font-body {
+  font-family: var(--font-body), 'Poppins', Helvetica, Arial, sans-serif;
+}
+
+.font-mono {
+  font-family: var(--font-mono), 'JetBrains Mono', ui-monospace, monospace;
+}
+
+.flow-container {
+  width: 100%;
+  max-width: 1550px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 20px;
+  padding-right: 20px;
+}
+
+@media (min-width: 1024px) {
+  .flow-container {
+    padding-left: 28px;
+    padding-right: 28px;
+  }
+}
+
+.flow-label {
+  font-family: var(--font-mono), 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  color: var(--a1);
+  text-transform: uppercase;
+}
+
+.flow-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1.25rem;
+  border-radius: 11px;
+  border: 0;
+  background: var(--a1);
+  color: var(--onA);
+  font-size: 14px;
+  font-weight: 600;
+  transition: background 0.15s ease;
+}
+
+.btn-primary:hover {
+  background: var(--a2);
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1.25rem;
+  border-radius: 11px;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+  transition: background 0.15s ease;
+}
+
+.btn-secondary:hover {
+  background: var(--card);
+}
+
+.nav-link {
+  background: none;
+  border: 0;
+  padding: 8px 12px;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink2);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.nav-link:hover,
+.nav-link-active {
+  color: var(--ink);
+  background: var(--card);
+}
+
+.surface-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+}
+
+.glass-panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  color: var(--ink);
+  backdrop-filter: none;
+  box-shadow: none;
+}
+
+@keyframes flowmarq {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-33.333%);
+  }
+}
+
+.flow-marquee {
+  animation: flowmarq 26s linear infinite;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line2);
+  border-radius: 4px;
+}
+
+body:has(iframe[src*='studio']) .dashboard-shell-header {
+  display: none !important;
+}

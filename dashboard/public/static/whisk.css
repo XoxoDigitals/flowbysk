@@ -1,0 +1,1365 @@
+/* ==========================================================================
+   WHISK: Official Experimental Creative Laboratory Design System
+   Matches Google Labs Whisk UI:
+     - Left Dock:   Solid Whisk Yellow (#F7D248) with dashed ingredient cards
+     - Canvas:      Cool Grey (#DDE2E5) stage with floating controls
+     - Typography:  Google Sans / JetBrains Mono
+     - Floating Bar: Rounded-full white pill with yellow < HIDE IMAGES toggle
+   ========================================================================== */
+
+:root {
+  --whisk-yellow: #F7D248;
+  --whisk-yellow-hover: #e8c437;
+  --whisk-cool-grey: #DDE2E5;
+  --whisk-cool-grey-light: #eaedef;
+  --whisk-ink-black: #000000;
+  --whisk-text-dark: #1f1f1f;
+  --whisk-text-muted: #5f6368;
+  --whisk-dashed-border: rgba(0, 0, 0, 0.35);
+  --whisk-grid-cols: 3;
+}
+
+/* --------------------------------------------------------------------------
+   View Pane Shell & Fullscreen Whisk Mode (Matches Official Labs Whisk)
+   -------------------------------------------------------------------------- */
+#view-whisk-pane {
+  padding: 0 !important;
+  margin: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  overflow: hidden !important;
+}
+
+#view-whisk-pane.active {
+  display: flex !important;
+  flex-direction: column;
+}
+
+/* --------------------------------------------------------------------------
+   Workspace Shell (Full-bleed layout)
+   -------------------------------------------------------------------------- */
+.whisk-workspace {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+  background-color: var(--whisk-cool-grey);
+  color: var(--whisk-ink-black);
+  font-family: 'Plus Jakarta Sans', 'Google Sans Text', -apple-system, sans-serif;
+  overflow: hidden;
+  position: relative;
+}
+
+/* --------------------------------------------------------------------------
+   Left Sidebar / Dock (Solid Whisk Yellow #F7D248)
+   -------------------------------------------------------------------------- */
+.whisk-sidebar {
+  width: 250px;
+  min-width: 250px;
+  max-width: 250px;
+  height: 100%;
+  background-color: var(--whisk-yellow);
+  color: var(--whisk-ink-black);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 16px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+  z-index: 10;
+  transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1),
+              min-width 0.25s cubic-bezier(0.16, 1, 0.3, 1),
+              max-width 0.25s cubic-bezier(0.16, 1, 0.3, 1),
+              padding 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+/* Collapsed Sidebar Narrow Yellow Strip (Exact Match to Google Labs Whisk Screenshot) */
+.whisk-sidebar.collapsed {
+  width: 48px !important;
+  min-width: 48px !important;
+  max-width: 48px !important;
+  padding: 12px 6px !important;
+  overflow: hidden !important;
+  transform: none !important;
+  pointer-events: auto !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+}
+
+.whisk-sidebar-full-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  width: 100%;
+}
+
+.whisk-sidebar.collapsed .whisk-sidebar-full-content {
+  display: none !important;
+}
+
+.whisk-sidebar-mini-strip {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.whisk-sidebar.collapsed .whisk-sidebar-mini-strip {
+  display: flex !important;
+}
+
+.whisk-mini-expand-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--whisk-ink-black);
+  border-radius: 6px;
+  margin-bottom: 4px;
+  transition: background-color 0.15s, transform 0.15s;
+}
+
+.whisk-mini-expand-btn:hover {
+  background-color: rgba(0, 0, 0, 0.08);
+  transform: scale(1.15);
+}
+
+.whisk-mini-slot {
+  width: 36px;
+  height: 36px;
+  border: 1.5px dashed rgba(0, 0, 0, 0.45);
+  border-radius: 12px;
+  background-color: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--whisk-ink-black);
+  position: relative;
+  transition: border-color 0.15s, background-color 0.15s, transform 0.15s;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.whisk-mini-slot:hover {
+  border-color: var(--whisk-ink-black);
+  background-color: rgba(255, 255, 255, 0.25);
+  transform: scale(1.08);
+}
+
+.whisk-mini-slot.has-image {
+  border-style: solid;
+  border-color: var(--whisk-ink-black);
+  background-color: #000;
+}
+
+.whisk-mini-slot img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.whisk-mini-slot-check {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--whisk-yellow);
+  color: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* Sidebar Top Brand Header */
+.whisk-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.whisk-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.whisk-brand-name {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
+  color: var(--whisk-ink-black);
+}
+
+.whisk-experimental-badge {
+  font-family: 'JetBrains Mono', 'Google Sans Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--whisk-ink-black);
+  border: 1px solid var(--whisk-ink-black);
+  border-radius: 12px;
+  padding: 1px 7px;
+  letter-spacing: 0.4px;
+}
+
+.whisk-sidebar-collapse-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--whisk-ink-black);
+  border-radius: 4px;
+  transition: background-color 0.15s;
+}
+
+.whisk-sidebar-collapse-btn:hover {
+  background-color: rgba(0, 0, 0, 0.08);
+}
+
+/* --------------------------------------------------------------------------
+   Category Sections & Dashed Cards
+   -------------------------------------------------------------------------- */
+.whisk-categories-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  flex: 1;
+}
+
+.whisk-cat-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.whisk-cat-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.whisk-cat-label {
+  font-family: 'JetBrains Mono', 'Google Sans Mono', monospace;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--whisk-ink-black);
+}
+
+.whisk-cat-icons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.whisk-header-icon-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--whisk-ink-black);
+  transition: transform 0.1s, background-color 0.15s;
+}
+
+.whisk-header-icon-btn:hover {
+  background-color: rgba(0, 0, 0, 0.1);
+  transform: scale(1.1);
+}
+
+.whisk-header-icon-btn:active {
+  transform: scale(0.92);
+}
+
+/* The Rounded Dashed Ingredient Card Box */
+.whisk-card-slot {
+  width: 100%;
+  aspect-ratio: 1.15 / 1;
+  border: 1.5px dashed var(--whisk-dashed-border);
+  border-radius: 16px;
+  background-color: rgba(255, 255, 255, 0.04);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s, transform 0.15s;
+}
+
+.whisk-card-slot:hover {
+  border-color: var(--whisk-ink-black);
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+.whisk-card-slot.has-image {
+  border-style: solid;
+  border-color: var(--whisk-ink-black);
+  background-color: #000;
+}
+
+/* Center placeholder icon when slot is empty */
+.whisk-slot-placeholder-icon {
+  width: 32px;
+  height: 32px;
+  color: var(--whisk-ink-black);
+  opacity: 0.85;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Loaded Image inside Card */
+.whisk-slot-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Hover overlay on loaded card to clear or inspect */
+.whisk-slot-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 60%);
+  opacity: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 8px;
+  transition: opacity 0.2s ease;
+}
+
+.whisk-card-slot:hover .whisk-slot-overlay {
+  opacity: 1;
+}
+
+.whisk-slot-top-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.whisk-slot-action-btn {
+  background: rgba(0, 0, 0, 0.65);
+  color: #ffffff;
+  border: none;
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+}
+
+.whisk-slot-action-btn:hover {
+  background: var(--whisk-yellow);
+  color: #000000;
+}
+
+.whisk-slot-caption-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+}
+
+/* --------------------------------------------------------------------------
+   Right Main Canvas Stage (#DDE2E5)
+   -------------------------------------------------------------------------- */
+.whisk-main-stage {
+  flex: 1;
+  height: 100%;
+  background-color: var(--whisk-cool-grey);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Top Right Floating Grid Slider Pill */
+.whisk-top-controls {
+  position: absolute;
+  top: 18px;
+  right: 24px;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  padding: 6px 14px;
+  border-radius: 20px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.whisk-grid-icon-indicator {
+  color: var(--whisk-text-dark);
+  display: flex;
+  align-items: center;
+}
+
+.whisk-grid-slider-input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 76px;
+  height: 4px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.whisk-grid-slider-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--whisk-ink-black);
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+.whisk-grid-slider-input::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+/* Center Empty Stage State */
+.whisk-canvas-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 40px;
+  text-align: center;
+  user-select: none;
+}
+
+.whisk-scribble-icon-wrap {
+  width: 72px;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--whisk-ink-black);
+  animation: whisk-float 3s ease-in-out infinite alternate;
+}
+
+@keyframes whisk-float {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(-6px); }
+}
+
+.whisk-empty-instruction {
+  font-family: 'JetBrains Mono', 'Google Sans Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.6px;
+  color: var(--whisk-text-muted);
+}
+
+/* Results Canvas Grid */
+/* --------------------------------------------------------------------------
+   Results Canvas Grid (Screenshot 4)
+   -------------------------------------------------------------------------- */
+.whisk-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--whisk-grid-cols, 2), minmax(0, 1fr));
+  gap: 22px;
+  padding: 34px 44px 120px 44px;
+  width: 100%;
+  box-sizing: border-box;
+  align-items: start;
+  transition: grid-template-columns 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Result Card */
+.whisk-result-card {
+  background: #000000;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.09);
+  display: flex;
+  position: relative;
+  aspect-ratio: 1.4 / 1;
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s;
+  cursor: pointer;
+}
+
+.whisk-result-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.16);
+}
+
+.whisk-result-remove-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 5;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #ffffff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.whisk-result-card:hover .whisk-result-remove-btn,
+.whisk-result-card.is-whisking .whisk-result-remove-btn {
+  opacity: 1;
+}
+
+.whisk-result-remove-btn:hover {
+  background: rgba(220, 38, 38, 0.9);
+  transform: scale(1.06);
+}
+
+.whisk-result-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.whisk-result-hover-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, rgba(0,0,0,0.6) 0%, transparent 50%);
+  opacity: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 14px 16px;
+  transition: opacity 0.2s ease;
+}
+
+.whisk-result-card:hover .whisk-result-hover-overlay {
+  opacity: 1;
+}
+
+.whisk-result-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ffffff;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+}
+
+.whisk-result-download-btn {
+  background: rgba(255, 255, 255, 0.9);
+  color: #000000;
+  border: none;
+  border-radius: 9999px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: background-color 0.15s;
+}
+
+.whisk-result-download-btn:hover {
+  background: var(--whisk-yellow);
+}
+
+/* Optimistic Loading Shimmer Card */
+.whisk-result-card.is-whisking {
+  border: 2px dashed rgba(0, 0, 0, 0.25);
+  background: #ffffff;
+}
+
+.whisk-result-shimmer-body {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    rgba(247, 210, 72, 0.12) 0%,
+    rgba(247, 210, 72, 0.45) 50%,
+    rgba(247, 210, 72, 0.12) 100%
+  );
+  background-size: 200% 100%;
+  animation: whisk-shimmer 1.8s infinite ease-in-out;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+@keyframes whisk-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* --------------------------------------------------------------------------
+   Floating Bottom Prompt Bar
+   -------------------------------------------------------------------------- */
+.whisk-floating-bar {
+  position: absolute;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 90%;
+  max-width: 780px;
+  background: #ffffff;
+  border-radius: 9999px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+  display: flex;
+  align-items: center;
+  padding: 6px 8px 6px 8px;
+  z-index: 25;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+/* The Yellow < HIDE IMAGES Pill */
+.whisk-toggle-dock-chip {
+  background-color: var(--whisk-yellow);
+  color: var(--whisk-ink-black);
+  border: none;
+  border-radius: 9999px;
+  font-family: 'JetBrains Mono', 'Google Sans Mono', monospace;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 8px 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background-color 0.15s, transform 0.1s;
+}
+
+.whisk-toggle-dock-chip:hover {
+  background-color: var(--whisk-yellow-hover);
+}
+
+.whisk-toggle-dock-chip:active {
+  transform: scale(0.97);
+}
+
+/* Prompt Input */
+.whisk-prompt-field {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 13.5px;
+  font-family: inherit;
+  padding: 0 16px;
+  background: transparent;
+  color: var(--whisk-ink-black);
+}
+
+.whisk-prompt-field::placeholder {
+  color: #70757a;
+}
+
+/* Circular Arrow Submit Button (Matches Google Labs Whisk Screenshots) */
+.whisk-submit-circle-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background-color: #DDE2E5;
+  color: #70757a;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: transform 0.15s, background-color 0.15s, color 0.15s;
+}
+
+.whisk-submit-circle-btn.has-content,
+.whisk-submit-circle-btn:hover:not(:disabled) {
+  background-color: #000000;
+  color: #ffffff;
+}
+
+.whisk-submit-circle-btn:hover:not(:disabled) {
+  transform: scale(1.06);
+}
+
+.whisk-submit-circle-btn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.whisk-submit-circle-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Checkmark badge for loaded slot card in sidebar (Screenshot 3) */
+.whisk-card-selected-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background-color: var(--whisk-yellow);
+  color: #000000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1.5px 5px rgba(0, 0, 0, 0.25);
+  z-index: 5;
+}
+
+/* --------------------------------------------------------------------------
+   Google Labs Whisk Dialog Modal (Screenshots 1 & 2)
+   -------------------------------------------------------------------------- */
+.whisk-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+
+.whisk-modal-card {
+  width: 100%;
+  max-width: 640px;
+  background-color: var(--whisk-yellow);
+  border-radius: 24px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  box-sizing: border-box;
+}
+
+.whisk-modal-card.is-refine {
+  max-width: 860px;
+  flex-direction: row;
+}
+
+/* Close Button (X) */
+.whisk-modal-close-btn {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--whisk-ink-black);
+  border-radius: 50%;
+  z-index: 20;
+  transition: background-color 0.15s, transform 0.1s;
+}
+
+.whisk-modal-close-btn:hover {
+  background-color: rgba(0, 0, 0, 0.08);
+  transform: scale(1.1);
+}
+
+/* Left Variants Column (Refine Modal) */
+.whisk-modal-variants-col {
+  width: 220px;
+  min-width: 220px;
+  padding: 28px 20px;
+  border-right: 1px solid rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-sizing: border-box;
+}
+
+.whisk-modal-variants-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--whisk-ink-black);
+}
+
+.whisk-modal-variants-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  max-height: 440px;
+}
+
+.whisk-variant-card-item {
+  width: 100%;
+  aspect-ratio: 1.3 / 1;
+  border-radius: 12px;
+  overflow: hidden;
+  position: relative;
+  cursor: pointer;
+  border: 2.5px solid transparent;
+  background: #000;
+  transition: transform 0.15s, border-color 0.15s;
+}
+
+.whisk-variant-card-item:hover {
+  transform: scale(1.02);
+}
+
+.whisk-variant-card-item.is-selected {
+  border-color: #000000;
+}
+
+.whisk-variant-card-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.whisk-variant-check-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background-color: var(--whisk-yellow);
+  color: #000000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+/* Right / Main Column in Modal */
+.whisk-modal-main-col {
+  flex: 1;
+  padding: 32px 36px 36px 36px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  box-sizing: border-box;
+}
+
+.whisk-modal-header-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1.8px;
+  color: var(--whisk-ink-black);
+  text-align: center;
+  margin-top: 4px;
+}
+
+/* Inner Rounded Input Container */
+.whisk-modal-inner-box {
+  width: 100%;
+  background-color: rgba(0, 0, 0, 0.055);
+  border-radius: 18px;
+  padding: 22px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 240px;
+  box-sizing: border-box;
+}
+
+.whisk-modal-inner-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--whisk-ink-black);
+}
+
+.whisk-modal-textarea {
+  width: 100%;
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--whisk-ink-black);
+  font-family: inherit;
+  resize: none;
+}
+
+.whisk-modal-textarea::placeholder {
+  color: rgba(0, 0, 0, 0.45);
+}
+
+/* Black Pill Button: GENERATE ➔ */
+.whisk-modal-black-btn {
+  background-color: #000000;
+  color: #ffffff;
+  border: none;
+  border-radius: 9999px;
+  padding: 13px 38px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1.6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  transition: transform 0.15s, background-color 0.15s;
+}
+
+.whisk-modal-black-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background-color: #1a1a1a;
+}
+
+.whisk-modal-black-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.whisk-modal-black-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* --------------------------------------------------------------------------
+   Multi-Ingredient Slot & Token Badge (Subject 1, Scene 1, Style 1)
+   -------------------------------------------------------------------------- */
+.whisk-cat-slots-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.whisk-card-token-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #ffffff;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  z-index: 5;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.whisk-card-slot:not(.has-image) .whisk-card-token-badge {
+  background: rgba(0, 0, 0, 0.14);
+  color: #000000;
+}
+
+.whisk-card-delete-btn {
+  position: absolute;
+  top: 8px;
+  right: 36px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.65);
+  color: #ffffff;
+  border: none;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+  z-index: 6;
+  transition: background-color 0.15s, transform 0.1s;
+}
+
+.whisk-card-slot:hover .whisk-card-delete-btn {
+  display: flex;
+}
+
+.whisk-card-delete-btn:hover {
+  background: #e53935;
+  color: #ffffff;
+  transform: scale(1.15);
+}
+
+/* --------------------------------------------------------------------------
+   Source Options Modal (Upload / Library / Generate AI)
+   -------------------------------------------------------------------------- */
+.whisk-source-options-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  width: 100%;
+  margin-top: 8px;
+}
+
+.whisk-source-option-card {
+  background: rgba(0, 0, 0, 0.05);
+  border: 1.5px solid rgba(0, 0, 0, 0.1);
+  border-radius: 18px;
+  padding: 22px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: transform 0.15s, background-color 0.15s, border-color 0.15s;
+}
+
+.whisk-source-option-card:hover {
+  transform: translateY(-2px);
+  background: rgba(0, 0, 0, 0.09);
+  border-color: #000000;
+}
+
+.whisk-source-icon-wrap {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+}
+
+.whisk-source-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #000000;
+}
+
+.whisk-source-desc {
+  font-size: 10.5px;
+  color: rgba(0, 0, 0, 0.65);
+  line-height: 1.35;
+}
+
+/* --------------------------------------------------------------------------
+   Studio Library Picker Modal
+   -------------------------------------------------------------------------- */
+.whisk-library-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  width: 100%;
+  max-height: 440px;
+  overflow-y: auto;
+  padding: 6px;
+  box-sizing: border-box;
+}
+
+.whisk-library-item {
+  aspect-ratio: 1 / 1;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #000;
+  position: relative;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: transform 0.15s, border-color 0.15s;
+}
+
+.whisk-library-item:hover {
+  transform: scale(1.03);
+  border-color: #000000;
+}
+
+.whisk-library-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.whisk-library-item-title {
+  position: absolute;
+  bottom: 0;
+  inset-inline: 0;
+  background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+  color: #ffffff;
+  font-size: 9.5px;
+  padding: 4px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --------------------------------------------------------------------------
+   Prompt Helper Token Tray (Chips above Prompt Bar)
+   -------------------------------------------------------------------------- */
+.whisk-tokens-helper-tray {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.whisk-token-chip-btn {
+  background: rgba(255, 255, 255, 0.85);
+  color: #000000;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 9999px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 3px 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  transition: background-color 0.15s, transform 0.1s, border-color 0.15s;
+}
+
+.whisk-token-chip-btn:hover {
+  background: var(--whisk-yellow);
+  border-color: #000000;
+  transform: translateY(-1px);
+}
+
+/* Modal Error Banner */
+.whisk-modal-error-banner {
+  background-color: rgba(220, 38, 38, 0.12);
+  color: #991b1b;
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-top: 4px;
+  width: 100%;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+/* Toast Notifications */
+.whisk-toast {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  background: #1f1f1f;
+  color: #ffffff;
+  padding: 10px 18px;
+  border-radius: 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  z-index: 9999;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  transform: translateY(-8px);
+  pointer-events: none;
+  transition: opacity 0.2s, transform 0.2s;
+}
+
+.whisk-toast.show {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.whisk-toast.is-error {
+  background: #dc2626;
+}
+
+.whisk-toast.is-success {
+  background: #16a34a;
+}
+
+/* ==========================================================================
+   Mobile responsive — Whisk tool
+   ========================================================================== */
+@media (max-width: 900px) {
+  #view-whisk-pane.active {
+    min-height: 0;
+    height: 100%;
+  }
+
+  .whisk-workspace {
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .whisk-sidebar,
+  .whisk-sidebar.collapsed {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: auto !important;
+    max-height: min(42vh, 420px);
+    flex: 0 0 auto;
+    border-right: none;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+    padding: 12px 14px !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .whisk-main-stage {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .whisk-gallery-grid {
+    --whisk-grid-cols: 2;
+    gap: 12px;
+    padding: 16px 14px calc(110px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .whisk-top-controls {
+    top: 10px;
+    right: 10px;
+    padding: 5px 10px;
+  }
+
+  .whisk-floating-bar {
+    left: 10px;
+    right: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    width: auto;
+    max-width: none;
+    transform: none;
+    border-radius: 22px;
+    padding: 6px;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .whisk-toggle-dock-chip {
+    padding: 8px 12px;
+    font-size: 10px;
+  }
+
+  .whisk-prompt-field {
+    flex: 1 1 140px;
+    min-width: 0;
+    padding: 0 10px;
+    font-size: 14px;
+  }
+
+  .whisk-modal-overlay {
+    padding: 12px;
+    align-items: flex-end;
+  }
+
+  .whisk-modal-card,
+  .whisk-modal-card.is-refine {
+    max-width: 100%;
+    max-height: min(92dvh, 920px);
+    flex-direction: column;
+    border-radius: 18px 18px 12px 12px;
+  }
+
+  .whisk-modal-variants-col {
+    width: 100%;
+    min-width: 0;
+    border-right: none;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+    max-height: 160px;
+    padding: 16px;
+  }
+
+  .whisk-modal-variants-list {
+    flex-direction: row;
+    max-height: none;
+    overflow-x: auto;
+  }
+
+  .whisk-toast {
+    top: 12px;
+    right: 12px;
+    left: 12px;
+  }
+}
+
+@media (max-width: 520px) {
+  .whisk-sidebar,
+  .whisk-sidebar.collapsed {
+    max-height: min(36vh, 340px);
+  }
+
+  .whisk-gallery-grid {
+    --whisk-grid-cols: 1;
+    padding: 12px 10px calc(120px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .whisk-result-card {
+    border-radius: 12px;
+  }
+
+  .whisk-canvas-empty {
+    padding: 24px 16px;
+  }
+
+  .whisk-empty-instruction {
+    font-size: 10px;
+    letter-spacing: 1px;
+  }
+}
+
