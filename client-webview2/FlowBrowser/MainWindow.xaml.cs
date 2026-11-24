@@ -87,6 +87,27 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")]
     static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 
+    // Exclude the window from screen capture / taskbar thumbnails / Aero Peek / recordings,
+    // so hovering the taskbar (or Alt+Tab / Task View / screenshot tools / screen-share) can
+    // never reveal the shared Google account sign-in page underneath the auth cover.
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
+
+    const uint WdaMonitor = 0x00000001;          // content blanked in captures (Win7+)
+    const uint WdaExcludeFromCapture = 0x00000011; // omitted from capture entirely (Win10 2004+)
+
+    static void ApplyCaptureProtection(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        try
+        {
+            if (!SetWindowDisplayAffinity(hwnd, WdaExcludeFromCapture))
+                SetWindowDisplayAffinity(hwnd, WdaMonitor);
+        }
+        catch { /* best effort — never block startup over capture protection */ }
+    }
+
     readonly ZexTtsService _zexTts = new();
 
     public MainWindow()
@@ -106,6 +127,10 @@ public partial class MainWindow : Window
             {
                 try { DragMove(); } catch { /* ignore */ }
             }
+        };
+        SourceInitialized += (_, _) =>
+        {
+            try { ApplyCaptureProtection(new WindowInteropHelper(this).Handle); } catch { /* ignore */ }
         };
         LocationChanged += (_, _) => SyncAuthCoverBounds();
         SizeChanged += (_, _) => SyncAuthCoverBounds();
@@ -1353,6 +1378,10 @@ public partial class MainWindow : Window
             Title = "FlowAuthCover",
             Content = panel,
             IsHitTestVisible = true
+        };
+        _authCoverWindow.SourceInitialized += (_, _) =>
+        {
+            try { ApplyCaptureProtection(new WindowInteropHelper(_authCoverWindow).Handle); } catch { /* ignore */ }
         };
     }
 
