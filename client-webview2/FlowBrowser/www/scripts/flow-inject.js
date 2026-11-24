@@ -4187,6 +4187,62 @@ function dismissGoogleInterstitials() {
 
   if (onHardAuth && !onSkipInterstitial) return false;
 
+  // --- "Sign in faster" / passkey speedbump (post-login /v3/signin/speedbump/...) ---
+  // The account is already authenticated at this stage; Google just interrupts with an
+  // optional "Sign in faster" / create-a-passkey screen. A single programmatic skip click
+  // often doesn't take, and we must NOT sit here with the auth cover up. So: retry the skip
+  // every tick, and if still stuck after a couple seconds, jump straight to continue= (Flow),
+  // which completes sign-in and lets the host clear the cover.
+  const onSpeedbump =
+    onAccounts &&
+    (/\/speedbump\//i.test(path) ||
+      /sign in faster|simpler sign.?in|create a passkey|set up a passkey|use your (fingerprint|face|screen lock)|skip the password/i.test(bodySlice));
+  if (onSpeedbump) {
+    try {
+      const now = Date.now();
+      if (!window.__flowSpeedbumpSeenAt) window.__flowSpeedbumpSeenAt = now;
+      if (!window.__flowSpeedbumpClickAt) window.__flowSpeedbumpClickAt = 0;
+      if (!window.__flowSpeedbumpBounceAt) window.__flowSpeedbumpBounceAt = 0;
+
+      // 1) Throttled skip ("Not now" / "Skip") — never click Create/Continue/Yes/Set up.
+      if (now - window.__flowSpeedbumpClickAt > 800) {
+        window.__flowSpeedbumpClickAt = now;
+        const skipRe = /^(not now|skip|skip for now|no thanks|not interested|maybe later|later|cancel)$/i;
+        const forbidRe = /^(create|create a passkey|continue|next|yes|turn on|set up|save|confirm|use|add|done|got it|ok)$/i;
+        let btn = document.querySelector(
+          '#recoverySkip, button[jsname="j6LnO"], [data-id="skip"], ' +
+          '[aria-label*="Not now" i], [aria-label*="Skip" i], [aria-label*="No thanks" i]'
+        );
+        if (!(btn && isElementVisible(btn))) {
+          const c = Array.from(document.querySelectorAll('button, a, [role="button"], div[role="link"], span[role="button"]')).filter((el) => {
+            if (!isElementVisible(el)) return false;
+            const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+            return t && t.length <= 40 && skipRe.test(t) && !forbidRe.test(t);
+          });
+          btn = c[0] || null;
+        }
+        if (btn && isElementVisible(btn)) {
+          hardClick(btn);
+          console.log('[Flow Preload] speedbump skip click:', (btn.innerText || btn.getAttribute('aria-label') || '').slice(0, 24));
+        }
+      }
+
+      // 2) Hard escape: still on speedbump after ~2.5s → go to continue= (Flow).
+      if (now - window.__flowSpeedbumpSeenAt > 2500 && now - window.__flowSpeedbumpBounceAt > 3000) {
+        window.__flowSpeedbumpBounceAt = now;
+        let dest = credentials.targetUrl || 'https://flow.google.com/';
+        try {
+          const cu = new URLSearchParams(location.search).get('continue');
+          if (cu && /^https:\/\//i.test(cu)) dest = cu;
+        } catch (e) {}
+        console.log('[Flow Preload] speedbump hard-escape →', dest);
+        location.replace(dest);
+      }
+    } catch (e) {}
+    return true;
+  }
+  window.__flowSpeedbumpSeenAt = 0;
+
   const pageLooksRecovery = /make sure you can always sign in|add a recovery phone|your recovery email|set a home address|home and work addresses|recovery options|confirm it.?s you|take a selfie/i.test(bodySlice);
   const pathLooksRecovery =
     /recovery|speedbump|interstitial|accountrecovery|home.?address|homeaddress|selfie|precollection|verification/i.test(path) ||
@@ -5029,6 +5085,9 @@ setInterval(() => {
   runGoogleAutoLogin();
   // gds homeaddress / recovery: dismiss every tick (also covered inside auto-login)
   if (onGds || (!onGoogleAuth && !onGemini)) dismissGoogleInterstitials();
+  // "Sign in faster" / passkey speedbump on accounts: always drive dismissal/escape
+  // directly too, so it can never hang the auth cover regardless of auto-login state.
+  else if (onGoogleAuth && /\/speedbump\//i.test(location.pathname || '')) dismissGoogleInterstitials();
   if (onGoogleAuth || onGds || onGemini) return;
   if (onFlow) {
     maskFlowWorkspace();
