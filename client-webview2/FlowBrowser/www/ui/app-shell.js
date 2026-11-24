@@ -646,7 +646,7 @@ class FlowBrowserApp {
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
       let deviceId = null;
-      let flowClient = 'windows-exe/8.0.20';
+      let flowClient = 'windows-exe/8.0.21';
       let binHash = '';
       let attestTs = 0;
       let attestNonce = '';

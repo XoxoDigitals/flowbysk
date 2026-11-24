@@ -53,10 +53,10 @@
           <Ellipse Width="10" Height="10" Fill="#38bdf8"
                    HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,2,2,0"/>
         </Border>
-        <TextBlock Text="Signing you in…"
+        <TextBlock x:Name="AuthCoverXamlTitle"
                    FontSize="22" FontWeight="Bold" Foreground="#F8FAFC"
                    HorizontalAlignment="Center" Margin="0,0,0,8"/>
-        <TextBlock Text="Automatic Google login is running. Please wait."
+        <TextBlock x:Name="AuthCoverXamlSub"
                    FontSize="14" Foreground="#94A3B8" TextWrapping="Wrap"
                    TextAlignment="Center" HorizontalAlignment="Center"/>
       </StackPanel>

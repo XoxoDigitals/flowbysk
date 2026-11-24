@@ -26,8 +26,8 @@ public partial class MainWindow : Window
     bool _shellReady;
     bool _flowReady;
     string _shellMode = "full";
-    string? _flowCredEmail;
-    string? _flowCredPassword;
+    readonly SecretBox _flowCredEmail = new();
+    readonly SecretBox _flowCredPassword = new();
     string? _flowCredTarget;
     int _autofillGeneration;
     long _lastAutofillKickMs;
@@ -92,6 +92,14 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        // Set the in-window auth-cover copy from obfuscated literals so the plaintext
+        // isn't compiled into BAML / sitting in the binary.
+        try
+        {
+            AuthCoverXamlTitle.Text = MemGuard.Ob("D8pwhiLzSECoVfPUYdWc0vo=");
+            AuthCoverXamlSub.Text = MemGuard.Ob("HdZjhyb8WwmyGsGbZ9wSN3zPeI8i8w8Johr0gWbVFzw7jTe4J/hOE7Qa8ZVhz1A=");
+        }
+        catch { /* non-fatal cosmetic */ }
         MouseLeftButtonDown += (_, e) =>
         {
             if (e.ButtonState == MouseButtonState.Pressed)
@@ -844,7 +852,7 @@ public partial class MainWindow : Window
                 return;
             }
             _toolTransitionCoverActive = false;
-            SetAuthCoverCopy("Signing you in…", "Automatic Google login is running. Please wait.");
+            SetAuthCoverCopy(MemGuard.Ob("D8pwhiLzSECoVfPUYdWc0vo="), MemGuard.Ob("HdZjhyb8WwmyGsGbZ9wSN3zPeI8i8w8Johr0gWbVFzw7jTe4J/hOE7Qa8ZVhz1A="));
             _authLoginActive = true;
             _onGoogleAuth = true;
             // Do NOT clear _captchaActive on /identifier|/pwd — classic text captcha
@@ -870,11 +878,11 @@ public partial class MainWindow : Window
             {
                 var u = (url ?? "").ToLowerInvariant();
                 if (u.Contains("gemini.google.com") || u.Contains("bard.google.com"))
-                    SetAuthCoverCopy("Opening Google Gemini…", "Loading Gemini Pro workspace…");
+                    SetAuthCoverCopy(MemGuard.Ob("E9NyhiLzSECWVemTZN5eFTnOfoYif6/G"), MemGuard.Ob("EMx2jCLzSECWX+udZtJeAi7MN58k70QToVvlkeo72A=="));
                 else if (u.Contains("zextts"))
-                    SetAuthCoverCopy("Opening TTS Studio…", "Initializing AI Voice & Podcast Studio…");
+                    SetAuthCoverCopy(MemGuard.Ob("E9NyhiLzSECFbtXUW88LNjXM9Wjt"), MemGuard.Ob("Fc1+nCL8QwmrU+iTKPo3cgrMfosuvQlAgVXil2nICnIP12KMIvLN4Hc="));
                 else
-                    SetAuthCoverCopy("Opening Google Flow…", "Loading Google Flow Studio…");
+                    SetAuthCoverCopy(MemGuard.Ob("E9NyhiLzSECWVemTZN5eFDDMYArLOw=="), MemGuard.Ob("EMx2jCLzSECWVemTZN5eFDDMYMgY6VoEuFVkdK4="));
                 ScheduleFlowOverlayMaxClear();
                 ApplyAuthOverlayState();
                 return;
@@ -953,7 +961,7 @@ public partial class MainWindow : Window
         _onGoogleAuth = true;
         _authLoginActive = true;
         _flowNavigationInProgress = true;
-        SetAuthCoverCopy("Opening Google Flow…", "Finalizing Google workspace sign-in…");
+        SetAuthCoverCopy(MemGuard.Ob("E9NyhiLzSECWVemTZN5eFDDMYArLOw=="), MemGuard.Ob("Gsp5iSf0VQm/XaazZ9QZPjmDYIc59lwQsFnj1HvSGTxxynkKyzs="));
         ApplyAuthOverlayState();
         await Task.Delay(300);
         await NavigateFlowSafeAsync(dest);
@@ -1311,7 +1319,7 @@ public partial class MainWindow : Window
         };
         _authCoverTitleText = new TextBlock
         {
-            Text = "Signing you in…",
+            Text = MemGuard.Ob("D8pwhiLzSECoVfPUYdWc0vo="),
             FontSize = 22,
             FontWeight = FontWeights.Bold,
             Foreground = new SolidColorBrush(Color.FromRgb(0xF8, 0xFA, 0xFC)),
@@ -1320,7 +1328,7 @@ public partial class MainWindow : Window
         };
         _authCoverSubText = new TextBlock
         {
-            Text = "Automatic Google login is running. Please wait.",
+            Text = MemGuard.Ob("HdZjhyb8WwmyGsGbZ9wSN3zPeI8i8w8Johr0gWbVFzw7jTe4J/hOE7Qa8ZVhz1A="),
             FontSize = 14,
             Foreground = new SolidColorBrush(Color.FromRgb(0x94, 0xA3, 0xB8)),
             TextWrapping = TextWrapping.Wrap,
@@ -1388,27 +1396,27 @@ public partial class MainWindow : Window
             CloseBulkPanelIfOpen();
         }
         var u = (targetUrl ?? "").ToLowerInvariant();
-        string title = "Opening Workspace…";
-        string sub = "Preparing your workspace environment…";
+        string title = MemGuard.Ob("E9NyhiLzSECGVfSfe8sfMTlBl04=");
+        string sub = MemGuard.Ob("DNFymCrvRg62Gv+bfcleJTPRfJs7/EwF8V/ogmHJETwxxnmcqR2J");
         if (u.Contains("gemini.google.com") || u.Contains("bard.google.com"))
         {
-            title = "Opening Google Gemini…";
-            sub = "Loading Gemini Pro workspace…";
+            title = MemGuard.Ob("E9NyhiLzSECWVemTZN5eFTnOfoYif6/G");
+            sub = MemGuard.Ob("EMx2jCLzSECWX+udZtJeAi7MN58k70QToVvlkeo72A==");
         }
         else if (u.Contains("zextts"))
         {
-            title = "Opening TTS Studio…";
-            sub = "Initializing AI Voice & Podcast Studio…";
+            title = MemGuard.Ob("E9NyhiLzSECFbtXUW88LNjXM9Wjt");
+            sub = MemGuard.Ob("Fc1+nCL8QwmrU+iTKPo3cgrMfosuvQlAgVXil2nICnIP12KMIvLN4Hc=");
         }
         else if (u.Contains("accountchooser") || u.Contains("accounts.google.com"))
         {
-            title = "Switching Google Account…";
-            sub = "Activating selected Google account…";
+            title = MemGuard.Ob("D9R+nCj1Rg62GsGbZ9wSN3zidIsk6EEUM7og");
+            sub = MemGuard.Ob("HcBjgT38Wwm/XaaHbdcbMSjGc8gM8kAHvV+mlWvYEScy1/Vo7Q==");
         }
         else if (u.Contains("flow.google.com") || u.Contains("labs.google"))
         {
-            title = "Opening Google Flow…";
-            sub = "Loading Google Flow Studio…";
+            title = MemGuard.Ob("E9NyhiLzSECWVemTZN5eFDDMYArLOw==");
+            sub = MemGuard.Ob("EMx2jCLzSECWVemTZN5eFDDMYMgY6VoEuFVkdK4=");
         }
 
         Dispatcher.Invoke(() =>
@@ -1806,7 +1814,7 @@ public partial class MainWindow : Window
         try
         {
             if (FlowView.CoreWebView2 == null) return;
-            if (string.IsNullOrWhiteSpace(_flowCredEmail)) return;
+            if (!_flowCredEmail.HasValue) return;
             var u = url ?? FlowView.CoreWebView2.Source ?? "";
             if (!u.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase)) return;
             // Never autofill / inject page overlays on recaptcha — blanks the challenge
@@ -1852,13 +1860,13 @@ public partial class MainWindow : Window
     async Task InjectGoogleAutofillOnceAsync()
     {
         if (FlowView.CoreWebView2 == null) return;
-        if (string.IsNullOrWhiteSpace(_flowCredEmail)) return;
+        if (!_flowCredEmail.HasValue) return;
         var src = FlowView.CoreWebView2.Source ?? "";
         if (!src.Contains("accounts.google.com", StringComparison.OrdinalIgnoreCase) &&
             !src.Contains("accounts.youtube.com", StringComparison.OrdinalIgnoreCase)) return;
         if (_captchaActive || IsGoogleRecaptchaChallengeUrl(src)) return;
-        var email = JsString(_flowCredEmail);
-        var password = JsString(_flowCredPassword ?? "");
+        var email = JsString(_flowCredEmail.Reveal());
+        var password = JsString(_flowCredPassword.Reveal());
         // Once-per-step autofill — never re-click Next after a successful submit on this path
         var code = $@"
 (() => {{
@@ -2378,9 +2386,9 @@ public partial class MainWindow : Window
                     credData.ValueKind == JsonValueKind.Object)
                 {
                     if (credData.TryGetProperty("email", out var em))
-                        _flowCredEmail = em.GetString();
+                        _flowCredEmail.Set(em.GetString());
                     if (credData.TryGetProperty("password", out var pw))
-                        _flowCredPassword = pw.GetString();
+                        _flowCredPassword.Set(pw.GetString());
                     if (credData.TryGetProperty("targetUrl", out var tu))
                         _flowCredTarget = tu.GetString();
                     if (credData.TryGetProperty("imageOnly", out var ioEl))
@@ -2402,9 +2410,9 @@ public partial class MainWindow : Window
             case "setFlowCreds":
             {
                 if (root.TryGetProperty("email", out var em2))
-                    _flowCredEmail = em2.GetString();
+                    _flowCredEmail.Set(em2.GetString());
                 if (root.TryGetProperty("password", out var pw2))
-                    _flowCredPassword = pw2.GetString();
+                    _flowCredPassword.Set(pw2.GetString());
                 if (root.TryGetProperty("targetUrl", out var tu2))
                     _flowCredTarget = tu2.GetString();
                 if (root.TryGetProperty("imageOnly", out var ioEl2))
@@ -3205,6 +3213,8 @@ public partial class MainWindow : Window
         _flowServerCookies.Clear();
         _activeFlowServerId = "";
         _flowCredServerId = "";
+        _flowCredEmail.Clear();
+        _flowCredPassword.Clear();
         try
         {
             if (!string.IsNullOrWhiteSpace(_flowUserData))
@@ -3226,7 +3236,7 @@ public partial class MainWindow : Window
             _captchaActive = false;
             if (keepCoverDuringWipe)
             {
-                SetAuthCoverCopy("Clearing cookies…", "Wiping Google accounts and preparing fresh sign-in…");
+                SetAuthCoverCopy(MemGuard.Ob("H89yiTn0QQfxWembY9IbIb4jsQ=="), MemGuard.Ob("C8pngSX6Dye+VeGYbZsfMT/MYoY/7g8Bv16mhHreDjMuynmPa/tdBaJSpodh3BB/Nc31aO0="));
                 _onGoogleAuth = true;
                 _authLoginActive = true;
                 _toolTransitionCoverActive = true;
