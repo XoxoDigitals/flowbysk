@@ -14,6 +14,15 @@
   }
   window.__flowInjectBootstrapped = true;
 
+  // Mark Android so Android-only CSS/behavior in this shared script can target it.
+  // (The native "platform-android" class is only added in the shell's own WebView,
+  // never in this one — the Flow/Gemini content WebView — so detect it ourselves.)
+  try {
+    if (/\bAndroid\b/i.test(navigator.userAgent || '') && document.documentElement) {
+      document.documentElement.classList.add('platform-android');
+    }
+  } catch (e) {}
+
   (function () {
     if (typeof window.chrome === 'undefined' || !window.chrome.webview) {
       console.warn('[Flow Inject] chrome.webview missing');
@@ -171,7 +180,7 @@ try {
   if (sessionStorage.getItem('__flow_image_only') === '1') {
     credentials.imageOnly = true;
   }
-  const savedSrvId = sessionStorage.getItem('__flow_active_server_id');
+  const savedSrvId = localStorage.getItem('__flow_active_server_id');
   if (savedSrvId) {
     credentials.serverId = savedSrvId;
   }
@@ -226,7 +235,7 @@ window.__flowSetImageOnlyMode = function (flag, serverId) {
     const changedSrv = credentials.serverId !== nextSrvId;
     credentials.serverId = nextSrvId;
     try {
-      sessionStorage.setItem('__flow_active_server_id', credentials.serverId);
+      localStorage.setItem('__flow_active_server_id', credentials.serverId);
     } catch (e) {}
     if (changedSrv && typeof loadSavedProjectsFromDevice === 'function') {
       loadSavedProjectsFromDevice();
@@ -1611,7 +1620,7 @@ ipcRenderer.on('apply-saved-projects', (event, data) => {
   if (data.serverId && String(data.serverId).trim() !== '') {
     credentials.serverId = String(data.serverId).trim();
     try {
-      sessionStorage.setItem('__flow_active_server_id', credentials.serverId);
+      localStorage.setItem('__flow_active_server_id', credentials.serverId);
     } catch (e) {}
   }
   if (Array.isArray(data.projects)) {
@@ -2090,9 +2099,12 @@ if (window.visualViewport) {
         "html:not([data-flow-profile-popup-open='1']) [aria-label='Account details']:not(button):not(.header-user-button):not(.account-switcher-placeholder):not(:has(.header-user-button)){display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}" +
         "[aria-label='Account details']:not(button):not(.header-user-button):not(.account-switcher-placeholder):not(:has(.header-user-button)):not(:has(flow-account-panel)):not([data-flow-spoofed='1']){visibility:hidden!important;opacity:0!important;pointer-events:none!important;}" +
         "#flow-my-projects-dock{position:fixed!important;bottom:18px!important;right:22px!important;left:auto!important;z-index:2147483645!important;display:flex!important;align-items:center!important;gap:10px!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
+        // Android's gesture/nav bar and the mobile Flow prompt bar both sit at the very
+        // bottom of the screen; push the dock up and inset it so it is never hidden behind them.
+        "html.platform-android #flow-my-projects-dock{bottom:calc(18px + env(safe-area-inset-bottom, 0px) + 64px)!important;right:14px!important;}" +
         "#flow-my-projects-btn,#flow-save-current-project-btn{display:inline-flex!important;align-items:center!important;gap:8px!important;background:rgba(22,19,36,0.94)!important;border:1px solid rgba(139,92,246,0.45)!important;color:#f3f4f6!important;padding:8px 16px!important;border-radius:999px!important;font-size:13px!important;font-weight:600!important;cursor:pointer!important;box-shadow:0 8px 24px rgba(0,0,0,0.6)!important;transition:all .18s ease!important;}" +
         "#flow-my-projects-btn:hover,#flow-save-current-project-btn:hover{background:rgba(38,31,64,0.98)!important;border-color:rgba(167,139,250,0.8)!important;transform:translateY(-1px)!important;}" +
-        "flow-agent-mode-toggle-chip,flow-agent-mode-toggle-chip *,button.agent-mode-chip,.agent-mode-chip,.agent-mode-chip-label,.add-clip-button-container,[class*='add-clip-button-container'],button[aria-label*='agent' i],[role='tab'][aria-label*='agent' i],[role='button'][aria-label*='agent' i],[data-flow-agent-blocked='true'],button[aria-label*='create tool' i],[role='button'][aria-label*='create tool' i],a[aria-label*='create tool' i],[data-flow-create-tool='1'],button[aria-label='Tools' i],[role='tab'][aria-label='Tools' i],a[href*='/tools' i],[data-flow-tools-btn='1'],[data-flow-hide-menu='1'],flow-menu-item[data-flow-hide-menu='1'],flow-menu-item:has(flow-menu-item-actions),flow-menu-item-actions,flow-menu-item:has(a[href*='one.google.com/ai/credits']),flow-menu-item:has(a[href*='flow_insufficient_credits']),flow-menu-item:has(a[href*='support.google.com/flow']),flow-menu-item:has(a[href*='/changelogs']),flow-menu-item:has(a[href*='flowmusic.app']),flow-menu-item:has(a[href*='labs.google/flow/tv']),flow-menu-item:has(a[href='/flow']),flow-menu-item:has(a[href*='youtube.com']),flow-menu-item:has(a[href*='support.google.com/legal']),flow-menu-item:has(a[href*='/privacy']){display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;min-width:0!important;min-height:0!important;max-width:0!important;max-height:0!important;margin:0!important;padding:0!important;border:0!important;overflow:hidden!important;opacity:0!important;}" +
+        "flow-agent-mode-switch,flow-agent-mode-switch *,flow-agent-mode-toggle-chip,flow-agent-mode-toggle-chip *,button.agent-mode-chip,.agent-mode-chip,.agent-mode-chip-label,.add-clip-button-container,[class*='add-clip-button-container'],button[aria-label*='agent' i],[role='tab'][aria-label*='agent' i],[role='button'][aria-label*='agent' i],[data-flow-agent-blocked='true'],button[aria-label*='create tool' i],[role='button'][aria-label*='create tool' i],a[aria-label*='create tool' i],[data-flow-create-tool='1'],button[aria-label='Tools' i],[role='tab'][aria-label='Tools' i],a[href*='/tools' i],[data-flow-tools-btn='1'],[data-flow-hide-menu='1'],flow-menu-item[data-flow-hide-menu='1'],flow-menu-item:has(flow-menu-item-actions),flow-menu-item-actions,flow-menu-item:has(a[href*='one.google.com/ai/credits']),flow-menu-item:has(a[href*='flow_insufficient_credits']),flow-menu-item:has(a[href*='support.google.com/flow']),flow-menu-item:has(a[href*='/changelogs']),flow-menu-item:has(a[href*='flowmusic.app']),flow-menu-item:has(a[href*='labs.google/flow/tv']),flow-menu-item:has(a[href='/flow']),flow-menu-item:has(a[href*='youtube.com']),flow-menu-item:has(a[href*='support.google.com/legal']),flow-menu-item:has(a[href*='/privacy']){display:none!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;min-width:0!important;min-height:0!important;max-width:0!important;max-height:0!important;margin:0!important;padding:0!important;border:0!important;overflow:hidden!important;opacity:0!important;}" +
         "#flow-my-projects-count{background:rgba(139,92,246,0.35)!important;color:#ddd6fe!important;padding:1px 8px!important;border-radius:999px!important;font-size:11px!important;font-weight:700!important;}" +
         "#flow-saved-projects-backdrop{position:fixed!important;inset:0!important;background:rgba(0,0,0,0.72)!important;backdrop-filter:blur(6px)!important;z-index:2147483646!important;display:none;align-items:center!important;justify-content:center!important;font-family:'Plus Jakarta Sans','Google Sans Text',sans-serif!important;}" +
         "#flow-saved-projects-modal{width:92vw!important;max-width:960px!important;max-height:82vh!important;background:rgba(19,17,28,0.97)!important;border:1px solid rgba(139,92,246,0.38)!important;border-radius:16px!important;padding:22px!important;display:flex!important;flex-direction:column!important;gap:18px!important;box-shadow:0 24px 64px rgba(0,0,0,0.85)!important;}" +
@@ -2472,13 +2484,32 @@ if (window.visualViewport) {
       el.style.setProperty('overflow', 'hidden', 'important');
     });
 
+    // Flow Agent footer switch (<flow-agent-mode-switch><button aria-label="Flow Agent" aria-pressed>):
+    // click it off first (so Angular's own state actually flips to off, not just visually hidden), then hide.
+    document.querySelectorAll('flow-agent-mode-switch').forEach((host) => {
+      const btn = host.tagName === 'BUTTON' ? host : host.querySelector('button');
+      if (btn && btn.getAttribute('aria-pressed') === 'true') {
+        try { btn.click(); } catch (e) {}
+      }
+      host.setAttribute('data-flow-agent-blocked', 'true');
+      host.style.setProperty('display', 'none', 'important');
+      host.style.setProperty('visibility', 'hidden', 'important');
+      host.style.setProperty('pointer-events', 'none', 'important');
+      host.style.setProperty('width', '0', 'important');
+      host.style.setProperty('height', '0', 'important');
+      host.style.setProperty('overflow', 'hidden', 'important');
+    });
+
     const runHeavyDomPass = now - (initPakflowDomEngine._lastHeavyDomPass || 0) >= 600;
     if (runHeavyDomPass) {
       initPakflowDomEngine._lastHeavyDomPass = now;
-      purgeSignoutElements();
-      spoofAccountIdentityInDom();
-      ensureProfileIconVisible();
-      updateMyProjectsUI();
+      // Each step is isolated: a thrown error in one (e.g. a DOM shape this build
+      // doesn't expect yet) must never silently stop the My Projects dock or
+      // auto-save from ever running again for the rest of the session.
+      try { purgeSignoutElements(); } catch (e) { console.warn('[Flow] purgeSignoutElements', e); }
+      try { spoofAccountIdentityInDom(); } catch (e) { console.warn('[Flow] spoofAccountIdentityInDom', e); }
+      try { ensureProfileIconVisible(); } catch (e) { console.warn('[Flow] ensureProfileIconVisible', e); }
+      try { updateMyProjectsUI(); } catch (e) { console.warn('[Flow] updateMyProjectsUI', e); }
 
       // Request database credits periodically until synced
       if (!hasDatabaseCredits && now - (initPakflowDomEngine._lastCredReq || 0) > 2000) {
@@ -2487,20 +2518,26 @@ if (window.visualViewport) {
       }
 
       // Auto-save active project to user device
-      const currProjId = getCurrentProjectIdFromUrl();
-      if (currProjId) {
-        if (currProjId !== lastAutoSavedProjectId || now - lastAutoSaveCheckAt > 6000) {
-          lastAutoSavedProjectId = currProjId;
-          lastAutoSaveCheckAt = now;
-          saveCurrentProjectToDevice(false);
+      try {
+        const currProjId = getCurrentProjectIdFromUrl();
+        if (currProjId) {
+          if (currProjId !== lastAutoSavedProjectId || now - lastAutoSaveCheckAt > 6000) {
+            lastAutoSavedProjectId = currProjId;
+            lastAutoSaveCheckAt = now;
+            saveCurrentProjectToDevice(false);
+          }
         }
+      } catch (e) {
+        console.warn('[Flow] auto-save project', e);
       }
 
-      document.querySelectorAll('button, a').forEach((el) => {
-        const tc = el.textContent || '';
-        if (tc.includes('Manage subscription')) el.style.pointerEvents = 'none';
-        if (tc.includes('Add AI credits')) el.style.display = 'none';
-      });
+      try {
+        document.querySelectorAll('button, a').forEach((el) => {
+          const tc = el.textContent || '';
+          if (tc.includes('Manage subscription')) el.style.pointerEvents = 'none';
+          if (tc.includes('Add AI credits')) el.style.display = 'none';
+        });
+      } catch (e) {}
     }
 
     // Hide video quality selector (360p / 720p / 1080p) inside settings popover
@@ -2596,7 +2633,9 @@ if (window.visualViewport) {
           const labelNode = itemHost.querySelector && itemHost.querySelector('.label');
           const labelTxt = ((labelNode ? labelNode.textContent : '') || '').replace(/\s+/g, ' ').trim().toLowerCase();
           const itemTxt = (itemHost.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-          const is4k = labelTxt === '4k' || /\b4k\b/i.test(itemTxt) || /\b4k\b/i.test(labelTxt) || itemTxt.includes('upscaled');
+          // Match the "4K" row by its .label text only (NOT the "Upscaled" caption, which 1080p
+          // also carries — matching on it used to hide 1080p too; keep 270p/720p/1080p visible).
+          const is4k = labelTxt === '4k';
           const isBlockedMenuRow =
             labelTxt === 'product help' ||
             labelTxt === 'flow help center' ||
@@ -4422,7 +4461,9 @@ function hideFlowChromeTargets() {
       const labelTxt = ((labelNode ? labelNode.textContent : '') || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const t = (host.innerText || host.textContent || '').replace(/\s+/g, ' ').trim();
       const tl = t.toLowerCase();
-      const is4k = labelTxt === '4k' || /\b4k\b/i.test(tl) || /\b4k\b/i.test(labelTxt) || tl.includes('upscaled');
+      // Match the "4K" row by its .label text only (NOT the "Upscaled" caption, which 1080p
+      // also carries — matching on it used to hide 1080p too; keep 270p/720p/1080p visible).
+      const is4k = labelTxt === '4k';
       const isBlockedRow =
         /delete all projects/i.test(t) ||
         labelTxt === 'product help' ||

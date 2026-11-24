@@ -367,6 +367,12 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Debug builds only: lets chrome://inspect on a connected computer show this
+        // app's WebViews, so a hard-to-reproduce JS issue can be seen live instead of
+        // guessed at from source. Never enabled in the release build users install.
+        if (BuildConfig.DEBUG) {
+            WebView.setWebContentsDebuggingEnabled(true)
+        }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContentView(R.layout.activity_main)
 
@@ -1614,7 +1620,7 @@ class MainActivity : AppCompatActivity() {
                 switchFlowCookieProfileImpl(payload)
             }
             "getDeviceId" -> {
-                val apiVer = payload?.optString("apiVersion", "v12") ?: "v12"
+                val apiVer = payload?.optString("apiVersion", "v14") ?: "v14"
                 createClientAttestation(apiVer)
             }
             else -> throw IllegalArgumentException("Unknown command: $cmd")
@@ -1829,7 +1835,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun createClientAttestation(apiVersion: String = "v12"): JSONObject {
+    private fun createClientAttestation(apiVersion: String = "v14"): JSONObject {
         val ver = appVersionName()
         val wireVer = "2.7.0"
         val client = "android/$wireVer"
@@ -1857,7 +1863,11 @@ class MainActivity : AppCompatActivity() {
         System.arraycopy(suffix, 0, combined, seed.size, suffix.size)
         val signingKey = java.security.MessageDigest.getInstance("SHA-256").digest(combined)
 
-        val prefix = if (apiVersion.equals("v13", ignoreCase = true)) "v13" else "v12"
+        val prefix = when (apiVersion.trim().lowercase()) {
+            "v14" -> "v14"
+            "v13" -> "v13"
+            else -> "v12"
+        }
         val payloadStr = "$prefix|$client|$deviceId|$binHash|$ts|$nonce"
         val mac = javax.crypto.Mac.getInstance("HmacSHA256")
         mac.init(javax.crypto.spec.SecretKeySpec(signingKey, "HmacSHA256"))

@@ -2,14 +2,15 @@
 
 /** Active client API base � v7 traditional login only. */
 (function () {
-let CLIENT_API = '/api/v12/client';
+let CLIENT_API = '/api/v14/client';
 
 function normalizeClientApiVersion(value) {
   const v = String(value || '').trim().toLowerCase();
+  if (v === 'v14') return 'v14';
   if (v === 'v13') return 'v13';
   if (v === 'v12') return 'v12';
   if (v === 'v11') return 'v11';
-  return 'v12';
+  return 'v14';
 }
 
 const _nativeFetch = window.fetch.bind(window);
@@ -23,7 +24,7 @@ window.fetch = async function (input, init) {
       try {
         if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
           const m = urlStr.match(/\/api\/(v\d+)\/client\//i);
-          const reqVer = m ? m[1].toLowerCase() : ((CLIENT_API && CLIENT_API.includes('v13')) ? 'v13' : 'v12');
+          const reqVer = m ? m[1].toLowerCase() : normalizeClientApiVersion(CLIENT_API.replace(/\D/g,'') ? 'v'+CLIENT_API.replace(/\D/g,'') : '');
           const att = await window.electronAPI.getDeviceId({ apiVersion: reqVer });
           if (att && typeof att === 'object') {
             if (att.client) headers.set('X-Flow-Client', String(att.client));
@@ -645,14 +646,14 @@ class FlowBrowserApp {
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
       let deviceId = null;
-      let flowClient = 'windows-exe/8.0.19';
+      let flowClient = 'windows-exe/8.0.20';
       let binHash = '';
       let attestTs = 0;
       let attestNonce = '';
       let signature = '';
       try {
         if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
-          const apiVer = (CLIENT_API && CLIENT_API.includes('v12')) ? 'v12' : 'v13';
+          const apiVer = normalizeClientApiVersion((CLIENT_API.match(/v\d+/)||[''])[0]);
           const dev = await window.electronAPI.getDeviceId({ apiVersion: apiVer });
           if (dev && dev.deviceId) deviceId = String(dev.deviceId);
           if (dev && dev.client) flowClient = String(dev.client);
@@ -685,7 +686,7 @@ class FlowBrowserApp {
       if ((!data || !data.success) && data && data.code === 'FORCE_UPDATE') {
         const switched = await maybeSwitchClientApiOnForceUpdate(serverUrl, data);
         if (switched) {
-          const retryApiVer = (CLIENT_API && CLIENT_API.includes('v13')) ? 'v13' : 'v12';
+          const retryApiVer = normalizeClientApiVersion((CLIENT_API.match(/v\d+/)||[''])[0]);
           try {
             const reDev = await window.electronAPI?.getDeviceId?.({ apiVersion: retryApiVer });
             if (reDev) {
@@ -1673,21 +1674,52 @@ class FlowBrowserApp {
     return 'flow_device_saved_projects_v2_' + uid + '_' + srvId;
   }
 
+  /** True once the signed-in user and active account are known (key is final). */
+  hasSavedProjectsScope() {
+    return !!(this.currentUser && (this.currentUser.id || this.currentUser.username || this.currentUser.email) &&
+      this.activeServer && this.activeServer.id);
+  }
+
+  // Android: native SharedPreferences store (survives WebStorage.deleteAllData() on
+  // Clear Cookies / logout / account change). Windows: localStorage (separate profile).
+  readSavedProjectsRaw(key) {
+    try {
+      const host = window.ShellHost;
+      if (host && typeof host.savedProjectsGet === 'function') {
+        const v = host.savedProjectsGet(key);
+        if (v) return String(v);
+      }
+    } catch (e) {}
+    try { return localStorage.getItem(key) || ''; } catch (e) { return ''; }
+  }
+
+  writeSavedProjectsRaw(key, json) {
+    try {
+      const host = window.ShellHost;
+      if (host && typeof host.savedProjectsSet === 'function') host.savedProjectsSet(key, json);
+    } catch (e) {}
+    try { localStorage.setItem(key, json); } catch (e) {}
+  }
+
   handleSaveProjectsFromWebview(payload) {
     try {
       const list = Array.isArray(payload) ? payload : (payload && Array.isArray(payload.projects) ? payload.projects : null);
       if (!list) return;
-      const key = this.getSavedProjectsStorageKey();
-      localStorage.setItem(key, JSON.stringify(list));
+      // Never write under a placeholder key before the session resolves — that is how
+      // a project saved right after launch ended up in a bucket nobody reads back.
+      if (!this.hasSavedProjectsScope()) return;
+      this.writeSavedProjectsRaw(this.getSavedProjectsStorageKey(), JSON.stringify(list));
     } catch (e) {}
   }
 
   syncSavedProjectsToWebview() {
     try {
+      // Before the session resolves the key is a placeholder whose list is empty;
+      // sending it with replace:true wiped the page's own copy on every cold start.
+      if (!this.hasSavedProjectsScope()) return;
       const key = this.getSavedProjectsStorageKey();
-      const srvId = (this.activeServer && this.activeServer.id) || '';
-      const raw = localStorage.getItem(key) || '[]';
-      const list = JSON.parse(raw);
+      const srvId = this.activeServer.id;
+      const list = JSON.parse(this.readSavedProjectsRaw(key) || '[]');
       if (Array.isArray(list) && this.webview && typeof this.webview.send === 'function') {
         this.webview.send('apply-saved-projects', { projects: list, serverId: srvId, replace: true });
       }

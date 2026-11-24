@@ -2634,7 +2634,7 @@ public partial class MainWindow : Window
             case "getDeviceId":
             {
                 long? srvTime = null;
-                string apiVer = "v12";
+                string apiVer = "v14";
                 if (payload.ValueKind == JsonValueKind.Object)
                 {
                     if (payload.TryGetProperty("serverTime", out var stEl) &&
@@ -2766,7 +2766,12 @@ public partial class MainWindow : Window
     static string AppVersion()
     {
         var v = typeof(MainWindow).Assembly.GetName().Version;
-        return v == null ? "0.0.0" : $"{v.Major}.{v.Minor}.{v.Build}";
+        if (v == null) return "0.0.0";
+        // Keep a trailing point-release (e.g. 8.0.19.1) visible in X-Flow-Client / the
+        // toolbar label; older 3-part versions (Revision 0) still render as before.
+        return v.Revision > 0
+            ? $"{v.Major}.{v.Minor}.{v.Build}.{v.Revision}"
+            : $"{v.Major}.{v.Minor}.{v.Build}";
     }
 
     static string GetStableDeviceId()

@@ -18,8 +18,8 @@ android {
         applicationId = "com.flowbrowser.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 47
-        versionName = "2.1"
+        versionCode = 52
+        versionName = "2.2.0"
 
         val defaultServer =
             (project.findProperty("DEFAULT_SERVER_URL") as String?)

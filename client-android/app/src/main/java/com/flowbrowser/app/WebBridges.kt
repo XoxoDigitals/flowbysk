@@ -7,6 +7,30 @@ class ShellBridge(private val activity: MainActivity) {
     fun postMessage(json: String) {
         activity.onShellMessage(json)
     }
+
+    /**
+     * Native store for the "My Projects" list. On Android, clearing the Flow/Google
+     * session calls WebStorage.deleteAllData(), which is app-wide and also wipes the
+     * shell's own localStorage — so the list cannot live there (on Windows the shell
+     * and Flow views use separate profiles, which is why it survives there).
+     */
+    @JavascriptInterface
+    fun savedProjectsGet(key: String): String {
+        return activity.getSharedPreferences(SAVED_PROJECTS_PREFS, android.content.Context.MODE_PRIVATE)
+            .getString(key, null) ?: ""
+    }
+
+    @JavascriptInterface
+    fun savedProjectsSet(key: String, json: String) {
+        activity.getSharedPreferences(SAVED_PROJECTS_PREFS, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(key, json)
+            .apply()
+    }
+
+    companion object {
+        private const val SAVED_PROJECTS_PREFS = "flow_saved_projects"
+    }
 }
 
 class FlowBridge(private val activity: MainActivity) {
