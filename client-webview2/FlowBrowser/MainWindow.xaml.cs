@@ -156,7 +156,6 @@ public partial class MainWindow : Window
         Closing += (_, _) =>
         {
             CloseWorkflowWindow();
-            CloseVpnPopupWindow();
             // Keep durable WebView profiles (Google cookies). Only wipe extracted www temp.
             WwwExtractor.WipeTempWww();
         };
@@ -226,7 +225,6 @@ public partial class MainWindow : Window
             SetShellMode("full");
 
             await ConfigureFlowAsync();
-            await EnsureUrbanVpnExtensionLoadedAsync();
             _flowReady = true;
 
             // Navigate ShellView once FlowView and its injection scripts are 100% ready
@@ -644,7 +642,6 @@ public partial class MainWindow : Window
                     _bulkPanelOpen = false;
                     PostToShell(new { type = "bulk-panel-state", open = false });
                 }
-                try { if (_vpnPopupWindow != null && _vpnPopupWindow.IsVisible) _vpnPopupWindow.Hide(); } catch { /* ignore */ }
                 // WebView2 uses native HWNDs — ZIndex cannot cover Flow. Hide it while overlays show.
                 // Preserve _toolTransitionCoverActive / _authLoginActive so returning to 'chrome'
                 // (e.g. after closing confirm modal or downloads drawer) restores the cover immediately.
@@ -2492,11 +2489,6 @@ public partial class MainWindow : Window
             case "toggleBulkPanel":
             {
                 ToggleBulkPanel();
-                break;
-            }
-            case "toggleVpnPopup":
-            {
-                ToggleVpnPopup();
                 break;
             }
             case "authOverlay":

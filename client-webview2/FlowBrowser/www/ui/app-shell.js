@@ -229,7 +229,6 @@ class FlowBrowserApp {
     this.btnCloseExtension = document.getElementById('btn-close-extension');
     this.extensionWebview = document.getElementById('extension-webview');
     this.btnToggleVeoAuto = document.getElementById('btn-toggle-veo-auto');
-    this.btnToggleVpn = document.getElementById('btn-toggle-vpn');
     this.btnOpenWorkspaceHub = document.getElementById('btn-open-workspace-hub');
     this.workspaceHubScreen = document.getElementById('workspace-hub-screen');
     this.hubToolsGrid = document.getElementById('hub-tools-grid');
@@ -329,12 +328,6 @@ class FlowBrowserApp {
     // Veo Auto events (native side-by-side Bulk Mode panel)
     if (this.btnToggleVeoAuto) {
       this.btnToggleVeoAuto.addEventListener('click', () => this.toggleVeoAutoDrawer());
-    }
-    if (this.btnToggleVpn) {
-      this.btnToggleVpn.addEventListener('click', () => {
-        if (document.documentElement.classList.contains('platform-android')) return;
-        window.electronAPI?.toggleVpnPopup?.();
-      });
     }
     if (this.btnCloseVeoAuto) {
       this.btnCloseVeoAuto.addEventListener('click', () => {
@@ -646,7 +639,7 @@ class FlowBrowserApp {
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
       let deviceId = null;
-      let flowClient = 'windows-exe/8.0.23';
+      let flowClient = 'windows-exe/8.0.24';
       let binHash = '';
       let attestTs = 0;
       let attestNonce = '';

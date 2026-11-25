@@ -98,7 +98,7 @@ function obfuscateFile(rel) {
     relNorm.endsWith('/scripts/flow-inject.js') ||
     relNorm === 'scripts/veo-content-bundle.js' ||
     relNorm.endsWith('/veo-content-bundle.js') ||
-    relNorm.startsWith('extensions/urban-vpn/');
+    false;
   const useLight = isInMemoryOrExt || before >= LIGHT_BYTES;
   const opts = useLight ? LIGHT_OPTS : HEAVY_OPTS;
   const mode = useLight ? 'light' : 'heavy';
