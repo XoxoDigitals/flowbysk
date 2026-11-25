@@ -66,6 +66,7 @@ public partial class MainWindow : Window
     DispatcherTimer? _toolTransitionTimer;
     DispatcherTimer? _authCoverPinTimer;
     DispatcherTimer? _flowOverlayMaxTimer;
+    DispatcherTimer? _captureGuardTimer;
     readonly CredChannelHost _credChannel = new();
     /// <summary>Max time sticky cover may stay up after landing on Flow workspace.</summary>
     static readonly TimeSpan FlowOverlayMaxHold = TimeSpan.FromSeconds(10);
@@ -97,6 +98,12 @@ public partial class MainWindow : Window
     const uint WdaMonitor = 0x00000001;          // content blanked in captures (Win7+)
     const uint WdaExcludeFromCapture = 0x00000011; // omitted from capture entirely (Win10 2004+)
 
+    delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
     static void ApplyCaptureProtection(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero) return;
@@ -106,6 +113,54 @@ public partial class MainWindow : Window
                 SetWindowDisplayAffinity(hwnd, WdaMonitor);
         }
         catch { /* best effort — never block startup over capture protection */ }
+    }
+
+    // Shared delegate instance so the GC never collects it while native code holds a pointer.
+    static readonly EnumWindowsProc _applyProtectionToChild = (child, _) =>
+    {
+        ApplyCaptureProtection(child);
+        return true;
+    };
+
+    // Apply capture exclusion to the top-level window AND every descendant HWND.
+    // WebView2 renders into its own child windows (Chrome_WidgetWin_*), and it may
+    // create fresh ones on navigation; protecting only the parent leaves a brief,
+    // capturable gap (taskbar thumbnail / Aero Peek) during rapid restore/minimize.
+    static void ApplyCaptureProtectionDeep(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        ApplyCaptureProtection(hwnd);
+        try { EnumChildWindows(hwnd, _applyProtectionToChild, IntPtr.Zero); }
+        catch { /* best effort */ }
+    }
+
+    // Re-apply synchronously while the window is changing state, BEFORE DWM composites
+    // the new frame for a thumbnail/preview — this closes the few-ms flash seen when the
+    // taskbar button is clicked rapidly (minimize/restore storms).
+    IntPtr CaptureProtectionWndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        switch (msg)
+        {
+            case 0x0005: // WM_SIZE
+            case 0x0006: // WM_ACTIVATE
+            case 0x0018: // WM_SHOWWINDOW
+            case 0x0047: // WM_WINDOWPOSCHANGED
+            case 0x0086: // WM_NCACTIVATE
+                ApplyCaptureProtectionDeep(hwnd);
+                break;
+        }
+        return IntPtr.Zero;
+    }
+
+    void HookCaptureProtection(Window w)
+    {
+        try
+        {
+            var hwnd = new WindowInteropHelper(w).Handle;
+            ApplyCaptureProtectionDeep(hwnd);
+            HwndSource.FromHwnd(hwnd)?.AddHook(CaptureProtectionWndProc);
+        }
+        catch { /* ignore */ }
     }
 
     readonly ZexTtsService _zexTts = new();
@@ -130,7 +185,23 @@ public partial class MainWindow : Window
         };
         SourceInitialized += (_, _) =>
         {
-            try { ApplyCaptureProtection(new WindowInteropHelper(this).Handle); } catch { /* ignore */ }
+            // Deep (whole window tree) + a message hook that re-applies during state changes,
+            // so rapid taskbar minimize/restore can't flash the content in a thumbnail.
+            HookCaptureProtection(this);
+            // Safety net: new WebView2 child windows (created on navigation) inherit protection
+            // within one tick, and anything that silently drops affinity is restored.
+            try
+            {
+                _captureGuardTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+                _captureGuardTimer.Tick += (_, _) =>
+                {
+                    try { ApplyCaptureProtectionDeep(new WindowInteropHelper(this).Handle); } catch { /* ignore */ }
+                    if (_authCoverWindow != null)
+                        try { ApplyCaptureProtectionDeep(new WindowInteropHelper(_authCoverWindow).Handle); } catch { /* ignore */ }
+                };
+                _captureGuardTimer.Start();
+            }
+            catch { /* ignore */ }
         };
         LocationChanged += (_, _) => SyncAuthCoverBounds();
         SizeChanged += (_, _) => SyncAuthCoverBounds();
@@ -219,6 +290,9 @@ public partial class MainWindow : Window
             await Task.WhenAll(
                 ShellView.EnsureCoreWebView2Async(shellEnv),
                 FlowView.EnsureCoreWebView2Async(flowEnv));
+
+            // WebView2 host child windows now exist — protect the whole tree immediately.
+            try { ApplyCaptureProtectionDeep(new WindowInteropHelper(this).Handle); } catch { /* ignore */ }
 
             ConfigureShell();
             _shellReady = true;
@@ -1378,7 +1452,7 @@ public partial class MainWindow : Window
         };
         _authCoverWindow.SourceInitialized += (_, _) =>
         {
-            try { ApplyCaptureProtection(new WindowInteropHelper(_authCoverWindow).Handle); } catch { /* ignore */ }
+            if (_authCoverWindow != null) HookCaptureProtection(_authCoverWindow);
         };
     }
 
