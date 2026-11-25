@@ -104,11 +104,11 @@ function requireAppDeviceAttestation(req) {
   const isWindows = /^windows-exe$/i.test(platform);
   const isAndroid = /^android$/i.test(platform);
 
-  if (isWindows && compareSemver(versionRaw, '8.0.24') < 0) {
+  if (isWindows && compareSemver(versionRaw, '8.0.20') < 0) {
     return {
       ok: false,
       code: 'FORCE_UPDATE',
-      error: 'Please download the latest Flow Browser (v8.0.24+).',
+      error: 'Please download the latest Flow Browser (v8.0.20+).',
       deviceId,
       client,
     };
