@@ -5,7 +5,9 @@ const STORAGE_KEY = 'flowbro_session';
 const CLIENT_API_VERSION_KEY = 'flowbro_client_api_version';
 
 export type FlowRole = 'admin' | 'reseller' | 'user';
-export type ClientApiVersion = 'v11' | 'v12' | 'v13';
+// Any `v<n>` string the server advertises via /api/public/branding. Default is the current live version.
+export type ClientApiVersion = string;
+const DEFAULT_CLIENT_API_VERSION = 'v14';
 
 export type FlowSession = {
   token: string;
@@ -43,17 +45,18 @@ export function downloadFlowAndroidUrl() {
 }
 
 function normalizeClientApiVersion(value: unknown): ClientApiVersion {
+  // Accept whatever the server advertises (e.g. "v14"); fall back to the current default.
   const v = String(value ?? '').trim().toLowerCase();
-  if (v === 'v13' || v === 'v12' || v === 'v11') return v;
-  return 'v13';
+  if (/^v\d+$/.test(v)) return v;
+  return DEFAULT_CLIENT_API_VERSION;
 }
 
 function readCachedClientApiVersion(): ClientApiVersion {
-  if (typeof window === 'undefined') return 'v13';
+  if (typeof window === 'undefined') return DEFAULT_CLIENT_API_VERSION;
   try {
-    return normalizeClientApiVersion(localStorage.getItem(CLIENT_API_VERSION_KEY) || 'v13');
+    return normalizeClientApiVersion(localStorage.getItem(CLIENT_API_VERSION_KEY) || DEFAULT_CLIENT_API_VERSION);
   } catch {
-    return 'v13';
+    return DEFAULT_CLIENT_API_VERSION;
   }
 }
 
@@ -88,7 +91,7 @@ export async function resolveClientApiVersion(force = false): Promise<ClientApiV
   }
 }
 
-/** Build `/api/v13/client/...` from a suffix like `/me`. */
+/** Build `/api/<version>/client/...` (e.g. `/api/v14/client/me`) from a suffix like `/me`. */
 export function clientApiPath(suffix = '', version?: ClientApiVersion) {
   const ver = version || readCachedClientApiVersion();
   const path = String(suffix || '');

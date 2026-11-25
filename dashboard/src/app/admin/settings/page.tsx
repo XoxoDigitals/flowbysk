@@ -498,9 +498,9 @@ export default function AdminSettingsPage() {
           style={{ borderColor: 'var(--a1)' }}
         >
           <div>
-            <div className="text-sm font-medium">Client API v13</div>
+            <div className="text-sm font-medium">Client API v14</div>
             <p className="text-xs text-[var(--ink3)]">
-              Locked on. /api/v2–/api/v12 always return 410 FORCE_UPDATE. Only /api/v13/client is live.
+              Locked on. /api/v2–/api/v13 always return 410 FORCE_UPDATE. Only /api/v14/client is live.
             </p>
           </div>
           <Toggle
