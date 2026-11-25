@@ -147,6 +147,10 @@ public partial class MainWindow : Window
             case 0x0047: // WM_WINDOWPOSCHANGED
             case 0x0086: // WM_NCACTIVATE
                 ApplyCaptureProtectionDeep(hwnd);
+                // Keep the opaque auth cover glued over the WebView2 during the state
+                // change itself, so a fast restore can't reveal the page underneath.
+                if (_authUiMode == AuthUiCover && WindowState != WindowState.Minimized)
+                    PinAuthCoverAboveWebView();
                 break;
         }
         return IntPtr.Zero;
@@ -219,9 +223,24 @@ public partial class MainWindow : Window
         StateChanged += (_, _) =>
         {
             if (WindowState == WindowState.Minimized)
-                HideAuthCoverWindow();
+            {
+                // Do NOT Hide() the cover here. As an owned window it is minimized and
+                // restored in lockstep with this window by the OS, with zero Show()
+                // latency — that latency is exactly what let a restore flash the Google
+                // page for a few ms. Just drop Topmost so it can't float while minimized.
+                if (_authUiMode == AuthUiCover && _authCoverWindow != null)
+                    _authCoverWindow.Topmost = false;
+                else
+                    HideAuthCoverWindow();
+            }
             else
+            {
                 ApplyAuthOverlayState();
+                // Re-pin immediately on restore (ApplyAuthOverlayState posts via the
+                // dispatcher; this closes the synchronous gap).
+                if (_authUiMode == AuthUiCover)
+                    PinAuthCoverAboveWebView();
+            }
         };
         Loaded += async (_, _) => await InitAsync();
         Closing += (_, _) =>
