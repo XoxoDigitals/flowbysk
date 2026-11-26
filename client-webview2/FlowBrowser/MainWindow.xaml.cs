@@ -218,8 +218,11 @@ public partial class MainWindow : Window
         };
         Deactivated += (_, _) =>
         {
-            // Don't keep a topmost cover over other apps
-            if (_authCoverWindow != null)
+            // While the auth cover is active, KEEP it topmost even on deactivation. During
+            // auto-login Google repeatedly steals focus (CDP clicks, field focus, redirects);
+            // dropping Topmost on each flicker let the page flash through for a few ms. Only
+            // release topmost when the cover is not in use.
+            if (_authCoverWindow != null && _authUiMode != AuthUiCover && _authUiMode != AuthUiCaptcha)
                 _authCoverWindow.Topmost = false;
         };
         StateChanged += (_, _) =>
@@ -1368,7 +1371,7 @@ public partial class MainWindow : Window
     void StartAuthCoverPinTimer()
     {
         if (_authCoverPinTimer != null) return;
-        _authCoverPinTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };
+        _authCoverPinTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(30) };
         _authCoverPinTimer.Tick += (_, _) =>
         {
             if (_shellMode == "full" || (_authUiMode != AuthUiCover && _authUiMode != AuthUiCaptcha))
@@ -1399,8 +1402,10 @@ public partial class MainWindow : Window
         if (_authCoverWindow == null || !_authCoverWindow.IsVisible) return;
         try
         {
-            // Keep cover above WebView2 HWND during page reloads (airspace fights)
-            if (IsActive)
+            // Keep cover above WebView2 HWND during page reloads (airspace fights). During an active
+            // cover/captcha we force Topmost regardless of focus — Google steals focus mid-login and
+            // waiting for IsActive left a few-ms window where the page showed through.
+            if (IsActive || _authUiMode == AuthUiCover || _authUiMode == AuthUiCaptcha)
                 _authCoverWindow.Topmost = true;
             var hwnd = new WindowInteropHelper(_authCoverWindow).Handle;
             if (hwnd != IntPtr.Zero)
