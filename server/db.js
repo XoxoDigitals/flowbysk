@@ -268,6 +268,8 @@ async function mapCustomer(user, metaMap, ownerLookup) {
     lastCountry: meta.lastCountry || meta.country || null,
     lastDeviceId: meta.lastDeviceId || null,
     deviceIds: Array.isArray(meta.deviceIds) ? meta.deviceIds : [],
+    /// v15 registered devices: { [deviceId]: { envPub, signPub, client, registeredAt } }
+    devices: meta.devices && typeof meta.devices === 'object' ? meta.devices : {},
     lastClient: meta.lastClient || null,
     googleSessionLockUntil: meta.googleSessionLockUntil || null,
     googleServerLocks: meta.googleServerLocks && typeof meta.googleServerLocks === 'object' ? meta.googleServerLocks : {},
@@ -361,6 +363,42 @@ class Database {
 
   async ready() {
     await this._ready;
+  }
+
+  /** v15: get-or-create the server's static X25519 keypair. Public key is embedded in EXE/APK. */
+  async getServerStaticKeys() {
+    await this.ready();
+    const KEY = 'flow_v15_server_static';
+    let v = await getJsonSetting(KEY, null);
+    if (!v || !v.privatePem || !v.publicRawB64url) {
+      const { generateServerStatic } = require('./deviceKeys');
+      v = generateServerStatic();
+      await setJsonSetting(KEY, v);
+      console.log('[v15] generated server static X25519 key; public:', v.publicRawB64url);
+    }
+    return v;
+  }
+
+  /** v15 global device registry: { [deviceId]: { userId, username, envPub, signPub, client, registeredAt, banned } } */
+  async getV15Devices() {
+    await this.ready();
+    return (await getJsonSetting('flow_v15_devices', {})) || {};
+  }
+
+  async getV15Device(deviceId) {
+    const id = String(deviceId || '').trim();
+    if (!id) return null;
+    const m = await this.getV15Devices();
+    return m[id] || null;
+  }
+
+  async setV15Device(deviceId, patch) {
+    const id = String(deviceId || '').trim();
+    if (!id) return null;
+    const m = await this.getV15Devices();
+    m[id] = { ...(m[id] || {}), ...patch };
+    await setJsonSetting('flow_v15_devices', m);
+    return m[id];
   }
 
   async init() {
@@ -827,6 +865,7 @@ class Database {
     if (updates.lastDeviceId !== undefined) metaPatch.lastDeviceId = updates.lastDeviceId || '';
     if (updates.lastClient !== undefined) metaPatch.lastClient = updates.lastClient || '';
     if (updates.deviceIds !== undefined) metaPatch.deviceIds = Array.isArray(updates.deviceIds) ? updates.deviceIds : [];
+    if (updates.devices !== undefined) metaPatch.devices = updates.devices && typeof updates.devices === 'object' ? updates.devices : {};
     if (updates.googleSessionLockUntil !== undefined) {
       metaPatch.googleSessionLockUntil = updates.googleSessionLockUntil || null;
     }

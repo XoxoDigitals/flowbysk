@@ -31,14 +31,14 @@ const forceUpdatePayload = {
   error: 'Please download the latest Flow Browser.',
 };
 
-/** Only /api/v14/client is live (signed binary attestation). v2–v13 → FORCE_UPDATE. */
-const clientV14Routes = require('./routes/client-v14');
-for (const legacyVer of ['v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', 'v11', 'v12', 'v13']) {
+/** Only /api/v15/client is live (per-device Ed25519 attestation + encrypted bodies). v2–v14 → FORCE_UPDATE. */
+const clientV15Routes = require('./routes/client-v15');
+for (const legacyVer of ['v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', 'v11', 'v12', 'v13', 'v14']) {
   app.use(`/api/${legacyVer}/client`, (req, res) => {
     res.status(410).json(forceUpdatePayload);
   });
 }
-app.use('/api/v14/client', clientV14Routes);
+app.use('/api/v15/client', clientV15Routes);
 app.use('/api/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -70,7 +70,7 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
-        clientApiVersion: 'v14',
+        clientApiVersion: 'v15',
       },
       serverTime: Date.now(),
     });
@@ -146,22 +146,29 @@ app.get('*', (req, res) => {
 
 db.ready()
   .then(async () => {
-    // Lock client API to v14 (v2–v13 always return 410)
+    // Lock client API to v15 (v2–v14 always return 410)
     try {
       const cur = await db.getSettings();
-      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v14') {
-        await db.updateSettings({ clientApiVersion: 'v14' });
-        console.log('[boot] Locked clientApiVersion → v14');
+      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v15') {
+        await db.updateSettings({ clientApiVersion: 'v15' });
+        console.log('[boot] Locked clientApiVersion → v15');
       }
     } catch (err) {
-      console.warn('[boot] could not lock clientApiVersion v14:', err.message);
+      console.warn('[boot] could not lock clientApiVersion v15:', err.message);
+    }
+    // Ensure the v15 server static keypair exists (its public key is embedded in EXE/APK).
+    try {
+      const sk = await db.getServerStaticKeys();
+      console.log('[boot] v15 server static public key:', sk.publicRawB64url);
+    } catch (err) {
+      console.warn('[boot] could not init v15 server static key:', err.message);
     }
     app.listen(PORT, () => {
       console.log(`====================================================`);
       console.log(`Flow Creator Ai API server on port ${PORT}`);
       console.log(`Admin UI:   http://localhost:3100/admin`);
       console.log(`Demo Flow:  http://localhost:${PORT}/demo-flow`);
-      console.log(`Client API: /api/v11/client only (SHA-256 signed attestation); v2–v10 → 410 FORCE_UPDATE`);
+      console.log(`Client API: /api/v15/client only (per-device Ed25519 + encrypted bodies); v2–v14 → 410 FORCE_UPDATE`);
       console.log(`Data store: PostgreSQL (Prisma) — data.json is not live`);
       console.log(`====================================================`);
     });
