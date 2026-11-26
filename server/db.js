@@ -368,11 +368,17 @@ class Database {
   /** v15: get-or-create the server's static X25519 keypair. Public key is embedded in EXE/APK. */
   async getServerStaticKeys() {
     await this.ready();
+    const dk = require('./deviceKeys');
+    // Preferred: fixed keypair provisioned via env (its public key is embedded in the EXE/APK).
+    const envB64 = String(process.env.FLOW_V15_SERVER_STATIC_PRIV_B64 || '').trim();
+    if (envB64) {
+      const privatePem = Buffer.from(envB64, 'base64').toString('utf8');
+      return { privatePem, publicRawB64url: dk.publicFromPrivatePem(privatePem) };
+    }
     const KEY = 'flow_v15_server_static';
     let v = await getJsonSetting(KEY, null);
     if (!v || !v.privatePem || !v.publicRawB64url) {
-      const { generateServerStatic } = require('./deviceKeys');
-      v = generateServerStatic();
+      v = dk.generateServerStatic();
       await setJsonSetting(KEY, v);
       console.log('[v15] generated server static X25519 key; public:', v.publicRawB64url);
     }

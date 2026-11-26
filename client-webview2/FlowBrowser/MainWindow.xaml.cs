@@ -2762,6 +2762,41 @@ public partial class MainWindow : Window
                 }
                 return SecurityGuard.CreateClientAttestation(GetStableDeviceId(), AppVersion(), srvTime, apiVer);
             }
+            case "v15Status":
+                return new { json = Security.DeviceIdentityV15.Status() };
+            case "v15SetServerTime":
+            {
+                if (payload.ValueKind == JsonValueKind.Object &&
+                    payload.TryGetProperty("serverTime", out var stEl) &&
+                    stEl.ValueKind == JsonValueKind.Number && stEl.TryGetInt64(out var stMs))
+                    Security.DeviceIdentityV15.SetServerTime(stMs);
+                return new { success = true };
+            }
+            case "v15PrepareRegister":
+            {
+                var u = payload.TryGetProperty("username", out var uEl) ? uEl.GetString() : "";
+                var p = payload.TryGetProperty("password", out var pEl) ? pEl.GetString() : "";
+                return new { json = Security.DeviceIdentityV15.PrepareRegister(u ?? "", p ?? "") };
+            }
+            case "v15MarkRegistered":
+                Security.DeviceIdentityV15.MarkRegistered();
+                return new { success = true };
+            case "v15Prepare":
+            {
+                var path = payload.TryGetProperty("path", out var pathEl) ? pathEl.GetString() : "";
+                var method = payload.TryGetProperty("method", out var mEl) ? mEl.GetString() : "POST";
+                string? body = null;
+                if (payload.TryGetProperty("body", out var bEl) && bEl.ValueKind == JsonValueKind.String)
+                    body = bEl.GetString();
+                return new { json = Security.DeviceIdentityV15.Prepare(path ?? "", method ?? "POST", body) };
+            }
+            case "v15Open":
+            {
+                var text = payload.TryGetProperty("text", out var tEl) && tEl.ValueKind == JsonValueKind.String ? tEl.GetString() : "";
+                return new { plaintext = Security.DeviceIdentityV15.Open(text ?? "") };
+            }
+            case "v15AntiDebug":
+                return new { tool = Security.DeviceIdentityV15.AntiDebugScan() };
             default:
                 throw new InvalidOperationException("Unknown command: " + cmd);
         }

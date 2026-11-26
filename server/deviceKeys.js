@@ -35,6 +35,13 @@ function pubRaw(keyObject) {
   return der.subarray(der.length - 32);
 }
 
+/** Derive the raw public key (b64url) from a static X25519 private PEM. */
+function publicFromPrivatePem(privatePem) {
+  const priv = crypto.createPrivateKey({ key: privatePem, format: 'pem', type: 'pkcs8' });
+  const pub = crypto.createPublicKey(priv);
+  return b64urlEncode(pubRaw(pub));
+}
+
 /** Generate the server's static X25519 keypair (call once; persist the result). */
 function generateServerStatic() {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('x25519');
@@ -85,6 +92,7 @@ function verifyDeviceSignature(deviceSignPubRawB64url, message, signatureB64url)
 
 module.exports = {
   generateServerStatic,
+  publicFromPrivatePem,
   deriveEnvelopeKey,
   deriveEnvelopeKeyClient,
   openRegistration,

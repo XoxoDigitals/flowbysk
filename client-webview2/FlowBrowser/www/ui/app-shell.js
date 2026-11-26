@@ -2,47 +2,17 @@
 
 /** Active client API base � v7 traditional login only. */
 (function () {
-let CLIENT_API = '/api/v14/client';
+let CLIENT_API = '/api/v15/client';
 
 function normalizeClientApiVersion(value) {
   const v = String(value || '').trim().toLowerCase();
-  if (v === 'v14') return 'v14';
-  if (v === 'v13') return 'v13';
-  if (v === 'v12') return 'v12';
-  if (v === 'v11') return 'v11';
-  return 'v14';
+  if (/^v\d+$/.test(v)) return v;
+  return 'v15';
 }
 
+// v15: request signing + body encryption is handled by the transparent fetch shim in
+// shell-bridge.js (keys live in the EXE). No HMAC attestation headers are added here.
 const _nativeFetch = window.fetch.bind(window);
-window.fetch = async function (input, init) {
-  const urlStr = typeof input === 'string' ? input : (input && input.url ? input.url : String(input || ''));
-  if (/\/api\/v\d+\/client\//i.test(urlStr)) {
-    init = init ? { ...init } : {};
-    const headers = new Headers(init.headers || {});
-    const hasSig = headers.has('X-Flow-Signature') || headers.has('x-flow-signature');
-    if (!hasSig) {
-      try {
-        if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
-          const m = urlStr.match(/\/api\/(v\d+)\/client\//i);
-          const reqVer = m ? m[1].toLowerCase() : normalizeClientApiVersion(CLIENT_API.replace(/\D/g,'') ? 'v'+CLIENT_API.replace(/\D/g,'') : '');
-          const att = await window.electronAPI.getDeviceId({ apiVersion: reqVer });
-          if (att && typeof att === 'object') {
-            if (att.client) headers.set('X-Flow-Client', String(att.client));
-            if (att.deviceId) headers.set('X-Flow-Device-Id', String(att.deviceId));
-            if (att.binHash) headers.set('X-Flow-Bin-Hash', String(att.binHash));
-            if (att.ts != null) headers.set('X-Flow-Ts', String(att.ts));
-            if (att.nonce) headers.set('X-Flow-Nonce', String(att.nonce));
-            if (att.signature) headers.set('X-Flow-Signature', String(att.signature));
-          }
-        }
-      } catch (e) {}
-    }
-    const hObj = {};
-    headers.forEach((v, k) => { hObj[k] = v; });
-    init.headers = hObj;
-  }
-  return _nativeFetch(input, init);
-};
 
 async function resolveClientApiBase(serverUrl, force = false) {
   const base = String(serverUrl || '').replace(/\/$/, '') || 'https://flowcreatorai.site';
@@ -636,10 +606,36 @@ class FlowBrowserApp {
 
     try {
       await resolveClientApiBase(serverUrl);
+
+      // v15: scan for debuggers / analysis tools up front. If detected we still complete login
+      // to obtain a token, then report it (server permanently bans the account + device) and block.
+      let threatTool = '';
+      try { threatTool = (await window.electronAPI?.v15AntiDebug?.()) || ''; } catch (e) {}
+
+      // v15: register this device on first run (binds its public keys to this account).
+      try {
+        const st = await window.electronAPI?.v15Status?.();
+        if (st && !st.registered) {
+          this.btnLoginSubmit.textContent = 'Registering device...';
+          const reg = await window.electronAPI.v15PrepareRegister(username, password);
+          const rres = await fetch(`${serverUrl}${CLIENT_API}/register-device`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Flow-Client': 'windows-exe/9.0.0' },
+            body: JSON.stringify(reg)
+          });
+          const rdata = await rres.json().catch(() => ({}));
+          if (!rdata || !rdata.success) throw new Error(rdata && rdata.error ? rdata.error : 'Device registration failed.');
+          await window.electronAPI.v15MarkRegistered();
+          this.btnLoginSubmit.textContent = 'Authenticating...';
+        }
+      } catch (regErr) {
+        throw new Error(regErr && regErr.message ? regErr.message : 'Device registration failed.');
+      }
+
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
       let deviceId = null;
-      let flowClient = 'windows-exe/8.0.24';
+      let flowClient = 'windows-exe/9.0.0';
       let binHash = '';
       let attestTs = 0;
       let attestNonce = '';
@@ -707,6 +703,17 @@ class FlowBrowserApp {
       }
 
       if (data && data.success) {
+        // v15 anti-debug: a tool was detected — ban server-side (account + device) and block entry.
+        if (threatTool) {
+          try {
+            await fetch(`${serverUrl}${CLIENT_API}/report-threat`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + data.token },
+              body: JSON.stringify({ tool: threatTool })
+            });
+          } catch (e) {}
+          throw new Error('Security tool detected (' + threatTool + '). This account has been blocked.');
+        }
         if (!data.channel?.channelId || !data.channel?.serverPublicKey) {
           throw new Error('Server did not open a secure credential channel. Update the API.');
         }

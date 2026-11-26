@@ -147,7 +147,57 @@
     credDecrypt: (ciphertext, nonce) => invoke('credDecrypt', { ciphertext, nonce }),
     credClear: () => invoke('credClear'),
     switchFlowCookieProfile: (payload) => invoke('switchFlowCookieProfile', payload),
-    getDeviceId: () => invoke('getDeviceId')
+    getDeviceId: () => invoke('getDeviceId'),
+    // v15 per-device key + encrypted-body bridge (keys live in the EXE, never in JS)
+    v15Status: () => invoke('v15Status').then((r) => JSON.parse(r.json)),
+    v15SetServerTime: (serverTime) => invoke('v15SetServerTime', { serverTime }),
+    v15PrepareRegister: (username, password) => invoke('v15PrepareRegister', { username, password }).then((r) => JSON.parse(r.json)),
+    v15MarkRegistered: () => invoke('v15MarkRegistered'),
+    v15Prepare: (path, method, body) => invoke('v15Prepare', { path, method, body }).then((r) => JSON.parse(r.json)),
+    v15Open: (text) => invoke('v15Open', { text }).then((r) => r.plaintext),
+    v15AntiDebug: () => invoke('v15AntiDebug').then((r) => r.tool || '')
+  };
+
+  // ---- v15 transparent fetch shim --------------------------------------------
+  // Signs + envelopes credential/action routes and decrypts their responses, so the
+  // existing app-shell fetch call sites need no changes. Plaintext routes (portal reads
+  // and register-device) pass straight through.
+  window.FlowV15 = window.electronAPI; // alias for v15* helpers
+  const _origFetch = window.fetch.bind(window);
+  const V15_PLAINTEXT = ['/me', '/profile', '/activity', '/register-device'];
+  function v15Suffix(url) {
+    const m = String(url).match(/\/api\/v15\/client(\/[^?#]*)?/);
+    return m ? (m[1] || '') : null;
+  }
+  async function v15Fetch(url, init) {
+    const method = (init.method || 'GET').toUpperCase();
+    let pathOnly;
+    try { pathOnly = new URL(url, location.origin).pathname; } catch (e) { pathOnly = String(url).split('?')[0]; }
+    let bodyJson = null;
+    if (init.body != null) bodyJson = typeof init.body === 'string' ? init.body : JSON.stringify(init.body);
+    const prep = await window.electronAPI.v15Prepare(pathOnly, method, bodyJson);
+    const headers = Object.assign({}, init.headers || {}, prep.headers, { 'Content-Type': 'application/json' });
+    const fetchInit = Object.assign({}, init, { method, headers });
+    if (prep.body) fetchInit.body = JSON.stringify(prep.body); else delete fetchInit.body;
+    const res = await _origFetch(url, fetchInit);
+    const text = await res.text();
+    let plain = text;
+    try { plain = await window.electronAPI.v15Open(text); } catch (e) { /* keep original */ }
+    return new Response(plain, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  window.fetch = function (input, init) {
+    try {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      const suffix = v15Suffix(url);
+      if (suffix !== null && V15_PLAINTEXT.indexOf(suffix) === -1) {
+        return v15Fetch(url, init || {});
+      }
+    } catch (e) { console.error('[v15 shim]', e); }
+    return _origFetch(input, init);
   };
 
   const flowProxy = {
