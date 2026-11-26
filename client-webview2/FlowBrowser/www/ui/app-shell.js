@@ -26,11 +26,11 @@ async function resolveClientApiBase(serverUrl, force = false) {
         try { window.electronAPI?.credSetServerTime?.(st); } catch (e) {}
       }
     }
-    const ver = normalizeClientApiVersion(
-      data?.settings?.clientApiVersion ?? data?.clientApiVersion
-    );
-    CLIENT_API = `/api/${ver}/client`;
-    console.log('[ClientAPI] active:', CLIENT_API);
+    // v9 EXE is permanently v15 (its crypto is v15-only). Never downgrade from branding —
+    // only sync the server clock here. The server's transition mode may still advertise v14
+    // for legacy clients, but this client must stay on v15.
+    CLIENT_API = '/api/v15/client';
+    console.log('[ClientAPI] active (pinned):', CLIENT_API);
     return CLIENT_API;
   } catch (err) {
     if (!force) console.warn('[ClientAPI] branding failed, keeping', CLIENT_API, err?.message || err);

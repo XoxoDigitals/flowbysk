@@ -31,12 +31,25 @@ const forceUpdatePayload = {
   error: 'Please download the latest Flow Browser.',
 };
 
-/** Only /api/v15/client is live (per-device Ed25519 attestation + encrypted bodies). v2–v14 → FORCE_UPDATE. */
+/**
+ * v15 is the live generation. By default v2–v14 → 410 FORCE_UPDATE (hard cutover).
+ * During rollout set FLOW_V15_TRANSITION=1 to ALSO keep v14 live, so v9 can be tested while
+ * v8 users keep working. Remove the flag + restart to perform the hard cutover.
+ */
+const TRANSITION = String(process.env.FLOW_V15_TRANSITION || '') === '1';
 const clientV15Routes = require('./routes/client-v15');
-for (const legacyVer of ['v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', 'v11', 'v12', 'v13', 'v14']) {
+const legacyDead = ['v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', 'v11', 'v12', 'v13'];
+for (const legacyVer of legacyDead) {
   app.use(`/api/${legacyVer}/client`, (req, res) => {
     res.status(410).json(forceUpdatePayload);
   });
+}
+if (TRANSITION) {
+  const clientV14Routes = require('./routes/client-v14');
+  app.use('/api/v14/client', clientV14Routes);
+  console.log('[v15] TRANSITION mode: v14 kept live alongside v15');
+} else {
+  app.use('/api/v14/client', (req, res) => res.status(410).json(forceUpdatePayload));
 }
 app.use('/api/v15/client', clientV15Routes);
 app.use('/api/client', (req, res) => {
@@ -70,7 +83,8 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
-        clientApiVersion: 'v15',
+        // In transition, advertise v14 so legacy v8 clients keep working; v9 EXE ignores this (pinned v15).
+        clientApiVersion: settings.clientApiVersion || (TRANSITION ? 'v14' : 'v15'),
       },
       serverTime: Date.now(),
     });
@@ -146,15 +160,16 @@ app.get('*', (req, res) => {
 
 db.ready()
   .then(async () => {
-    // Lock client API to v15 (v2–v14 always return 410)
+    // Lock client API version. Transition: v14 (legacy clients keep working). Cutover: v15.
     try {
+      const target = TRANSITION ? 'v14' : 'v15';
       const cur = await db.getSettings();
-      if (String(cur?.clientApiVersion || '').toLowerCase() !== 'v15') {
-        await db.updateSettings({ clientApiVersion: 'v15' });
-        console.log('[boot] Locked clientApiVersion → v15');
+      if (String(cur?.clientApiVersion || '').toLowerCase() !== target) {
+        await db.updateSettings({ clientApiVersion: target });
+        console.log('[boot] Locked clientApiVersion →', target);
       }
     } catch (err) {
-      console.warn('[boot] could not lock clientApiVersion v15:', err.message);
+      console.warn('[boot] could not lock clientApiVersion:', err.message);
     }
     // Ensure the v15 server static keypair exists (its public key is embedded in EXE/APK).
     try {
