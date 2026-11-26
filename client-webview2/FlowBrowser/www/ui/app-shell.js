@@ -634,37 +634,11 @@ class FlowBrowserApp {
 
       if (!window.FlowCredChannel) throw new Error('Secure channel module missing');
       const clientPublicKey = await window.FlowCredChannel.generateClientPublicKey();
-      let deviceId = null;
-      let flowClient = 'windows-exe/9.0.0';
-      let binHash = '';
-      let attestTs = 0;
-      let attestNonce = '';
-      let signature = '';
-      try {
-        if (window.electronAPI && typeof window.electronAPI.getDeviceId === 'function') {
-          const apiVer = normalizeClientApiVersion((CLIENT_API.match(/v\d+/)||[''])[0]);
-          const dev = await window.electronAPI.getDeviceId({ apiVersion: apiVer });
-          if (dev && dev.deviceId) deviceId = String(dev.deviceId);
-          if (dev && dev.client) flowClient = String(dev.client);
-          if (dev && dev.binHash) binHash = String(dev.binHash);
-          if (dev && dev.ts != null) attestTs = Number(dev.ts) || 0;
-          if (dev && dev.nonce) attestNonce = String(dev.nonce);
-          if (dev && dev.signature) signature = String(dev.signature);
-        }
-      } catch (err) {
-        console.warn('[AppShell] getDeviceId failed', err); window.__deviceErr = err && err.message ? String(err.message) : String(err);
-      }
-      if (!deviceId) throw new Error('Device ID unavailable' + (window.__deviceErr ? ' (' + window.__deviceErr + ')' : '') + '. Please update the app.');
-      const loginBody = { username, password, clientPublicKey, deviceId, binHash, attestTs, attestNonce, signature };
-      const loginHeaders = {
-        'Content-Type': 'application/json',
-        'X-Flow-Client': flowClient,
-        'X-Flow-Device-Id': deviceId,
-        'X-Flow-Bin-Hash': binHash,
-        'X-Flow-Ts': String(attestTs),
-        'X-Flow-Nonce': attestNonce,
-        'X-Flow-Signature': signature
-      };
+      // v15: the fetch shim (shell-bridge.js) adds all attestation headers (x-flow-client /
+      // device-id / ts / signature) and encrypts the body. Do NOT set any X-Flow-* headers here —
+      // duplicates collide with the shim's and get comma-joined, failing the server regex.
+      const loginBody = { username, password, clientPublicKey };
+      const loginHeaders = { 'Content-Type': 'application/json' };
       const res = await fetch(`${serverUrl}${CLIENT_API}/login`, {
         method: 'POST',
         headers: loginHeaders,
@@ -673,29 +647,12 @@ class FlowBrowserApp {
       let data = await res.json();
 
       if ((!data || !data.success) && data && data.code === 'FORCE_UPDATE') {
+        // v15 is pinned; a single retry (the shim re-signs with fresh ts automatically).
         const switched = await maybeSwitchClientApiOnForceUpdate(serverUrl, data);
         if (switched) {
-          const retryApiVer = normalizeClientApiVersion((CLIENT_API.match(/v\d+/)||[''])[0]);
-          try {
-            const reDev = await window.electronAPI?.getDeviceId?.({ apiVersion: retryApiVer });
-            if (reDev) {
-              if (reDev.binHash) binHash = String(reDev.binHash);
-              if (reDev.ts != null) attestTs = Number(reDev.ts) || 0;
-              if (reDev.nonce) attestNonce = String(reDev.nonce);
-              if (reDev.signature) signature = String(reDev.signature);
-              loginBody.binHash = binHash;
-              loginBody.attestTs = attestTs;
-              loginBody.attestNonce = attestNonce;
-              loginBody.signature = signature;
-              loginHeaders['X-Flow-Bin-Hash'] = binHash;
-              loginHeaders['X-Flow-Ts'] = String(attestTs);
-              loginHeaders['X-Flow-Nonce'] = attestNonce;
-              loginHeaders['X-Flow-Signature'] = signature;
-            }
-          } catch (_) {}
           const retry = await fetch(`${serverUrl}${CLIENT_API}/login`, {
             method: 'POST',
-            headers: loginHeaders,
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(loginBody)
           });
           data = await retry.json();
