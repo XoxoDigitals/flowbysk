@@ -1,0 +1,51 @@
+{
+  "note": "v15 interop vectors. C#/Kotlin must reproduce base91/base122 encode, open the AES envelope, derive the same envelope key, and produce the same Ed25519 signature.",
+  "aesKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "codec": [
+    {
+      "inputUtf8": "",
+      "base91": "",
+      "base122": "!"
+    },
+    {
+      "inputUtf8": "A",
+      "base91": "%A",
+      "base122": "'Aa"
+    },
+    {
+      "inputUtf8": "Hello, Flow!",
+      "base91": ">OwJh>}APGh>WIC",
+      "base122": "#E:Ng¦]yAD<.ºZ%"
+    },
+    {
+      "inputUtf8": "{\"email\":\"x@y.com\",\"pw\":\"P@ss!\",\"n\":7}",
+      "base91": "~Gkfv);*EGNwZF6q{IbgTYUM&$rwFZQcO27gAYUMhT+[!6P",
+      "base122": "%^imw®&s¯2/eHc\"µOR|°s2Qe³\\ihC3b!¶ZiEC¤*}C>.²q"
+    },
+    {
+      "inputUtf8": "café ñ 🔐",
+      "base91": "]Dv<hd2RXf#(D0<y",
+      "base122": "\"RyM¯>Ebdyi?*¿sA"
+    }
+  ],
+  "envelope": {
+    "sealed": {
+      "v": 15,
+      "n": "JJBSew8EB9799FNR",
+      "c": "55Jubp-ngMglM-lTGbRLgv9GkThYrbu06Vu4Kh0HZBCn_ZBjKbXmafuj4k4PwljpXbhfS3DgaXiS6Y2DcAFdQ0Ss0QSyGgZYYUs_15v0Ct1V4szsrC-hpzKESMBE9Bkq6IPjoTm_zz3_7cXjcZdfmRP3iaDUGf3A_rghepM3HW8jPheDg4ufg0t0_YNDTotOXs7X7wmxufrhH0-D4v-6ZRAyPXlXa_92rlaILTy6S60NZrRwAUjoTcbicxmiBVeJ_dVUz7EsqA"
+    },
+    "expectedJson": "{\"stage\":\"password\",\"attemptId\":\"att_123\",\"ts\":1700000000000,\"note\":\"café 🔐\"}"
+  },
+  "x25519": {
+    "serverStaticPubRawB64url": "rEBRivnACpXFdxVxOpUmteqX9BpycvJQ6QCt1TsZoTo",
+    "devicePrivRawHex": "68dcc3236dd374f81e938f41c1a7f51a5ac10d682e6fbe6287d4adb8b30ea87e",
+    "devicePubRawB64url": "1ElnyGZQ3s6oESr4MkM0niJ4D8j-3PYFetVBXBHYeGE",
+    "expectedEnvKeyHex": "3662ecdcf347979a7934ab677ba660d87198faa24be9e1e077c62f3817804475"
+  },
+  "ed25519": {
+    "seedHex": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "pubRawB64url": "vHy8tWNjdfodgkNNRmck2SN39TuYBpXdSdJtDOEiBaU",
+    "message": "v15|win-abc123|POST|/api/v15/client/extension-step|1700000000000|deadbeef",
+    "expectedSignatureB64url": "d-R5tzrqWGL65ccyLjEwLGjH82ZsynfO37fcm1N6F0RuCgRW_G51avGfpPRzpu-jwZdB0bXe5qg-hBkNGNdaAg"
+  }
+}

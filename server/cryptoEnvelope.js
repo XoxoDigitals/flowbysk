@@ -96,42 +96,43 @@ const B122_DECODE = (() => {
 
 function base122Encode(buf) {
   let out = '';
-  let bits = 0, nbits = 0, total = 0;
+  let acc = 0, nbits = 0, total = 0;
   for (let i = 0; i < buf.length; i++) {
-    bits = (bits << 8) | buf[i];
+    acc = (acc << 8) | buf[i];
     nbits += 8;
     while (nbits >= 7) {
       nbits -= 7;
-      const v = (bits >> nbits) & 0x7f;
-      out += B122_ALPHABET[v];
+      out += B122_ALPHABET[(acc >> nbits) & 0x7f];
       total += 7;
     }
+    acc &= (1 << nbits) - 1; // keep only the low nbits (0..6) -> accumulator never overflows
   }
   if (nbits > 0) {
-    const v = (bits << (7 - nbits)) & 0x7f;
-    out += B122_ALPHABET[v];
+    out += B122_ALPHABET[(acc << (7 - nbits)) & 0x7f];
     total += 7;
   }
-  const pad = (total - buf.length * 8); // 0..6 bits of padding in the last symbol
-  return B122_ALPHABET[pad] + out;      // 1-symbol header = pad count
+  const pad = total - buf.length * 8; // 0..6 bits of padding in the last symbol
+  return B122_ALPHABET[pad] + out;    // 1-symbol header = pad count
 }
 
 function base122Decode(str) {
   if (!str || str.length === 0) return Buffer.alloc(0);
   const pad = B122_DECODE.get(str.charCodeAt(0)) || 0;
-  let bits = 0, nbits = 0;
+  void pad;
+  let acc = 0, nbits = 0;
   const out = [];
   for (let i = 1; i < str.length; i++) {
     const v = B122_DECODE.get(str.charCodeAt(i));
     if (v === undefined) continue;
-    bits = (bits << 7) | v;
+    acc = (acc << 7) | v;
     nbits += 7;
     while (nbits >= 8) {
       nbits -= 8;
-      out.push((bits >> nbits) & 0xff);
+      out.push((acc >> nbits) & 0xff);
     }
+    acc &= (1 << nbits) - 1; // bounded accumulator
   }
-  // trailing `nbits` (should equal pad) are padding — discard
+  // trailing `nbits` bits are padding — discard
   return Buffer.from(out);
 }
 

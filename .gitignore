@@ -26,3 +26,6 @@ client-webview2/**/obj/
 client-webview2/**/www-packed/
 client-webview2/**/tools/node_modules/
 
+server/tools/csharp-sealed.json
+server/tools/CryptoInteropV15/bin/
+server/tools/CryptoInteropV15/obj/
