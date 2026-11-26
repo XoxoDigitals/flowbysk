@@ -39,6 +39,8 @@ public partial class MainWindow : Window
     bool _authLoginActive;
     /// <summary>0=off, 1=cover, 2=captcha — only transition when this changes.</summary>
     int _authUiMode = -1;
+    /// <summary>When true the cover spans only the LEFT half (captcha mode) so the right-side reCAPTCHA stays usable.</summary>
+    bool _authCoverHalf = false;
     Window? _authCoverWindow;
     TextBlock? _authCoverTitleText;
     TextBlock? _authCoverSubText;
@@ -970,8 +972,15 @@ public partial class MainWindow : Window
             SetAuthCoverCopy(MemGuard.Ob("D8pwhiLzSECoVfPUYdWc0vo="), MemGuard.Ob("HdZjhyb8WwmyGsGbZ9wSN3zPeI8i8w8Johr0gWbVFzw7jTe4J/hOE7Qa8ZVhz1A="));
             _authLoginActive = true;
             _onGoogleAuth = true;
-            // Do NOT clear _captchaActive on /identifier|/pwd — classic text captcha
-            // lives on those URLs. Clearing here re-covered the page and blocked the user.
+            // The PASSWORD page must be FULLY covered the instant it starts loading — never leave a
+            // half exposed (that is where the password field sits). Reset any leftover captcha flag so
+            // we default to a full cover; ProbeGoogleTextCaptchaAsync re-enables the half cover within
+            // one cycle only if an actual text-captcha is detected on this page.
+            var authUrlLower = (url ?? "").ToLowerInvariant();
+            if (authUrlLower.Contains("/challenge/pwd"))
+                _captchaActive = false;
+            // For other auth URLs (/identifier etc.) keep _captchaActive sticky — a classic text
+            // captcha can live there and must stay solvable.
             ApplyAuthOverlayState();
             _ = ProbeGoogleTextCaptchaAsync(url);
             return;
@@ -1312,8 +1321,9 @@ public partial class MainWindow : Window
             // Idempotent — avoid Hide/Show flicker on every navigation tick
             if (want == _authUiMode)
             {
-                if (want == AuthUiCover)
+                if (want == AuthUiCover || want == AuthUiCaptcha)
                 {
+                    _authCoverHalf = (want == AuthUiCaptcha);
                     SyncAuthCoverBounds();
                     PinAuthCoverAboveWebView();
                 }
@@ -1327,10 +1337,13 @@ public partial class MainWindow : Window
 
             if (want == AuthUiCaptcha)
             {
+                // Captcha: cover only the LEFT half (hides the account email/title); the reCAPTCHA
+                // on the right stays visible and clickable so the user can solve it.
                 AuthOverlay.Visibility = Visibility.Collapsed;
                 CaptchaBanner.Visibility = Visibility.Visible;
-                StopAuthCoverPinTimer();
-                HideAuthCoverWindow();
+                _authCoverHalf = true;
+                ShowAuthCoverWindow();
+                StartAuthCoverPinTimer();
                 return;
             }
 
@@ -1338,6 +1351,7 @@ public partial class MainWindow : Window
             {
                 AuthOverlay.Visibility = Visibility.Visible;
                 CaptchaBanner.Visibility = Visibility.Collapsed;
+                _authCoverHalf = false;
                 ShowAuthCoverWindow();
                 StartAuthCoverPinTimer();
                 return;
@@ -1345,6 +1359,7 @@ public partial class MainWindow : Window
 
             AuthOverlay.Visibility = Visibility.Collapsed;
             CaptchaBanner.Visibility = Visibility.Collapsed;
+            _authCoverHalf = false;
             StopAuthCoverPinTimer();
             HideAuthCoverWindow();
         });
@@ -1356,7 +1371,7 @@ public partial class MainWindow : Window
         _authCoverPinTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };
         _authCoverPinTimer.Tick += (_, _) =>
         {
-            if (_shellMode == "full" || _authUiMode != AuthUiCover)
+            if (_shellMode == "full" || (_authUiMode != AuthUiCover && _authUiMode != AuthUiCaptcha))
             {
                 HideAuthCoverWindow();
                 return;
@@ -1398,34 +1413,7 @@ public partial class MainWindow : Window
     {
         if (_authCoverWindow != null) return;
 
-        var spinBorder = new Border
-        {
-            Width = 52,
-            Height = 52,
-            CornerRadius = new CornerRadius(26),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(0x40, 0xCB, 0xD5, 0xE1)),
-            BorderThickness = new Thickness(3),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 0, 0, 18),
-            RenderTransformOrigin = new Point(0.5, 0.5),
-            Child = new System.Windows.Shapes.Ellipse
-            {
-                Width = 10,
-                Height = 10,
-                Fill = new SolidColorBrush(Color.FromRgb(0x38, 0xBD, 0xF8)),
-                HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Top,
-                Margin = new Thickness(0, 2, 2, 0)
-            }
-        };
-        var rotate = new RotateTransform();
-        spinBorder.RenderTransform = rotate;
-        var spinAnim = new DoubleAnimation(0, 360, new Duration(TimeSpan.FromSeconds(0.75)))
-        {
-            RepeatBehavior = RepeatBehavior.Forever
-        };
-        rotate.BeginAnimation(RotateTransform.AngleProperty, spinAnim);
-
+        // Static cover — no spinner / no animation (nothing moving that could hint at a live page underneath).
         var panel = new StackPanel
         {
             VerticalAlignment = VerticalAlignment.Center,
@@ -1450,7 +1438,6 @@ public partial class MainWindow : Window
             TextAlignment = TextAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center
         };
-        panel.Children.Add(spinBorder);
         panel.Children.Add(_authCoverTitleText);
         panel.Children.Add(_authCoverSubText);
 
@@ -1731,7 +1718,8 @@ public partial class MainWindow : Window
                     _authCoverWindow.Left = topLeft.X;
                     _authCoverWindow.Top = topLeft.Y;
                 }
-                _authCoverWindow.Width = Math.Max(2, ActualWidth - RightBulkMargin);
+                var fullW = Math.Max(2, ActualWidth - RightBulkMargin);
+                _authCoverWindow.Width = _authCoverHalf ? Math.Max(2, fullW / 2) : fullW;
                 _authCoverWindow.Height = Math.Max(2, ActualHeight - _chromeHeight);
             }
         }
