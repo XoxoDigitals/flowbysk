@@ -620,7 +620,7 @@ class FlowBrowserApp {
           const reg = await window.electronAPI.v15PrepareRegister(username, password);
           const rres = await fetch(`${serverUrl}${CLIENT_API}/register-device`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Flow-Client': 'windows-exe/9.0.0' },
+            headers: { 'Content-Type': 'application/json', 'X-Flow-Client': 'windows-exe/9.1.0' },
             body: JSON.stringify(reg)
           });
           const rdata = await rres.json().catch(() => ({}));

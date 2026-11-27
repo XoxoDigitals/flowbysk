@@ -2163,3 +2163,13 @@ html.login-active #android-settings-sheet,
 
 /* v9: permanently hide the debug URL bar */
 #debug-url-bar { display: none !important; }
+
+/* v9.1: always-visible close button (window has no taskbar button during login) */
+#btn-global-close.global-close {
+  position: fixed; top: 8px; right: 12px;
+  width: 30px; height: 30px; z-index: 2147483647;
+  display: flex !important; align-items: center; justify-content: center;
+  background: rgba(220,38,38,0.88); color: #fff;
+  border: none; border-radius: 8px; cursor: pointer; padding: 0;
+}
+#btn-global-close.global-close:hover { background: #dc2626; }

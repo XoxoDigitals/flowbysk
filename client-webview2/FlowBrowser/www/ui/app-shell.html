@@ -20,6 +20,10 @@
   <link rel="stylesheet" href="app-shell.css">
 </head>
 <body>
+  <!-- Always-visible close button (window has no taskbar button during login; this guarantees a way out) -->
+  <button id="btn-global-close" class="global-close no-drag" type="button" title="Close (Alt+F4)" aria-label="Close">
+    <svg width="14" height="14" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.6"/></svg>
+  </button>
   <!-- Window Drag Header & Restricted Toolbar -->
   <header id="top-toolbar" class="toolbar-container">
     <div class="toolbar-left app-drag">

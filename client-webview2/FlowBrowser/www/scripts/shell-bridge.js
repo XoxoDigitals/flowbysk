@@ -305,6 +305,12 @@
   }
 
   document.addEventListener('DOMContentLoaded', () => {
+    // Always-visible close button (window drops its taskbar button during login).
+    try {
+      var gc = document.getElementById('btn-global-close');
+      if (gc) gc.addEventListener('click', function () { try { window.electronAPI.closeWindow(); } catch (e) {} });
+    } catch (e) {}
+
     const container = document.getElementById('webview-container');
     if (container) {
       container.innerHTML = '';

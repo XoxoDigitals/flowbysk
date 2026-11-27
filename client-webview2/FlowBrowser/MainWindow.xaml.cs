@@ -169,6 +169,40 @@ public partial class MainWindow : Window
         catch { /* ignore */ }
     }
 
+    // ITaskbarList: remove/add the taskbar button WITHOUT recreating the HWND (so WebView2 and the
+    // capture protection stay intact). During Google login the button is removed entirely, so there
+    // is no taskbar thumbnail to leak and no icon to rapid-click into a minimize/restore storm.
+    [ComImport, Guid("56FDF342-FD6D-11D0-958A-006097C9A090"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface ITaskbarList
+    {
+        void HrInit();
+        void AddTab(IntPtr hwnd);
+        void DeleteTab(IntPtr hwnd);
+        void ActivateTab(IntPtr hwnd);
+        void SetActiveAlt(IntPtr hwnd);
+    }
+
+    [ComImport, Guid("56FDF344-FD6D-11D0-958A-006097C9A090")]
+    class CTaskbarList { }
+
+    bool _taskbarButtonShown = true;
+
+    void SetTaskbarButton(bool visible)
+    {
+        if (_taskbarButtonShown == visible) return;
+        try
+        {
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd == IntPtr.Zero) return;
+            var tbl = (ITaskbarList)new CTaskbarList();
+            tbl.HrInit();
+            if (visible) tbl.AddTab(hwnd); else tbl.DeleteTab(hwnd);
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(tbl);
+            _taskbarButtonShown = visible;
+        }
+        catch { /* best effort */ }
+    }
+
     readonly ZexTtsService _zexTts = new();
 
     public MainWindow()
@@ -194,6 +228,10 @@ public partial class MainWindow : Window
             // Deep (whole window tree) + a message hook that re-applies during state changes,
             // so rapid taskbar minimize/restore can't flash the content in a thumbnail.
             HookCaptureProtection(this);
+            // Remove from the taskbar until Google login completes — no taskbar button means no
+            // thumbnail to leak and no icon to rapid-click into a minimize/restore storm.
+            _taskbarButtonShown = true; // starts in taskbar per XAML; flip it off now
+            SetTaskbarButton(false);
             // Safety net: new WebView2 child windows (created on navigation) inherit protection
             // within one tick, and anything that silently drops affinity is restored.
             try
@@ -379,6 +417,32 @@ public partial class MainWindow : Window
             CoreWebView2HostResourceAccessKind.Allow);
     }
 
+    async Task LoadFlowExtensionsAsync(CoreWebView2 core)
+    {
+        try
+        {
+            var extDir = Path.Combine(_wwwRoot, "extensions", "rektcaptcha");
+            if (!Directory.Exists(extDir) || !File.Exists(Path.Combine(extDir, "manifest.json")))
+                return;
+
+            var existing = await core.Profile.GetBrowserExtensionsAsync();
+            foreach (var ext in existing)
+            {
+                if (string.Equals(ext.Name, "rektCaptcha: reCaptcha Solver", StringComparison.OrdinalIgnoreCase))
+                {
+                    try { await ext.RemoveAsync(); } catch { /* ignore */ }
+                }
+            }
+
+            var loaded = await core.Profile.AddBrowserExtensionAsync(extDir);
+            Debug.WriteLine("[Extensions] Loaded: " + loaded.Name + " (" + loaded.Id + ")");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("[Extensions] LoadFlowExtensionsAsync error: " + ex.Message);
+        }
+    }
+
     async Task ConfigureFlowAsync()
     {
         var core = FlowView.CoreWebView2;
@@ -391,6 +455,7 @@ public partial class MainWindow : Window
 
         ApplyChromeUserAgent(core);
         core.WebMessageReceived += Flow_WebMessageReceived;
+        await LoadFlowExtensionsAsync(core);
 
         core.SetVirtualHostNameToFolderMapping(
             "app.flowbrowser.localhost",
@@ -1363,6 +1428,10 @@ public partial class MainWindow : Window
                 want = AuthUiCover;
             else
                 want = AuthUiOff;
+
+            // Taskbar button: only show once login is complete (cover off AND in the Flow workspace,
+            // not the login screen). During login there is no taskbar button to leak or rapid-click.
+            SetTaskbarButton(want == AuthUiOff && _shellMode != "full");
 
             // Idempotent — avoid Hide/Show flicker on every navigation tick
             if (want == _authUiMode)
