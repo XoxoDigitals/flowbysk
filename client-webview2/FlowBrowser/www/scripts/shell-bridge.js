@@ -166,7 +166,9 @@
   const _origFetch = window.fetch.bind(window);
   const V15_PLAINTEXT = ['/me', '/profile', '/activity', '/register-device'];
   function v15Suffix(url) {
-    const m = String(url).match(/\/api\/v15\/client(\/[^?#]*)?/);
+    // Match any versioned client path (v15, v16, …) so the shim keeps signing/enveloping
+    // credential routes across API version bumps.
+    const m = String(url).match(/\/api\/v\d+\/client(\/[^?#]*)?/);
     return m ? (m[1] || '') : null;
   }
   async function v15Fetch(url, init) {

@@ -84,8 +84,9 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
-        // In transition, advertise v14 so legacy v8 clients keep working; v9+ EXE ignores this (pinned).
-        clientApiVersion: settings.clientApiVersion || (TRANSITION ? 'v14' : 'v16'),
+        // Always advertise the LIVE version (never a stale DB value that may point at a dead route).
+        // Transition: v14 (legacy v8 clients). Cutover: v16. v9+ EXE ignores this anyway (pinned).
+        clientApiVersion: (TRANSITION ? 'v14' : 'v16'),
       },
       serverTime: Date.now(),
     });
