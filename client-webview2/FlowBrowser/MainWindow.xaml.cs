@@ -694,7 +694,7 @@ public partial class MainWindow : Window
     var d=document.getElementById(ID);
     if(d) return d;
     d=document.createElement('div'); d.id=ID;
-    d.setAttribute('style','position:fixed;left:0;top:0;right:0;bottom:0;width:100vw;height:100vh;z-index:2147483647;background:#020617;display:none;align-items:center;justify-content:center;font-family:system-ui,Segoe UI,Arial,sans-serif;color:#F8FAFC');
+    d.setAttribute('style','position:fixed;left:0;top:0;right:0;bottom:0;width:100vw;height:100vh;z-index:2147483647;background:#020617;display:none;align-items:center;justify-content:center;font-family:system-ui,Segoe UI,Arial,sans-serif;color:#F8FAFC;pointer-events:none');
     d.innerHTML='<div style=""text-align:center;max-width:420px;padding:24px"">'
       +'<div style=""font-size:22px;font-weight:700;margin-bottom:8px"">Signing you in…</div>'
       +'<div style=""font-size:14px;color:#94A3B8"">Please wait while we securely sign you in.</div></div>';
@@ -703,13 +703,15 @@ public partial class MainWindow : Window
   }
   function isAuthHost(){var h=location.hostname||'';return /(^|\.)accounts\.google\.com$/.test(h)||/(^|\.)accounts\.youtube\.com$/.test(h);}
   function needsUser(){
+    // Lift ONLY for a real captcha the user must physically type. Everything else — including the
+    // selection / passkey / 'choose how to sign in' pages — stays covered, because those still show
+    // the account email, which must never flash (thumbnail or restore). Auto-login clicks through
+    // them under the cover via CDP, which does not need the page visible.
     try{
-      var p=location.pathname||'';
-      if(/\/challenge\/(selection|sk|iap|dp|ipp|az|kpe|ootp|skotp)/i.test(p)) return true;
-      var t=((document.body&&document.body.innerText)||'').slice(0,4000).toLowerCase();
-      if(/choose how you want to sign in|more ways to sign in|type the (text|characters)|characters you see|enter the characters|use your passkey|tap yes|get a one-time security code/.test(t)) return true;
-      var rc=document.querySelector('iframe[src*=""recaptcha""], #captchaimg, img[src*=""captcha"" i]');
+      var rc=document.querySelector('iframe[src*=""recaptcha""], #captchaimg, img[src*=""captcha"" i], img[alt*=""captcha"" i]');
       if(rc){var r=rc.getBoundingClientRect(); if(r.width>20&&r.height>20) return true;}
+      var tin=document.querySelector('input[name=""ca""], input#ca, input#captcha, input[name=""captcha"" i]');
+      if(tin){var rr=tin.getBoundingClientRect(); if(rr.width>20&&rr.height>10) return true;}
     }catch(e){}
     return false;
   }
