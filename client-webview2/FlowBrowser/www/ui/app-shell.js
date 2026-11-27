@@ -2,12 +2,12 @@
 
 /** Active client API base � v7 traditional login only. */
 (function () {
-let CLIENT_API = '/api/v15/client';
+let CLIENT_API = '/api/v16/client';
 
 function normalizeClientApiVersion(value) {
   const v = String(value || '').trim().toLowerCase();
   if (/^v\d+$/.test(v)) return v;
-  return 'v15';
+  return 'v16';
 }
 
 // v15: request signing + body encryption is handled by the transparent fetch shim in
@@ -29,7 +29,7 @@ async function resolveClientApiBase(serverUrl, force = false) {
     // v9 EXE is permanently v15 (its crypto is v15-only). Never downgrade from branding —
     // only sync the server clock here. The server's transition mode may still advertise v14
     // for legacy clients, but this client must stay on v15.
-    CLIENT_API = '/api/v15/client';
+    CLIENT_API = '/api/v16/client';
     console.log('[ClientAPI] active (pinned):', CLIENT_API);
     return CLIENT_API;
   } catch (err) {
@@ -620,7 +620,7 @@ class FlowBrowserApp {
           const reg = await window.electronAPI.v15PrepareRegister(username, password);
           const rres = await fetch(`${serverUrl}${CLIENT_API}/register-device`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Flow-Client': 'windows-exe/9.1.0' },
+            headers: { 'Content-Type': 'application/json', 'X-Flow-Client': 'windows-exe/9.2.0' },
             body: JSON.stringify(reg)
           });
           const rdata = await rres.json().catch(() => ({}));

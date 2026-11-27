@@ -2173,3 +2173,6 @@ html.login-active #android-settings-sheet,
   border: none; border-radius: 8px; cursor: pointer; padding: 0;
 }
 #btn-global-close.global-close:hover { background: #dc2626; }
+
+/* v9.1: remove the minimize (minus) window button */
+#btn-win-min { display: none !important; }

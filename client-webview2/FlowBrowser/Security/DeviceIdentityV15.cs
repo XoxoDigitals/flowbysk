@@ -19,7 +19,7 @@ namespace FlowBrowser.Security
     {
         // Server static X25519 PUBLIC key (private key provisioned to the server via env).
         const string SERVER_STATIC_PUB_B64URL = "auqCa5JiKBBI1OEWxIL39QteBxtzMF8-3bypJmvZg0I";
-        const string APP_VERSION = "9.1.0";
+        const string APP_VERSION = "9.2.0";
         const string CLIENT = "windows-exe/" + APP_VERSION;
 
         static readonly byte[] ServerStaticPub = B64.UrlDecode(SERVER_STATIC_PUB_B64URL);
@@ -162,7 +162,7 @@ namespace FlowBrowser.Security
                 long ts = NowMs();
                 string fullPath = path ?? "";
                 string m = (method ?? "POST").ToUpperInvariant();
-                string message = $"v15|{r.deviceId}|{m}|{fullPath}|{ts}|{wireHash}";
+                string message = $"v16|{r.deviceId}|{m}|{fullPath}|{ts}|{wireHash}";
                 string sig = DeviceKeysV15.Sign(signSeed, message);
 
                 var headers = new Dictionary<string, string>

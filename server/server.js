@@ -32,13 +32,14 @@ const forceUpdatePayload = {
 };
 
 /**
- * v15 is the live generation. By default v2–v14 → 410 FORCE_UPDATE (hard cutover).
- * During rollout set FLOW_V15_TRANSITION=1 to ALSO keep v14 live, so v9 can be tested while
- * v8 users keep working. Remove the flag + restart to perform the hard cutover.
+ * v16 is the live generation. By default v2–v15 → 410 FORCE_UPDATE (hard cutover) — this kills
+ * every prior build, including the v15 test builds. During rollout set FLOW_V15_TRANSITION=1 to
+ * ALSO keep v14 live, so the new v16 EXE can be tested while existing v8 users keep working.
+ * Remove the flag + restart to perform the full hard cutover (v16-only).
  */
 const TRANSITION = String(process.env.FLOW_V15_TRANSITION || '') === '1';
-const clientV15Routes = require('./routes/client-v15');
-const legacyDead = ['v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', 'v11', 'v12', 'v13'];
+const clientV16Routes = require('./routes/client-v16');
+const legacyDead = ['v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', 'v11', 'v12', 'v13', 'v15'];
 for (const legacyVer of legacyDead) {
   app.use(`/api/${legacyVer}/client`, (req, res) => {
     res.status(410).json(forceUpdatePayload);
@@ -47,11 +48,11 @@ for (const legacyVer of legacyDead) {
 if (TRANSITION) {
   const clientV14Routes = require('./routes/client-v14');
   app.use('/api/v14/client', clientV14Routes);
-  console.log('[v15] TRANSITION mode: v14 kept live alongside v15');
+  console.log('[v16] TRANSITION mode: v14 kept live alongside v16 (v15 is dead)');
 } else {
   app.use('/api/v14/client', (req, res) => res.status(410).json(forceUpdatePayload));
 }
-app.use('/api/v15/client', clientV15Routes);
+app.use('/api/v16/client', clientV16Routes);
 app.use('/api/client', (req, res) => {
   res.status(410).json(forceUpdatePayload);
 });
@@ -83,8 +84,8 @@ app.get('/api/public/branding', async (req, res) => {
         contactPageEnabled: settings.contactPageEnabled !== false,
         maintenanceMode: !!settings.maintenanceMode,
         socialLinks: settings.socialLinks || {},
-        // In transition, advertise v14 so legacy v8 clients keep working; v9 EXE ignores this (pinned v15).
-        clientApiVersion: settings.clientApiVersion || (TRANSITION ? 'v14' : 'v15'),
+        // In transition, advertise v14 so legacy v8 clients keep working; v9+ EXE ignores this (pinned).
+        clientApiVersion: settings.clientApiVersion || (TRANSITION ? 'v14' : 'v16'),
       },
       serverTime: Date.now(),
     });
@@ -160,9 +161,9 @@ app.get('*', (req, res) => {
 
 db.ready()
   .then(async () => {
-    // Lock client API version. Transition: v14 (legacy clients keep working). Cutover: v15.
+    // Lock client API version. Transition: v14 (legacy clients keep working). Cutover: v16.
     try {
-      const target = TRANSITION ? 'v14' : 'v15';
+      const target = TRANSITION ? 'v14' : 'v16';
       const cur = await db.getSettings();
       if (String(cur?.clientApiVersion || '').toLowerCase() !== target) {
         await db.updateSettings({ clientApiVersion: target });
@@ -183,7 +184,7 @@ db.ready()
       console.log(`Flow Creator Ai API server on port ${PORT}`);
       console.log(`Admin UI:   http://localhost:3100/admin`);
       console.log(`Demo Flow:  http://localhost:${PORT}/demo-flow`);
-      console.log(`Client API: /api/v15/client only (per-device Ed25519 + encrypted bodies); v2–v14 → 410 FORCE_UPDATE`);
+      console.log(`Client API: /api/v16/client only (per-device Ed25519 + encrypted bodies); v2–v15 → 410 FORCE_UPDATE`);
       console.log(`Data store: PostgreSQL (Prisma) — data.json is not live`);
       console.log(`====================================================`);
     });
