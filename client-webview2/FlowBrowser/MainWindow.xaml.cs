@@ -678,8 +678,49 @@ public partial class MainWindow : Window
             };
         };
 
+        // In-WebView cover injected at document-create — present from the FIRST paint of every
+        // Google page, so there is no navigation gap and no EXE-window focus/z-order flash. It
+        // covers the credential-entry pages (email / password / TOTP, where automation types
+        // secrets) and AUTO-LIFTS on interactive pages (captcha / "choose how to sign in"), where
+        // the user must act and the EXE half-cover takes over. Belt-and-suspenders with the EXE cover.
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(FlowCoverScript);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(_flowInject);
     }
+
+    const string FlowCoverScript = @"(function(){
+  if (window.__flowCoverInit) return; window.__flowCoverInit = true;
+  var ID='__flow_cover_v9';
+  function mk(){
+    var d=document.getElementById(ID);
+    if(d) return d;
+    d=document.createElement('div'); d.id=ID;
+    d.setAttribute('style','position:fixed;left:0;top:0;right:0;bottom:0;width:100vw;height:100vh;z-index:2147483647;background:#020617;display:none;align-items:center;justify-content:center;font-family:system-ui,Segoe UI,Arial,sans-serif;color:#F8FAFC');
+    d.innerHTML='<div style=""text-align:center;max-width:420px;padding:24px"">'
+      +'<div style=""font-size:22px;font-weight:700;margin-bottom:8px"">Signing you in…</div>'
+      +'<div style=""font-size:14px;color:#94A3B8"">Please wait while we securely sign you in.</div></div>';
+    (document.body||document.documentElement).appendChild(d);
+    return d;
+  }
+  function isAuthHost(){var h=location.hostname||'';return /(^|\.)accounts\.google\.com$/.test(h)||/(^|\.)accounts\.youtube\.com$/.test(h);}
+  function needsUser(){
+    try{
+      var p=location.pathname||'';
+      if(/\/challenge\/(selection|sk|iap|dp|ipp|az|kpe|ootp|skotp)/i.test(p)) return true;
+      var t=((document.body&&document.body.innerText)||'').slice(0,4000).toLowerCase();
+      if(/choose how you want to sign in|more ways to sign in|type the (text|characters)|characters you see|enter the characters|use your passkey|tap yes|get a one-time security code/.test(t)) return true;
+      var rc=document.querySelector('iframe[src*=""recaptcha""], #captchaimg, img[src*=""captcha"" i]');
+      if(rc){var r=rc.getBoundingClientRect(); if(r.width>20&&r.height>20) return true;}
+    }catch(e){}
+    return false;
+  }
+  var forced=null;
+  window.__flowSetCover=function(v){ forced=(v===null?null:!!v); apply(); };
+  function apply(){ try{ var d=mk(); var show=(forced!==null)?forced:(isAuthHost()&&!needsUser()); d.style.display=show?'flex':'none'; if(show) (document.body||document.documentElement).appendChild(d); }catch(e){} }
+  mk(); apply();
+  try{ new MutationObserver(apply).observe(document.documentElement,{childList:true,subtree:true}); }catch(e){}
+  setInterval(apply,50);
+  document.addEventListener('DOMContentLoaded',function(){ mk(); apply(); });
+})();";
 
     void ApplyChromeUserAgent(CoreWebView2 core)
     {
